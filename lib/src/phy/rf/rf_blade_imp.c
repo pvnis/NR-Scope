@@ -121,8 +121,15 @@ int rf_blade_start_rx_stream(void* h, UNUSED bool now)
   rf_blade_handler_t* handler = (rf_blade_handler_t*)h;
 
   /* Configure the device's RX module for use with the sync interface.
-   * SC16 Q11 samples *with* metadata are used. */
-  uint32_t buffer_size_rx = ms_buffer_size_rx * (handler->rx_rate / 1000 / 1024);
+   * SC16 Q11 samples *with* metadata are used.
+   *
+   * buffer_size counts samples across every chain, not per chain: libbladeRF
+   * documents 2048 samples on two channels as generating 4096 total. So it is
+   * scaled by the chain count, otherwise a 2 chain stream would hold half the
+   * time depth of a 1 chain one and the host would get half the slack before
+   * the device FIFO overruns. The result stays a multiple of 1024, which
+   * bladerf_sync_config() requires, because the single chain value already is. */
+  uint32_t buffer_size_rx = ms_buffer_size_rx * (handler->rx_rate / 1000 / 1024) * handler->nof_rx_channels;
 
   status = bladerf_sync_config(handler->dev,
                                blade_rx_layout(handler->nof_rx_channels),
@@ -549,23 +556,34 @@ int rf_blade_recv_with_time_multi(void*    h,
 
   timestamp_to_secs(handler->rx_rate, meta.timestamp, secs, frac_secs);
 
-  /* Deinterleave and scale in one pass. The stream arrives as one I/Q pair per
-  chain per sample instant -- ch0_I, ch0_Q, ch1_I, ch1_Q, ch0_I, ... -- so chain
-  c starts at offset 2*c and strides by 2*nof_ch.
-  The 1/2048 matches the scale srsran_vec_convert_if() is given on the single
-  channel path, so both produce the same full scale. */
-  const int16_t* src = handler->rx_buffer;
+  /* The stream arrives interleaved, one I/Q pair per chain per sample instant:
+  ch0_I, ch0_Q, ch1_I, ch1_Q, ch0_I, ... Deinterleaving it by hand with a stride
+  is a scalar, cache-hostile pass over 61 M samples/s at 2x30.72 Msps, and it
+  sits directly on the receive thread, which is what makes the device FIFO
+  overrun.
+
+  So the reordering is left to libbladeRF, which does it in place and knows the
+  format, and the conversion is then two contiguous SIMD passes.
+  The 1/2048 matches the scale the single channel path passes to
+  srsran_vec_convert_if(), so both reach the same full scale. */
+  /* Plain SC16_Q11 and not the _META variant the stream is configured with:
+  bladerf_sync_rx() reports the metadata through its own argument and hands back
+  a buffer of samples alone, whereas passing _META here would skip the first 16
+  bytes as a header that is not there and shift every chain by two samples. */
+  status = bladerf_deinterleave_stream_buffer(
+      blade_rx_layout(nof_ch), BLADERF_FORMAT_SC16_Q11, nsamples * nof_ch, handler->rx_buffer);
+  if (status != 0) {
+    ERROR("RX deinterleave failed: %s", bladerf_strerror(status));
+    return -1;
+  }
+
+  /* Now laid out as nof_ch contiguous blocks of nsamples, so chain c starts at
+  int16 offset 2 * c * nsamples. */
   for (uint32_t c = 0; c < nof_ch; c++) {
-    float* dst = (float*)data[c];
-    if (dst == NULL) {
+    if (data[c] == NULL) {
       continue;
     }
-    const int16_t* p = src + 2 * c;
-    for (uint32_t i = 0; i < nsamples; i++) {
-      dst[2 * i]     = (float)p[0] / 2048.0f;
-      dst[2 * i + 1] = (float)p[1] / 2048.0f;
-      p += 2 * nof_ch;
-    }
+    srsran_vec_convert_if(&handler->rx_buffer[2 * c * nsamples], 2048, (float*)data[c], 2 * nsamples);
   }
 
   return nsamples;
