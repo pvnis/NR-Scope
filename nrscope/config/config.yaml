@@ -3,16 +3,20 @@ usrp_setting_0:
   device_name: bladeRF
   ssb_freq: 3345600000 # OCUDU gNB dl_ssb_arfcn=623040 -> 3345.6 MHz (GSCN 7739). NOT dl_arfcn 623334/3350.01 MHz, that is the carrier center.
   band_list: [78] # Scan specific bands with the cell scan function. Will do full scan if left commented.
-  # pci: 1 # Specify the desired Physical cell id. If specified, NR-Scope will proceed only if the decoded PCI matches this value.
+  pci: 1 # Specify the desired Physical cell id. If specified, NR-Scope will proceed only if the decoded PCI matches this value.
   rf_args: "libusb:serial=4757561046804c67984b9ab64fe72abb"
   # rf_args: "clock=external,type=x300,serial=32B0F2F,master_clock_rate=200000000,sampling_rate=25000000" ## For TwinRX daughterboard
   # rf_args: "clock=external,type=x300,sampling_rate=23040000" ## For CBX daughterboard
+  
+  
   rx_gain: 45 # for x310 CBX, max rx gain is 31.5, for b210, it's around 80, for x310 TwinRX, max rx gain is 90
   min_rx_gain: 45
   max_rx_gain: 45
   srate_hz: 30720000 # the sampling rate of USRP, integer division of 200MHz for TwinRX, and 5G sampling rate for CBX: 11520000 or 23040000
   srsran_srate_hz: 30720000 # the sampling for real signal processing, should be in 5G sampling rate, multiple of 1.92 MHz. 
   nof_carriers: 1 # srsRAN rf setting, always set to be 1 for now.
+  
+  
   # Receive chains captured in parallel, 1 to 4. Only chain 0 is synchronised and
   # decoded -- SIB, RACH and DCI all read it alone -- so raising this does not
   # improve sniffing. The extra chains are captured for the sensing path, which
