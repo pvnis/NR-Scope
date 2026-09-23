@@ -35,6 +35,7 @@
 
 #include "rf_uhd_generic.h"
 #include "rf_uhd_imp.h"
+#include <array>
 
 #ifdef UHD_ENABLE_RFNOC
 #include "rf_uhd_rfnoc.h"

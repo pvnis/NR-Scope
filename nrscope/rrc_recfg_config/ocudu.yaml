@@ -1,0 +1,13 @@
+# RRC reconfiguration parameters for the local OCUDU gNB (PCI 1, n78, 20 MHz).
+#
+# NR-Scope cannot read mcs-Table out of an encrypted RRCReconfiguration, so it
+# falls back to the 64QAM table. This gNB configures qam256 for PDSCH, which
+# made NR-Scope report 64QAM instead of 256QAM on 202 of 210 downlink grants
+# and, because the MCS index maps to a different spectral efficiency, compute
+# the wrong transport block size for them too.
+#
+# Verified against the gNB's own scheduler log: uplink really does use the
+# 64QAM table here, so pusch_cfg is deliberately left unset.
+
+pdsch_cfg:
+  mcs_table: 256qam

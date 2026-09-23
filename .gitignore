@@ -7,3 +7,11 @@ build/
 .cache/
 
 nrscope/twinrx_analysis/
+
+__pycache__/
+
+# Capture artefacts: gNB scheduler logs and NR-Scope's own CSV output, kept
+# locally to cross-check decoded DCIs with validate_dci.py but far too large
+# and too run-specific to belong in the history.
+gnb.log
+*.csv

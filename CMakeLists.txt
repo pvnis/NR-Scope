@@ -63,19 +63,19 @@ configure_file(
 # Options
 ########################################################################
 option(ENABLE_SRSUE          "Build srsUE application"                  ON)
-option(ENABLE_SRSENB         "Build srsENB application"                 ON)
+option(ENABLE_SRSENB         "Build srsENB application"                 OFF)
 option(ENABLE_SRSEPC         "Build srsEPC application"                 ON)
 option(ENABLE_NRSCOPE        "Build NR-Scope application"               ON)
 option(DISABLE_SIMD          "Disable SIMD instructions"                OFF)
 option(AUTO_DETECT_ISA       "Autodetect supported ISA extensions"      ON)
 
-option(ENABLE_GUI            "Enable GUI (using srsGUI)"                ON)
+option(ENABLE_GUI            "Enable GUI (using srsGUI)"                OFF)
 option(ENABLE_RF_PLUGINS     "Enable RF plugins"                        ON)
 option(ENABLE_UHD            "Enable UHD"                               ON)
 option(ENABLE_BLADERF        "Enable BladeRF"                           ON)
-option(ENABLE_SOAPYSDR       "Enable SoapySDR"                          ON)
+option(ENABLE_SOAPYSDR       "Enable SoapySDR"                          OFF)
 option(ENABLE_SKIQ           "Enable Sidekiq SDK"                       ON)
-option(ENABLE_ZEROMQ         "Enable ZeroMQ"                            ON)
+option(ENABLE_ZEROMQ         "Enable ZeroMQ"                            OFF)
 option(ENABLE_HARDSIM        "Enable support for SIM cards"             ON)
 
 option(ENABLE_TTCN3          "Enable TTCN3 test binaries"               OFF)
@@ -276,7 +276,7 @@ set(BOOST_REQUIRED_COMPONENTS
   program_options
 )
 if(UHD_FOUND) # Ubuntu 18.04 requires component 'system' to link UHD
-  list(APPEND BOOST_REQUIRED_COMPONENTS "system")
+#  list(APPEND BOOST_REQUIRED_COMPONENTS "system")
 endif(UHD_FOUND)
 if(UNIX AND EXISTS "/usr/lib64")
   list(APPEND BOOST_LIBRARYDIR "/usr/lib64") #fedora 64-bit fix
@@ -391,7 +391,7 @@ macro(ADD_C_COMPILER_FLAG_IF_AVAILABLE flag have)
 endmacro(ADD_C_COMPILER_FLAG_IF_AVAILABLE)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wno-comment -Wno-reorder -Wno-unused-variable -Wtype-limits -std=c++14 -fno-strict-aliasing")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wno-comment -Wno-reorder -Wno-unused-variable -Wtype-limits -std=c++17 -fno-strict-aliasing")
 
   ADD_CXX_COMPILER_FLAG_IF_AVAILABLE("-Wno-unused-but-set-variable" HAVE_WNO_UNUSED_BUT_SET_VARIABLE)
 
@@ -729,8 +729,10 @@ configure_file(
   ${CMAKE_CURRENT_BINARY_DIR}/srsue/src/uesa.conf 
 )
 
-configure_file(${PROJECT_SOURCE_DIR}/nrscope/config/config.yaml
-${CMAKE_CURRENT_BINARY_DIR}/nrscope/src/config.yaml)
+# NOTE: config.yaml is deliberately NOT configure_file()'d here. That copied it
+# into the build tree at configure time, so edits to the real config were only
+# picked up when CMake happened to re-run -- leaving a stale copy that silently
+# overrode them. nrscope/src/CMakeLists.txt now links it instead.
 
 configure_file(${PROJECT_SOURCE_DIR}/nrscope/src/tests/bigquery_table_create.py
 ${CMAKE_CURRENT_BINARY_DIR}/nrscope/src/tests/bigquery_table_create.py)

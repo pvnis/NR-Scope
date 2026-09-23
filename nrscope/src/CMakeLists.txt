@@ -30,8 +30,8 @@ target_link_libraries(nrscope   srsue_phy
                                 ${CMAKE_THREAD_LIBS_INIT}
                                 ${Boost_LIBRARIES}
                                 ${YAML_CPP_LIBRARIES}
-                                "/usr/local/lib/libliquid.so"
-                                "/usr/local/lib/libliquid.a")
+                                "liquid"
+                                "liquid")
 
 target_link_libraries(nrscan    srsue_phy
                                 srsran_common
@@ -44,8 +44,29 @@ target_link_libraries(nrscan    srsue_phy
                                 ${CMAKE_THREAD_LIBS_INIT}
                                 ${Boost_LIBRARIES}
                                 ${YAML_CPP_LIBRARIES}
-                                "/usr/local/lib/libliquid.so"
-                                "/usr/local/lib/libliquid.a")
+                                "liquid"
+                                "liquid")
+
+# Make the working config visible next to the binaries. nrscope and nrscan read
+# "config.yaml" from the current working directory, so without this you have to
+# copy the file in by hand -- and a stale copy silently overrides your edits.
+#
+# This links rather than copies, so that editing nrscope/config/config.yaml
+# takes effect on the next run (no rebuild), and so that rebuilding can never
+# overwrite the config: a symlink has no content to clobber.
+set(NRSCOPE_CONFIG_SRC ${PROJECT_SOURCE_DIR}/nrscope/config/config.yaml)
+set(NRSCOPE_CONFIG_DST ${CMAKE_CURRENT_BINARY_DIR}/config.yaml)
+
+add_custom_target(nrscope_config ALL
+  COMMAND ${CMAKE_COMMAND}
+          -DSRC=${NRSCOPE_CONFIG_SRC}
+          -DDST=${NRSCOPE_CONFIG_DST}
+          -P ${PROJECT_SOURCE_DIR}/cmake/modules/LinkNrscopeConfig.cmake
+  COMMENT "Linking config.yaml -> ${NRSCOPE_CONFIG_SRC}"
+  VERBATIM)
+
+add_dependencies(nrscope nrscope_config)
+add_dependencies(nrscan  nrscope_config)
 
 if(PUSH_TO_GOOGLE)
   target_link_libraries(nrscope ${PYTHON_LIBRARIES})
