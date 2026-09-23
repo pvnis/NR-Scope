@@ -10,7 +10,13 @@ namespace NRScopeTask{
 
 class NRScopeWorker{
 public:
-  cf_t* rx_buffer;
+  /* One slot of IQ per receive chain. rx_buffer[0] is the synchronised chain
+    and the only one the SIB, RACH and DCI decoders ever read; the rest are
+    captured for the sensing path, which needs a spatial baseline. Entries at or
+    above worker_state.nof_antennas are null. */
+  cf_t* rx_buffer[NRSCOPE_MAX_RX_ANTENNAS];
+  /* Wraps rx_buffer[0] only, because that is what the decoders are configured
+    for (nof_rx_antennas = 1 in each of them). */
   srsran::rf_buffer_t rf_buffer_t;
 
   WorkState worker_state;
@@ -58,11 +64,12 @@ public:
     safe thing. */
   int SyncState(WorkState* task_scheduler_state);
 
-  /* Copy the buffer and the slot structure from the task_scheduler */
+  /* Copy the buffer and the slot structure from the task_scheduler.
+    rx_buffer_ holds one slot per chain, worker_state.nof_antennas of them. */
   void CopySlotandBuffer(uint64_t sf_round_,
-                         srsran_slot_cfg_t slot_, 
+                         srsran_slot_cfg_t slot_,
                          srsran_ue_sync_nr_outcome_t outcome_,
-                         cf_t* rx_buffer_);
+                         cf_t* const* rx_buffer_);
 
   int InitSIBDecoder();
   int InitRACHDecoder();

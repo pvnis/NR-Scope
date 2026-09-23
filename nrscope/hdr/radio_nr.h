@@ -32,11 +32,18 @@ public:
 
   srslog::basic_logger& logger;
 
-  srsran::rf_buffer_t    rf_buffer_t;
-  cf_t*                  rx_buffer;
-  cf_t*                  pre_resampling_rx_buffer;
-  uint32_t               slot_sz;
-  uint32_t               pre_resampling_slot_sz;
+  srsran::rf_buffer_t rf_buffer_t;
+  /* One receive ring per chain, each RING_BUF_SIZE subframes long. Chain 0 is
+    the one ue_sync synchronises on and the only one any decoder reads; the rest
+    are captured so the sensing path has a spatial baseline. Entries at or above
+    nof_antennas are null. */
+  cf_t*    rx_buffer[NRSCOPE_MAX_RX_ANTENNAS];
+  cf_t*    pre_resampling_rx_buffer;
+  uint32_t slot_sz;
+  uint32_t pre_resampling_slot_sz;
+  /* Receive chains captured, after clamping rf_args.nof_antennas to
+    NRSCOPE_MAX_RX_ANTENNAS. */
+  uint32_t               nof_antennas;
   srsran::rf_timestamp_t last_rx_time;
 
   cell_searcher_args_t                 args_t;

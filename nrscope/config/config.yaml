@@ -12,8 +12,15 @@ usrp_setting_0:
   max_rx_gain: 45
   srate_hz: 30720000 # the sampling rate of USRP, integer division of 200MHz for TwinRX, and 5G sampling rate for CBX: 11520000 or 23040000
   srsran_srate_hz: 30720000 # the sampling for real signal processing, should be in 5G sampling rate, multiple of 1.92 MHz. 
-  nof_carriers: 1 # srsRAN rf setting, always set to be 1 for now. 
-  nof_antennas: 1 # srsRAN rf setting, always set to be 1 for now.
+  nof_carriers: 1 # srsRAN rf setting, always set to be 1 for now.
+  # Receive chains captured in parallel, 1 to 4. Only chain 0 is synchronised and
+  # decoded -- SIB, RACH and DCI all read it alone -- so raising this does not
+  # improve sniffing. The extra chains are captured for the sensing path, which
+  # needs a spatial baseline to estimate angle of arrival. The device must expose
+  # that many channels (bladeRF: 2, X410: 4) and they must share a clock, or the
+  # chains will not be phase coherent and the angle estimate is meaningless.
+  # Costs one slot of IQ per chain in every queued slot, see NRSCOPE_SLOT_QUEUE_DEPTH.
+  nof_antennas: 1
   scs_index: 1 #(0: 15kHz, 1: 30kHz, ..., the u in standard)
   rf_log_level: "debug"
   nof_rnti_worker_groups: 4 # number of of threads for DCI decoding, each will divide the UEs into small groups

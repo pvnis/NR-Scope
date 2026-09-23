@@ -18,6 +18,16 @@ Radio::Radio() :
   raido_shared = std::make_shared<srsran::radio>();
   radio        = nullptr;
 
+  /* Nulled here rather than at first use, because the cell-scan path allocates
+    only chain 0 and never learns nof_antennas: without this, the unallocated
+    chains would hold garbage that later code could not tell from a real
+    buffer. nof_antennas starts at 1 for the same reason. */
+  nof_antennas = 1;
+  for (uint32_t a = 0; a < NRSCOPE_MAX_RX_ANTENNAS; a++) {
+    rx_buffer[a] = nullptr;
+  }
+  pre_resampling_rx_buffer = nullptr;
+
   nof_trials                          = 2000;
   nof_trials_scan                     = 200;
   sf_round                            = 0;
@@ -127,9 +137,11 @@ int Radio::ScanInitandStart()
   std::cout << "pre_resampling_slot_sz: " << pre_resampling_slot_sz << std::endl;
   slot_sz = (uint32_t)(rf_args.srsran_srate_hz / 1000.0f / SRSRAN_NOF_SLOTS_PER_SF_NR(ssb_scs));
   std::cout << "slot_sz: " << slot_sz << std::endl;
-  // Allocate receive buffer
-  rx_buffer = srsran_vec_cf_malloc(SRSRAN_NOF_SLOTS_PER_SF_NR(args_t.ssb_scs) * pre_resampling_slot_sz);
-  srsran_vec_zero(rx_buffer, SRSRAN_NOF_SLOTS_PER_SF_NR(args_t.ssb_scs) * pre_resampling_slot_sz * sizeof(cf_t));
+  /* Allocate receive buffer. Cell scanning runs on the synchronised chain
+  alone: it is looking for an SSB, and extra chains would only duplicate the
+  search. The sensing chains are allocated later, in RadioInitandStart(). */
+  rx_buffer[0] = srsran_vec_cf_malloc(SRSRAN_NOF_SLOTS_PER_SF_NR(args_t.ssb_scs) * pre_resampling_slot_sz);
+  srsran_vec_zero(rx_buffer[0], SRSRAN_NOF_SLOTS_PER_SF_NR(args_t.ssb_scs) * pre_resampling_slot_sz * sizeof(cf_t));
   /* the actual slot size after resampling */
   uint32_t actual_slot_szs[CS_RESAMPLE_WORKER_NUM];
 
@@ -298,7 +310,7 @@ int Radio::ScanInitandStart()
 
       for (uint32_t trial = 0; trial < nof_trials_scan; trial++) {
         if (trial == 0) {
-          srsran_vec_cf_zero(rx_buffer, pre_resampling_slot_sz);
+          srsran_vec_cf_zero(rx_buffer[0], pre_resampling_slot_sz);
           srsran_vec_cf_zero(pre_resampling_rx_buffer, pre_resampling_slot_sz);
         }
 
@@ -323,7 +335,7 @@ int Radio::ScanInitandStart()
             }
           }
           // sequentially merge back
-          cf_t* buf_split_ptr = rx_buffer;
+          cf_t* buf_split_ptr = rx_buffer[0];
           for (uint8_t k = 0; k < CS_RESAMPLE_WORKER_NUM; k++) {
             copy_cpp_to_c_complex_arr(temp_y[k], buf_split_ptr, actual_slot_szs[k]);
             buf_split_ptr += actual_slot_szs[k];
@@ -331,12 +343,12 @@ int Radio::ScanInitandStart()
         } else {
           // pre_resampling_slot_sz should be the same as slot_sz as
           // resample ratio is 1 in this case
-          srsran_vec_cf_copy(rx_buffer, pre_resampling_rx_buffer, pre_resampling_slot_sz);
+          srsran_vec_cf_copy(rx_buffer[0], pre_resampling_rx_buffer, pre_resampling_slot_sz);
         }
 
         *(last_rx_time.get_ptr(0)) = rf_timestamp.get(0);
 
-        cs_ret = srsran_searcher.run_slot(rx_buffer, slot_sz);
+        cs_ret = srsran_searcher.run_slot(rx_buffer[0], slot_sz);
         if (cs_ret.result == srsue::nr::cell_search::ret_t::CELL_FOUND) {
           break;
         }
@@ -359,7 +371,7 @@ int Radio::ScanInitandStart()
     }
   }
 
-  free(rx_buffer);
+  free(rx_buffer[0]);
   if (resample_needed) {
     for (uint8_t k = 0; k < CS_RESAMPLE_WORKER_NUM; k++) {
       msresamp_crcf_destroy(q[k]);
@@ -391,6 +403,18 @@ int Radio::RadioInitandStart()
   args_t.stack_log_level   = "warning";
   args_t.duration_ms       = 1000;
 
+  /* Receive chains. Clamped rather than asserted so a config asking for more
+  than the build supports still runs, on as many chains as it can. The radio was
+  already opened with rf_args.nof_antennas channels, so asking for fewer here
+  simply leaves the extra ones unread. */
+  nof_antennas = std::min<uint32_t>(std::max<uint32_t>(rf_args.nof_antennas, 1), NRSCOPE_MAX_RX_ANTENNAS);
+  if (nof_antennas != rf_args.nof_antennas) {
+    std::cout << "Requested " << rf_args.nof_antennas << " Rx antennas, using " << nof_antennas << " (max "
+              << NRSCOPE_MAX_RX_ANTENNAS << ")" << std::endl;
+  }
+  args_t.nof_antennas = nof_antennas;
+  std::cout << "nof_antennas: " << nof_antennas << std::endl;
+
   // Set sampling rate
   radio->set_rx_srate(rf_args.srate_hz);
   std::cout << "usrp srate_hz: " << rf_args.srate_hz << std::endl;
@@ -415,12 +439,19 @@ int Radio::RadioInitandStart()
 
   pre_resampling_slot_sz = (uint32_t)(rf_args.srate_hz / 1000.0f / SRSRAN_NOF_SLOTS_PER_SF_NR(ssb_scs));
 
-  // Allocate receive buffer
-  slot_sz   = (uint32_t)(rf_args.srsran_srate_hz / 1000.0f / SRSRAN_NOF_SLOTS_PER_SF_NR(ssb_scs));
-  rx_buffer = srsran_vec_cf_malloc(SRSRAN_NOF_SLOTS_PER_SF_NR(args_t.ssb_scs) * pre_resampling_slot_sz * RING_BUF_SIZE);
+  // Allocate receive buffers, one ring per chain
+  slot_sz = (uint32_t)(rf_args.srsran_srate_hz / 1000.0f / SRSRAN_NOF_SLOTS_PER_SF_NR(ssb_scs));
+  const uint32_t ring_samples =
+      SRSRAN_NOF_SLOTS_PER_SF_NR(args_t.ssb_scs) * pre_resampling_slot_sz * RING_BUF_SIZE;
+  for (uint32_t a = 0; a < NRSCOPE_MAX_RX_ANTENNAS; a++) {
+    if (a < nof_antennas) {
+      rx_buffer[a] = srsran_vec_cf_malloc(ring_samples);
+      srsran_vec_zero(rx_buffer[a], ring_samples * sizeof(cf_t));
+    } else {
+      rx_buffer[a] = nullptr;
+    }
+  }
   std::cout << "slot_sz: " << slot_sz << std::endl;
-  srsran_vec_zero(rx_buffer,
-                  SRSRAN_NOF_SLOTS_PER_SF_NR(args_t.ssb_scs) * pre_resampling_slot_sz * RING_BUF_SIZE * sizeof(cf_t));
   /* the actual slot size after resampling */
   uint32_t actual_slot_szs[RESAMPLE_WORKER_NUM];
 
@@ -555,10 +586,10 @@ int Radio::RadioInitandStart()
 
     for (uint32_t trial = 0; trial < nof_trials; trial++) {
       if (trial == 0) {
-        srsran_vec_cf_zero(rx_buffer, slot_sz);
+        srsran_vec_cf_zero(rx_buffer[0], slot_sz);
         srsran_vec_cf_zero(pre_resampling_rx_buffer, pre_resampling_slot_sz);
       }
-      // srsran_vec_cf_copy(rx_buffer, rx_buffer + slot_sz, slot_sz);
+      // srsran_vec_cf_copy(rx_buffer[0], rx_buffer[0] + slot_sz, slot_sz);
 
       srsran::rf_timestamp_t& rf_timestamp = last_rx_time;
 
@@ -586,22 +617,22 @@ int Radio::RadioInitandStart()
         }
 
         // sequentially merge back
-        cf_t* buf_split_ptr = rx_buffer;
+        cf_t* buf_split_ptr = rx_buffer[0];
         for (uint8_t k = 0; k < RESAMPLE_WORKER_NUM; k++) {
           copy_cpp_to_c_complex_arr(temp_y[k], buf_split_ptr, actual_slot_szs[k]);
           buf_split_ptr += actual_slot_szs[k];
         }
 
         // srsran_vec_fprint2_c(fp_time_series_post_resample,
-        //    rx_buffer, actual_slot_sz);
+        //    rx_buffer[0], actual_slot_sz);
       } else {
         // pre_resampling_slot_sz should be the same as slot_sz as
         // resample ratio is 1 in this case
-        srsran_vec_cf_copy(rx_buffer, pre_resampling_rx_buffer, pre_resampling_slot_sz);
+        srsran_vec_cf_copy(rx_buffer[0], pre_resampling_rx_buffer, pre_resampling_slot_sz);
       }
 
       *(last_rx_time.get_ptr(0)) = rf_timestamp.get(0);
-      cs_ret                     = srsran_searcher.run_slot(rx_buffer, slot_sz);
+      cs_ret                     = srsran_searcher.run_slot(rx_buffer[0], slot_sz);
       // std::cout << "Slot_sz: " << slot_sz << std::endl;
       if (cs_ret.result == srsue::nr::cell_search::ret_t::CELL_FOUND) {
         if (pci == 9999) {
@@ -659,8 +690,15 @@ static int slot_sync_recv_callback(void* ptr, cf_t** buffer, uint32_t nsamples, 
   }
   srsran::radio* radio = (srsran::radio*)ptr;
 
+  /* Forward every channel the caller handed us, not just the synchronised one.
+    srsran::radio reads as many as it was opened with, and a chain left null
+    here would simply never be filled -- which is how the extra sensing chains
+    silently stayed empty before. Trailing entries of buffer[] are null for a
+    single-antenna configuration, so this is the same call in that case. */
   cf_t* buffer_ptr[SRSRAN_MAX_CHANNELS] = {};
-  buffer_ptr[0]                         = buffer[0];
+  for (uint32_t i = 0; i < SRSRAN_MAX_CHANNELS; i++) {
+    buffer_ptr[i] = buffer[i];
+  }
   // std::cout << "[xuyang debug 3] find fetch nsamples: " << nsamples << std::endl;
   srsran::rf_buffer_t rf_buffer(buffer_ptr, nsamples);
 
@@ -674,10 +712,16 @@ static int slot_sync_recv_callback(void* ptr, cf_t** buffer, uint32_t nsamples, 
 int Radio::SyncandDownlinkInit()
 {
   //***** DL args Config Start *****//
-  rf_buffer_t =
-      srsran::rf_buffer_t(rx_buffer,
-                          SRSRAN_NOF_SLOTS_PER_SF_NR(task_scheduler_nrscope.task_scheduler_state.args_t.ssb_scs) *
-                              pre_resampling_slot_sz * 2); // only one sf here
+  {
+    cf_t* ptrs[SRSRAN_MAX_CHANNELS] = {};
+    for (uint32_t a = 0; a < nof_antennas; a++) {
+      ptrs[a] = rx_buffer[a];
+    }
+    rf_buffer_t =
+        srsran::rf_buffer_t(ptrs,
+                            SRSRAN_NOF_SLOTS_PER_SF_NR(task_scheduler_nrscope.task_scheduler_state.args_t.ssb_scs) *
+                                pre_resampling_slot_sz * 2); // only one sf here
+  }
   // it appears the srsRAN is build on 15kHz scs, we need to use the srate and
   // scs to calculate the correct subframe size
   arg_scs.srate = task_scheduler_nrscope.task_scheduler_state.args_t.srate_hz;
@@ -692,9 +736,13 @@ int Radio::SyncandDownlinkInit()
   //***** DL args Config End *****//
 
   //***** Slot Sync Start *****//
-  ue_sync_nr_args.max_srate_hz    = srsran_searcher_args_t.max_srate_hz;
-  ue_sync_nr_args.min_scs         = srsran_searcher_args_t.ssb_min_scs;
-  ue_sync_nr_args.nof_rx_channels = 1;
+  ue_sync_nr_args.max_srate_hz = srsran_searcher_args_t.max_srate_hz;
+  ue_sync_nr_args.min_scs      = srsran_searcher_args_t.ssb_min_scs;
+  /* Every chain is captured, so the receive call has to ask for all of them.
+    Synchronisation itself still runs on channel 0 alone: ue_sync correlates the
+    SSB on the first channel and applies the resulting timing and CFO to the
+    whole buffer, which is what keeps the chains sample-aligned with each other. */
+  ue_sync_nr_args.nof_rx_channels = nof_antennas;
   ue_sync_nr_args.disable_cfo     = false;
   ue_sync_nr_args.pbch_dmrs_thr   = 0.5;
   ue_sync_nr_args.cfo_alpha       = 0.1;
@@ -754,10 +802,16 @@ int Radio::FetchAndResample()
       i.e., 0 sf index is for sync and moving a sf data there for decoders to
       process, note at the first round we start like 0, 2, 3...
       (skip 1 if you do the math) */
-    rf_buffer_t =
-        !in_sync ? srsran::rf_buffer_t(rx_buffer, pre_resampling_sf_sz)
-                 : srsran::rf_buffer_t(rx_buffer + (pre_resampling_sf_sz * (next_produce_at % RING_BUF_MODULUS + 1)),
-                                       pre_resampling_sf_sz);
+    {
+      /* Same ring offset on every chain, so a slot lands at the same index in
+        all of them and they stay sample-aligned for the sensing path. */
+      const uint32_t off = in_sync ? pre_resampling_sf_sz * (next_produce_at % RING_BUF_MODULUS + 1) : 0;
+      cf_t*          ptrs[SRSRAN_MAX_CHANNELS] = {};
+      for (uint32_t a = 0; a < nof_antennas; a++) {
+        ptrs[a] = rx_buffer[a] + off;
+      }
+      rf_buffer_t = srsran::rf_buffer_t(ptrs, pre_resampling_sf_sz);
+    }
 
     // std::cout << "current_produce_at: " << (!in_sync ? 0 :
     //     (next_produce_at % RING_BUF_MODULUS + 1)) << std::endl;
@@ -828,11 +882,11 @@ int Radio::DecodeAndProcess()
         go around the whole ring and modify this sf again */
       // std::cout << "pre_resampling_sf_sz: " << pre_resampling_sf_sz
       //   << std::endl;
-      srsran_vec_cf_copy(rx_buffer,
-                         rx_buffer +
-                             (first_time ? 0 : ((next_consume_at % RING_BUF_MODULUS + 1) * pre_resampling_sf_sz)) +
-                             (slot_idx * slot_sz),
-                         slot_sz);
+      const uint32_t consume_off =
+          (first_time ? 0 : ((next_consume_at % RING_BUF_MODULUS + 1) * pre_resampling_sf_sz)) + (slot_idx * slot_sz);
+      for (uint32_t a = 0; a < nof_antennas; a++) {
+        srsran_vec_cf_copy(rx_buffer[a], rx_buffer[a] + consume_off, slot_sz);
+      }
 
       // std::cout << "decode slot: " << (int) slot.idx << "; current_consume_ptr: "
       //   << rx_buffer + (first_time ? 0 :

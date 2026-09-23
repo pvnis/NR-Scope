@@ -41,14 +41,21 @@ int NRScopeWorker::InitWorker(WorkState task_scheduler_state, int worker_id_)
   worker_state.nof_bwps               = task_scheduler_state.nof_bwps;
   worker_state.args_t                 = task_scheduler_state.args_t;
   worker_state.slot_sz                = task_scheduler_state.slot_sz;
+  worker_state.nof_antennas           = task_scheduler_state.nof_antennas;
   worker_state.cpu_affinity           = task_scheduler_state.cpu_affinity;
   worker_state.rrc_recfg_user         = task_scheduler_state.rrc_recfg_user;
-  /* Size of one subframe */
-  rx_buffer = srsran_vec_cf_malloc(SRSRAN_NOF_SLOTS_PER_SF_NR(worker_state.args_t.ssb_scs) * worker_state.slot_sz);
 
-  /* An wrapper for the rx_buffer */
-  rf_buffer_t =
-      srsran::rf_buffer_t(rx_buffer, SRSRAN_NOF_SLOTS_PER_SF_NR(worker_state.args_t.ssb_scs) * worker_state.slot_sz);
+  /* Size of one subframe, per receive chain */
+  const uint32_t buf_samples = SRSRAN_NOF_SLOTS_PER_SF_NR(worker_state.args_t.ssb_scs) * worker_state.slot_sz;
+  for (uint32_t a = 0; a < NRSCOPE_MAX_RX_ANTENNAS; a++) {
+    rx_buffer[a] = (a < worker_state.nof_antennas) ? srsran_vec_cf_malloc(buf_samples) : nullptr;
+  }
+
+  /* A wrapper for the synchronised chain. Only channel 0 is populated: the
+    decoders below are all initialised with nof_rx_antennas = 1 and read
+    input[0], so handing them the other chains would be misleading rather than
+    useful. The sensing path reads rx_buffer[] directly instead. */
+  rf_buffer_t = srsran::rf_buffer_t(rx_buffer[0], buf_samples);
   /* Start the worker thread */
   // std::cout << "Starting the worker..." << std::endl;
   StartWorker();
@@ -74,12 +81,14 @@ void NRScopeWorker::StartWorker()
 void NRScopeWorker::CopySlotandBuffer(uint64_t                    sf_round_,
                                       srsran_slot_cfg_t           slot_,
                                       srsran_ue_sync_nr_outcome_t outcome_,
-                                      cf_t*                       rx_buffer_)
+                                      cf_t* const*                rx_buffer_)
 {
   sf_round = sf_round_;
   slot     = slot_;
   outcome  = outcome_;
-  srsran_vec_cf_copy(rx_buffer, rx_buffer_, worker_state.slot_sz);
+  for (uint32_t a = 0; a < worker_state.nof_antennas; a++) {
+    srsran_vec_cf_copy(rx_buffer[a], rx_buffer_[a], worker_state.slot_sz);
+  }
 }
 
 int NRScopeWorker::InitSIBDecoder()

@@ -46,6 +46,35 @@
 #define MAX_MSG_PER_SUBF 10
 #define MAX_DCI_BUFFER 10
 
+/* Receive chains a listener may capture in parallel.
+ *
+ * Only antenna 0 is ever synchronised or decoded: SIB, RACH and DCI all run on
+ * it alone, because a sniffer gains nothing from combining chains to read a
+ * control channel. The remaining chains exist for the sensing path, which needs
+ * a spatial baseline to estimate angle of arrival, and four elements is what the
+ * X410 offers.
+ *
+ * Bounded by SRSRAN_MAX_CHANNELS, since every chain occupies one channel of the
+ * srsran::radio underneath. */
+#define NRSCOPE_MAX_RX_ANTENNAS 4
+
+/* Slots buffered between the receive thread and the worker pool.
+ *
+ * This is a jitter absorber, not a history: a slot is handed to the first idle
+ * worker and the entry is released immediately, so depth only has to cover a
+ * burst of workers being busy at once, never a look-back window. Nothing in the
+ * decode path reaches backwards -- the gNB schedules PDSCH in the same slot as
+ * the PDCCH that grants it -- so a queue of a few tens of slots is ample, and 64
+ * leaves an order of magnitude over the handful of workers that can stall.
+ *
+ * Depth is not free, because every entry owns a full slot of IQ for every
+ * antenna. At 100 MHz that is 960 KiB per slot per chain, so 64 slots across
+ * four chains costs 240 MiB. The previous value of 1 << 14 -- against a comment
+ * that said 1024, so 16x larger than intended -- reserved 3.75 GiB at 20 MHz on
+ * one antenna, and would have asked for 60 GiB in the configuration this branch
+ * is built for. */
+#define NRSCOPE_SLOT_QUEUE_DEPTH 64
+
 #define NR_FAILURE -1
 #define NR_SUCCESS 0
 
@@ -66,6 +95,10 @@ struct cell_searcher_args_t {
   std::string rf_log_level      = "info";
   float       rf_rx_gain_dB     = 20.0f;
   float       rf_freq_offset_Hz = 0.0f;
+  /* Receive chains captured in parallel, 1 .. NRSCOPE_MAX_RX_ANTENNAS. Mirrors
+  rf_args.nof_antennas so the task scheduler and its workers can size their
+  buffers without reaching back into the Radio for it. */
+  uint32_t nof_antennas = 1;
 
   void set_ssb_from_band(srsran_subcarrier_spacing_t scs_input)
   {
@@ -183,6 +216,9 @@ struct WorkState_ {
   bool     cpu_affinity;
 
   uint32_t slot_sz;
+  /* Receive chains actually captured, after clamping args_t.nof_antennas to
+  NRSCOPE_MAX_RX_ANTENNAS. Chain 0 is the synchronised one every decoder reads. */
+  uint32_t nof_antennas;
 
   cell_searcher_args_t          args_t;
   cell_search_result_t          cell;
@@ -283,7 +319,12 @@ struct SlotData_ {
   srsran_slot_cfg_t           slot;
   srsran_ue_sync_nr_outcome_t outcome;
   uint32_t                    slot_size;
-  cf_t*                       rx_buffer;
+  /* One slot of IQ per receive chain, each slot_size samples long.
+   * rx_buffer[0] is the synchronised chain the decoders read; entries up to
+   * nof_antennas carry the extra chains the sensing path needs, and the rest
+   * stay null. */
+  cf_t*    rx_buffer[NRSCOPE_MAX_RX_ANTENNAS];
+  uint32_t nof_antennas;
 };
 
 bool CompareSlotResult(SlotResult a, SlotResult b);

@@ -42,18 +42,37 @@ int TaskSchedulerNRScope::InitandStart(bool                 local_log_,
   nof_workers                         = nof_workers_;
   task_scheduler_state.rrc_recfg_user = rrc_recfg_user_;
 
-  // Maintain a ringbuffer of 1024 slot data.
-  slot_data_len    = 1 << 14;
+  /* Receive chains to buffer. Clamped rather than asserted so a config asking
+  for more chains than the build supports still runs, on as many as it can. */
+  task_scheduler_state.nof_antennas = std::min<uint32_t>(std::max<uint32_t>(args_t.nof_antennas, 1),
+                                                         NRSCOPE_MAX_RX_ANTENNAS);
+  if (task_scheduler_state.nof_antennas != args_t.nof_antennas) {
+    std::cout << "Requested " << args_t.nof_antennas << " Rx antennas, using "
+              << task_scheduler_state.nof_antennas << " (max " << NRSCOPE_MAX_RX_ANTENNAS << ")" << std::endl;
+  }
+
+  /* Queue between the receive thread and the worker pool. See
+  NRSCOPE_SLOT_QUEUE_DEPTH for why this is short: entries are released as soon
+  as a worker takes them, and each one costs a slot of IQ per antenna. */
+  slot_data_len    = NRSCOPE_SLOT_QUEUE_DEPTH;
   next_slot_idx    = 0;
   current_slot_idx = 0;
 
+  const uint32_t buf_samples = SRSRAN_NOF_SLOTS_PER_SF_NR(args_t.ssb_scs) * task_scheduler_state.slot_sz;
+  std::cout << "Slot queue: " << slot_data_len << " slots x " << task_scheduler_state.nof_antennas << " antenna(s) = "
+            << (double)slot_data_len * task_scheduler_state.nof_antennas * buf_samples * sizeof(cf_t) / (1 << 20)
+            << " MiB" << std::endl;
+
   slot_data = std::vector<SlotData>(slot_data_len);
   for (auto& s : slot_data) {
-    s.sf_round  = 0;
-    s.slot      = {};
-    s.outcome   = {};
-    s.slot_size = task_scheduler_state.slot_sz;
-    s.rx_buffer = srsran_vec_cf_malloc(SRSRAN_NOF_SLOTS_PER_SF_NR(args_t.ssb_scs) * task_scheduler_state.slot_sz);
+    s.sf_round      = 0;
+    s.slot          = {};
+    s.outcome       = {};
+    s.slot_size     = task_scheduler_state.slot_sz;
+    s.nof_antennas  = task_scheduler_state.nof_antennas;
+    for (uint32_t a = 0; a < NRSCOPE_MAX_RX_ANTENNAS; a++) {
+      s.rx_buffer[a] = (a < s.nof_antennas) ? srsran_vec_cf_malloc(buf_samples) : nullptr;
+    }
     s.processed.store(true, std::memory_order_release);
   }
 
@@ -472,7 +491,7 @@ void TaskSchedulerNRScope::TasksDispatch()
 int TaskSchedulerNRScope::AssignTask(uint64_t                    sf_round,
                                      srsran_slot_cfg_t           slot,
                                      srsran_ue_sync_nr_outcome_t outcome,
-                                     cf_t*                       rx_buffer_)
+                                     cf_t* const*                rx_buffer_)
 {
   /* Find the first idle worker */
   bool found_worker = false;
@@ -516,7 +535,7 @@ int TaskSchedulerNRScope::AssignTask(uint64_t                    sf_round,
 int TaskSchedulerNRScope::StoreSlotData(uint64_t                    sf_round,
                                         srsran_slot_cfg_t           slot,
                                         srsran_ue_sync_nr_outcome_t outcome,
-                                        cf_t*                       rx_buffer_)
+                                        cf_t* const*                rx_buffer_)
 {
   const uint32_t i = next_slot_idx.load(std::memory_order_relaxed);
   SlotData_&     s = slot_data[i];
@@ -535,7 +554,11 @@ int TaskSchedulerNRScope::StoreSlotData(uint64_t                    sf_round,
   s.sf_round = sf_round;
   s.slot     = slot;
   s.outcome  = outcome;
-  srsran_vec_cf_copy(s.rx_buffer, rx_buffer_, s.slot_size);
+  /* Every chain is copied, so the sensing path downstream sees the same slot on
+  all of them. Chain 0 is the one the decoders will read. */
+  for (uint32_t a = 0; a < s.nof_antennas; a++) {
+    srsran_vec_cf_copy(s.rx_buffer[a], rx_buffer_[a], s.slot_size);
+  }
   s.processed.store(false, std::memory_order_release);
 
   // std::cout << "Storing " << i << ", sf_round: " << s.sf_round <<

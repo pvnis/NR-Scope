@@ -66,10 +66,14 @@ public:
 
   int ClaimIdleWorker();
 
-  /* Assign the current slot to one worker*/
-  int AssignTask(uint64_t sf_round, srsran_slot_cfg_t slot, srsran_ue_sync_nr_outcome_t outcome, cf_t* rx_buffer_);
+  /* Assign the current slot to one worker. rx_buffer_ holds one slot of IQ per
+  receive chain, task_scheduler_state.nof_antennas of them. */
+  int AssignTask(uint64_t sf_round, srsran_slot_cfg_t slot, srsran_ue_sync_nr_outcome_t outcome, cf_t* const* rx_buffer_);
 
-  int StoreSlotData(uint64_t sf_round, srsran_slot_cfg_t slot, srsran_ue_sync_nr_outcome_t outcome, cf_t* rx_buffer_);
+  int StoreSlotData(uint64_t                    sf_round,
+                    srsran_slot_cfg_t           slot,
+                    srsran_ue_sync_nr_outcome_t outcome,
+                    cf_t* const*                rx_buffer_);
 
   /* resampler tools */
   float                resample_ratio;
