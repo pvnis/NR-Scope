@@ -32,16 +32,38 @@
 #define UNUSED __attribute__((unused))
 #define CONVERT_BUFFER_SIZE (240 * 1024)
 
+/* Receive channels this driver can stream at once. The bladeRF 2.0 micro (xA4,
+ * xA9) carries an AD9361 with two RX chains sharing one LO and one sample
+ * clock, which is what makes them phase coherent and therefore usable for
+ * direction finding. The original bladeRF x40/x115 has a single chain and must
+ * stay at 1; asking for 2 there fails when the stream is configured.
+ *
+ * Note that BLADERF_RX_X2 == 2 == BLADERF_CHANNEL_RX(1). The layout enum and
+ * the channel macro overlap numerically, so a call meant for "both channels"
+ * that is handed the layout silently configures channel 1 alone. Every
+ * per-channel call below therefore uses BLADERF_CHANNEL_RX(i) explicitly, and
+ * the layout appears only in bladerf_sync_config(). */
+#define BLADE_MAX_RX_CHANNELS 2
+
 typedef struct {
   struct bladerf*     dev;
   bladerf_sample_rate rx_rate;
   bladerf_sample_rate tx_rate;
-  int16_t             rx_buffer[CONVERT_BUFFER_SIZE];
-  int16_t             tx_buffer[CONVERT_BUFFER_SIZE];
-  bool                rx_stream_enabled;
-  bool                tx_stream_enabled;
-  srsran_rf_info_t    info;
+  /* In a 2 channel layout bladerf_sync_rx() returns the chains interleaved
+   * sample by sample, so this holds nof_rx_channels * nsamples of them. */
+  int16_t          rx_buffer[CONVERT_BUFFER_SIZE];
+  int16_t          tx_buffer[CONVERT_BUFFER_SIZE];
+  bool             rx_stream_enabled;
+  bool             tx_stream_enabled;
+  uint32_t         nof_rx_channels;
+  srsran_rf_info_t info;
 } rf_blade_handler_t;
+
+/// Layout to configure the RX stream with, given the number of chains in use
+static inline bladerf_channel_layout blade_rx_layout(uint32_t nof_rx_channels)
+{
+  return (nof_rx_channels > 1) ? BLADERF_RX_X2 : BLADERF_RX_X1;
+}
 
 static srsran_rf_error_handler_t blade_error_handler     = NULL;
 static void*                     blade_error_handler_arg = NULL;
@@ -99,18 +121,27 @@ int rf_blade_start_rx_stream(void* h, UNUSED bool now)
   rf_blade_handler_t* handler = (rf_blade_handler_t*)h;
 
   /* Configure the device's RX module for use with the sync interface.
-   * SC16 Q11 samples *with* metadata are used. */
-  uint32_t buffer_size_rx = ms_buffer_size_rx * (handler->rx_rate / 1000 / 1024);
+   * SC16 Q11 samples *with* metadata are used.
+   *
+   * buffer_size counts samples across every chain, not per chain: libbladeRF
+   * documents 2048 samples on two channels as generating 4096 total. So it is
+   * scaled by the chain count, otherwise a 2 chain stream would hold half the
+   * time depth of a 1 chain one and the host would get half the slack before
+   * the device FIFO overruns. The result stays a multiple of 1024, which
+   * bladerf_sync_config() requires, because the single chain value already is. */
+  uint32_t buffer_size_rx = ms_buffer_size_rx * (handler->rx_rate / 1000 / 1024) * handler->nof_rx_channels;
 
   status = bladerf_sync_config(handler->dev,
-                               BLADERF_RX_X1,
+                               blade_rx_layout(handler->nof_rx_channels),
                                BLADERF_FORMAT_SC16_Q11_META,
                                num_buffers,
                                buffer_size_rx,
                                num_transfers,
                                timeout_ms);
   if (status != 0) {
-    ERROR("Failed to configure RX sync interface: %s", bladerf_strerror(status));
+    ERROR("Failed to configure RX sync interface for %d channel(s): %s",
+          handler->nof_rx_channels,
+          bladerf_strerror(status));
     return status;
   }
   status = bladerf_sync_config(handler->dev,
@@ -124,10 +155,14 @@ int rf_blade_start_rx_stream(void* h, UNUSED bool now)
     ERROR("Failed to configure TX sync interface: %s", bladerf_strerror(status));
     return status;
   }
-  status = bladerf_enable_module(handler->dev, BLADERF_RX_X1, true);
-  if (status != 0) {
-    ERROR("Failed to enable RX module: %s", bladerf_strerror(status));
-    return status;
+  /* Enabled one chain at a time: bladerf_enable_module() takes a channel, not a
+  layout, so enabling "X2" would only ever turn on channel 1. */
+  for (uint32_t i = 0; i < handler->nof_rx_channels; i++) {
+    status = bladerf_enable_module(handler->dev, BLADERF_CHANNEL_RX(i), true);
+    if (status != 0) {
+      ERROR("Failed to enable RX channel %d: %s", i, bladerf_strerror(status));
+      return status;
+    }
   }
   status = bladerf_enable_module(handler->dev, BLADERF_TX_X1, true);
   if (status != 0) {
@@ -141,9 +176,15 @@ int rf_blade_start_rx_stream(void* h, UNUSED bool now)
 int rf_blade_stop_rx_stream(void* h)
 {
   rf_blade_handler_t* handler = (rf_blade_handler_t*)h;
-  int                 status  = bladerf_enable_module(handler->dev, BLADERF_RX_X1, false);
+  int                 status  = 0;
+  for (uint32_t i = 0; i < handler->nof_rx_channels; i++) {
+    int s = bladerf_enable_module(handler->dev, BLADERF_CHANNEL_RX(i), false);
+    if (s != 0) {
+      status = s;
+    }
+  }
   if (status != 0) {
-    ERROR("Failed to enable RX module: %s", bladerf_strerror(status));
+    ERROR("Failed to disable RX channels: %s", bladerf_strerror(status));
     return status;
   }
   status = bladerf_enable_module(handler->dev, BLADERF_TX_X1, false);
@@ -168,41 +209,71 @@ float rf_blade_get_rssi(UNUSED void* h)
   return 0;
 }
 
-int rf_blade_open_multi(char* args, void** h, UNUSED uint32_t nof_channels)
+int rf_blade_open_multi(char* args, void** h, uint32_t nof_channels)
 {
-  return rf_blade_open(args, h);
+  return rf_blade_open_nof_rx(args, h, nof_channels);
 }
 
 int rf_blade_open(char* args, void** h)
 {
+  return rf_blade_open_nof_rx(args, h, 1);
+}
+
+int rf_blade_open_nof_rx(char* args, void** h, uint32_t nof_rx_channels)
+{
   const struct bladerf_range* range_tx = NULL;
   const struct bladerf_range* range_rx = NULL;
   *h                                   = NULL;
+
+  if (nof_rx_channels < 1) {
+    nof_rx_channels = 1;
+  }
+  if (nof_rx_channels > BLADE_MAX_RX_CHANNELS) {
+    ERROR("bladeRF supports at most %d RX channels, %d requested", BLADE_MAX_RX_CHANNELS, nof_rx_channels);
+    return -1;
+  }
 
   rf_blade_handler_t* handler = (rf_blade_handler_t*)malloc(sizeof(rf_blade_handler_t));
   if (!handler) {
     perror("malloc");
     return -1;
   }
-  *h = handler;
+  *h                        = handler;
+  handler->nof_rx_channels  = nof_rx_channels;
 
-  printf("Opening bladeRF...\n");
+  printf("Opening bladeRF with %d RX channel(s)...\n", nof_rx_channels);
   int status = bladerf_open(&handler->dev, args);
   if (status) {
     ERROR("Unable to open device: %s", bladerf_strerror(status));
     goto clean_exit;
   }
 
-  status = bladerf_set_gain_mode(handler->dev, BLADERF_RX_X1, BLADERF_GAIN_MGC);
-  if (status) {
-    ERROR("Unable to open device: %s", bladerf_strerror(status));
-    goto clean_exit;
+  /* A second chain only exists on a bladeRF 2.0 micro. Asking an x40/x115 for
+  one here gives a clearer failure than letting bladerf_sync_config() reject the
+  X2 layout later, by which point the cause is several frames away. */
+  if (nof_rx_channels > 1) {
+    size_t nof_dev_rx = bladerf_get_channel_count(handler->dev, BLADERF_RX);
+    if (nof_dev_rx < nof_rx_channels) {
+      ERROR("Device has %zu RX channel(s), %d requested. A second RX chain needs a bladeRF 2.0 micro (xA4/xA9)",
+            nof_dev_rx,
+            nof_rx_channels);
+      status = -1;
+      goto clean_exit;
+    }
+  }
+
+  for (uint32_t i = 0; i < nof_rx_channels; i++) {
+    status = bladerf_set_gain_mode(handler->dev, BLADERF_CHANNEL_RX(i), BLADERF_GAIN_MGC);
+    if (status) {
+      ERROR("Failed to set manual gain mode on RX channel %d: %s", i, bladerf_strerror(status));
+      goto clean_exit;
+    }
   }
 
   // bladerf_log_set_verbosity(BLADERF_LOG_LEVEL_VERBOSE);
 
   /* Get Gain ranges and set Rx to maximum */
-  status = bladerf_get_gain_range(handler->dev, BLADERF_RX_X1, &range_rx);
+  status = bladerf_get_gain_range(handler->dev, BLADERF_CHANNEL_RX(0), &range_rx);
   if ((status != 0) || (range_rx == NULL)) {
     ERROR("Failed to get RX gain range: %s", bladerf_strerror(status));
     goto clean_exit;
@@ -214,10 +285,15 @@ int rf_blade_open(char* args, void** h)
     goto clean_exit;
   }
 
-  status = bladerf_set_gain(handler->dev, BLADERF_RX_X1, (bladerf_gain)range_rx->max);
-  if (status != 0) {
-    ERROR("Failed to set RX LNA gain: %s", bladerf_strerror(status));
-    goto clean_exit;
+  /* Same gain on every chain. An AoA estimate reads the phase differences
+  between chains, so a per-chain gain difference would show up as an amplitude
+  taper across the array and bias the spatial spectrum. */
+  for (uint32_t i = 0; i < nof_rx_channels; i++) {
+    status = bladerf_set_gain(handler->dev, BLADERF_CHANNEL_RX(i), (bladerf_gain)range_rx->max);
+    if (status != 0) {
+      ERROR("Failed to set RX LNA gain on channel %d: %s", i, bladerf_strerror(status));
+      goto clean_exit;
+    }
   }
   handler->rx_stream_enabled = false;
   handler->tx_stream_enabled = false;
@@ -248,27 +324,32 @@ int rf_blade_close(void* h)
 
 double rf_blade_set_rx_srate(void* h, double freq)
 {
-  uint32_t            bw;
+  uint32_t            bw      = 0;
   rf_blade_handler_t* handler = (rf_blade_handler_t*)h;
-  int                 status  = bladerf_set_sample_rate(handler->dev, BLADERF_RX_X1, (uint32_t)freq, &handler->rx_rate);
-  if (status != 0) {
-    ERROR("Failed to set samplerate = %u: %s", (uint32_t)freq, bladerf_strerror(status));
-    return -1;
-  }
-  if (handler->rx_rate < 2000000) {
-    status = bladerf_set_bandwidth(handler->dev, BLADERF_RX_X1, handler->rx_rate, &bw);
+
+  /* Every chain is configured identically. On the AD9361 the two RX chains
+  share a sample clock, so this is really asserting that shared setting once per
+  chain rather than setting two independent rates. */
+  for (uint32_t i = 0; i < handler->nof_rx_channels; i++) {
+    int status = bladerf_set_sample_rate(handler->dev, BLADERF_CHANNEL_RX(i), (uint32_t)freq, &handler->rx_rate);
     if (status != 0) {
-      ERROR("Failed to set bandwidth = %u: %s", handler->rx_rate, bladerf_strerror(status));
+      ERROR("Failed to set samplerate = %u on channel %d: %s", (uint32_t)freq, i, bladerf_strerror(status));
       return -1;
     }
-  } else {
-    status = bladerf_set_bandwidth(handler->dev, BLADERF_RX_X1, (bladerf_bandwidth)(handler->rx_rate * 0.8), &bw);
+
+    const bladerf_bandwidth want_bw =
+        (handler->rx_rate < 2000000) ? handler->rx_rate : (bladerf_bandwidth)(handler->rx_rate * 0.8);
+    status = bladerf_set_bandwidth(handler->dev, BLADERF_CHANNEL_RX(i), want_bw, &bw);
     if (status != 0) {
-      ERROR("Failed to set bandwidth = %u: %s", handler->rx_rate, bladerf_strerror(status));
+      ERROR("Failed to set bandwidth = %u on channel %d: %s", handler->rx_rate, i, bladerf_strerror(status));
       return -1;
     }
   }
-  printf("Set RX sampling rate %.2f Mhz, filter BW: %.2f Mhz\n", (float)handler->rx_rate / 1e6, (float)bw / 1e6);
+
+  printf("Set RX sampling rate %.2f Mhz, filter BW: %.2f Mhz, %d channel(s)\n",
+         (float)handler->rx_rate / 1e6,
+         (float)bw / 1e6,
+         handler->nof_rx_channels);
   return (double)handler->rx_rate;
 }
 
@@ -291,9 +372,14 @@ double rf_blade_set_tx_srate(void* h, double freq)
 
 int rf_blade_set_rx_gain(void* h, double gain)
 {
-  int                 status;
+  int                 status  = 0;
   rf_blade_handler_t* handler = (rf_blade_handler_t*)h;
-  status                      = bladerf_set_gain(handler->dev, BLADERF_RX_X1, (bladerf_gain)gain);
+  /* Applied to every chain, so the array stays amplitude balanced. AGC drives
+  this, and a gain step landing on only one chain would look like the scene
+  changing on that chain alone. */
+  for (uint32_t i = 0; i < handler->nof_rx_channels && status == 0; i++) {
+    status = bladerf_set_gain(handler->dev, BLADERF_CHANNEL_RX(i), (bladerf_gain)gain);
+  }
   if (status != 0) {
     ERROR("Failed to set RX gain: %s", bladerf_strerror(status));
     return SRSRAN_ERROR;
@@ -361,18 +447,28 @@ srsran_rf_info_t* rf_blade_get_info(void* h)
   return info;
 }
 
-double rf_blade_set_rx_freq(void* h, UNUSED uint32_t ch, double freq)
+double rf_blade_set_rx_freq(void* h, uint32_t ch, double freq)
 {
   rf_blade_handler_t* handler = (rf_blade_handler_t*)h;
   bladerf_frequency   f_int   = (uint32_t)round(freq);
-  int                 status  = bladerf_set_frequency(handler->dev, BLADERF_RX_X1, f_int);
+
+  /* ch is honoured rather than ignored, because srsran::radio::set_rx_freq()
+  already walks the antennas of a carrier and calls this once per chain. Tuning
+  channel 0 every time, as this did before, left a second chain on whatever
+  frequency it powered up with. */
+  if (ch >= handler->nof_rx_channels) {
+    ERROR("set_rx_freq: channel %d out of range, %d configured", ch, handler->nof_rx_channels);
+    return -1;
+  }
+
+  int status = bladerf_set_frequency(handler->dev, BLADERF_CHANNEL_RX(ch), f_int);
   if (status != 0) {
-    ERROR("Failed to set samplerate = %u: %s", (uint32_t)freq, bladerf_strerror(status));
+    ERROR("Failed to set RX frequency = %u on channel %d: %s", (uint32_t)freq, ch, bladerf_strerror(status));
     return -1;
   }
   f_int = 0;
-  bladerf_get_frequency(handler->dev, BLADERF_RX_X1, &f_int);
-  printf("set RX frequency to %lu\n", f_int);
+  bladerf_get_frequency(handler->dev, BLADERF_CHANNEL_RX(ch), &f_int);
+  printf("set RX channel %d frequency to %lu\n", ch, f_int);
 
   return freq;
 }
@@ -424,7 +520,73 @@ int rf_blade_recv_with_time_multi(void*    h,
                                   time_t*  secs,
                                   double*  frac_secs)
 {
-  return rf_blade_recv_with_time(h, *data, nsamples, blocking, secs, frac_secs);
+  rf_blade_handler_t* handler = (rf_blade_handler_t*)h;
+
+  /* One chain is the old path unchanged, including its conversion call. */
+  if (handler->nof_rx_channels < 2) {
+    return rf_blade_recv_with_time(h, *data, nsamples, blocking, secs, frac_secs);
+  }
+
+  struct bladerf_metadata meta;
+  int                     status;
+  const uint32_t          nof_ch = handler->nof_rx_channels;
+
+  memset(&meta, 0, sizeof(meta));
+  meta.flags = BLADERF_META_FLAG_RX_NOW;
+
+  /* bladerf_sync_rx() counts samples across all chains in a multi-channel
+  layout, and each is an I/Q pair of int16. */
+  if (2 * nsamples * nof_ch > CONVERT_BUFFER_SIZE) {
+    ERROR("RX failed: nsamples exceeds buffer size (%d*%d>%d)", nsamples, nof_ch, CONVERT_BUFFER_SIZE);
+    return -1;
+  }
+
+  status = bladerf_sync_rx(handler->dev, handler->rx_buffer, nsamples * nof_ch, &meta, 2000);
+  if (status) {
+    ERROR("RX failed: %s; nsamples=%d; channels=%d", bladerf_strerror(status), nsamples, nof_ch);
+    return -1;
+  } else if (meta.status & BLADERF_META_STATUS_OVERRUN) {
+    if (blade_error_handler) {
+      srsran_rf_error_t error;
+      error.opt  = meta.actual_count;
+      error.type = SRSRAN_RF_ERROR_OVERFLOW;
+      blade_error_handler(blade_error_handler_arg, error);
+    }
+  }
+
+  timestamp_to_secs(handler->rx_rate, meta.timestamp, secs, frac_secs);
+
+  /* The stream arrives interleaved, one I/Q pair per chain per sample instant:
+  ch0_I, ch0_Q, ch1_I, ch1_Q, ch0_I, ... Deinterleaving it by hand with a stride
+  is a scalar, cache-hostile pass over 61 M samples/s at 2x30.72 Msps, and it
+  sits directly on the receive thread, which is what makes the device FIFO
+  overrun.
+
+  So the reordering is left to libbladeRF, which does it in place and knows the
+  format, and the conversion is then two contiguous SIMD passes.
+  The 1/2048 matches the scale the single channel path passes to
+  srsran_vec_convert_if(), so both reach the same full scale. */
+  /* Plain SC16_Q11 and not the _META variant the stream is configured with:
+  bladerf_sync_rx() reports the metadata through its own argument and hands back
+  a buffer of samples alone, whereas passing _META here would skip the first 16
+  bytes as a header that is not there and shift every chain by two samples. */
+  status = bladerf_deinterleave_stream_buffer(
+      blade_rx_layout(nof_ch), BLADERF_FORMAT_SC16_Q11, nsamples * nof_ch, handler->rx_buffer);
+  if (status != 0) {
+    ERROR("RX deinterleave failed: %s", bladerf_strerror(status));
+    return -1;
+  }
+
+  /* Now laid out as nof_ch contiguous blocks of nsamples, so chain c starts at
+  int16 offset 2 * c * nsamples. */
+  for (uint32_t c = 0; c < nof_ch; c++) {
+    if (data[c] == NULL) {
+      continue;
+    }
+    srsran_vec_convert_if(&handler->rx_buffer[2 * c * nsamples], 2048, (float*)data[c], 2 * nsamples);
+  }
+
+  return nsamples;
 }
 
 int rf_blade_recv_with_time(void*       h,
