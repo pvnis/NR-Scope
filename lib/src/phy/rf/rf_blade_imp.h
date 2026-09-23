@@ -31,6 +31,11 @@ extern rf_dev_t srsran_rf_dev_blade;
 
 SRSRAN_API int rf_blade_open(char* args, void** handler);
 
+/* Open with an explicit RX chain count. 2 requires a bladeRF 2.0 micro, whose
+   two RX chains share an LO and a sample clock and are therefore phase
+   coherent; the original x40/x115 has one chain and is rejected. */
+SRSRAN_API int rf_blade_open_nof_rx(char* args, void** handler, uint32_t nof_rx_channels);
+
 SRSRAN_API int rf_blade_open_multi(char* args, void** handler, uint32_t nof_channels);
 
 SRSRAN_API const char* rf_blade_devname(void* h);
