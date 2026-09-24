@@ -16,6 +16,24 @@ add_executable(google_client google_client_test.cc)
 add_executable(google_client_cc google_client_cc_test.cc)
 add_executable(rrc_reconf_test rrc_reconf_test.cc)
 
+# Ground-truth test of the sensing pipeline: synthesises a channel from known
+# paths and checks the range-Doppler map puts them where they were placed. Needs
+# no radio and no gNB, so it can run on any machine and in CI.
+add_executable(sensing_selftest sensing_selftest.c)
+target_link_libraries(sensing_selftest srsue_phy
+                                       srsran_common
+                                       srsran_phy
+                                       srsran_radio
+                                       rrc_nr_asn1
+                                       nrscope_libs
+                                       ${SRSUE_SOURCES}
+                                       ${SRSRAN_SOURCES}
+                                       ${CMAKE_THREAD_LIBS_INIT}
+                                       ${Boost_LIBRARIES}
+                                       ${YAML_CPP_LIBRARIES}
+                                       m)
+
+
 target_link_libraries(test_comm srsue_phy
                                 srsran_common
                                 srsran_phy
