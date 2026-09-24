@@ -1,0 +1,40 @@
+nof_usrp_dev: 1
+usrp_setting_0:
+  # USRP X410 flashed with the UC_200 FPGA image (recommended upstream), from the
+  # PrincetonUniversity/NR-Scope x410_testing branch. At 245.76 Msps it captures a
+  # whole 100 MHz carrier, e.g. the Sunrise cell whose UE-specific CORESET spans
+  # all 273 RBs and is out of reach of the bladeRF.
+  device_name: UHD
+  ssb_freq: 3711360000 # Sunrise commercial cell, PCI 632, n78, 100 MHz carrier (273 RBs).
+  band_list: [78] # Scan specific bands with the cell scan function. Will do full scan if left commented.
+  pci: 632 # If specified, NR-Scope will proceed only if the decoded PCI matches this value.
+  rf_args: "type=x4xx,master_clock_rate=245760000,recv_buff_size=1004857600"
+
+  rx_gain: 60
+  min_rx_gain: 0
+  max_rx_gain: 60
+  srate_hz: 245760000 # the sampling rate of the USRP, equal to the X410 master clock rate
+  srsran_srate_hz: 245760000 # the sampling for real signal processing, should be in 5G sampling rate, multiple of 1.92 MHz.
+  nof_carriers: 1 # srsRAN rf setting, always set to be 1 for now.
+
+  # Receive chains captured in parallel, 1 to 4, see config.yaml. The X410 has 4
+  # RX chains sharing one clock. Each chain costs 4x the slot memory at this rate.
+  nof_antennas: 1
+  scs_index: 1 #(0: 15kHz, 1: 30kHz, ..., the u in standard)
+  rf_log_level: "error"
+  nof_rnti_worker_groups: 1 # number of of threads for DCI decoding, each will divide the UEs into small groups
+  nof_bwps: 1 # number of BWP of the cell
+  nof_workers: 16 # using worker pool to asynchronously process the slot data
+  cpu_affinity: false # pin the worker's thread into CPU or not.
+  # Skip CFO compensation in sync. Upstream turned it off for the X410 to save CPU
+  # at 245.76 Msps; only sensible with a stable (ideally GPS/10 MHz disciplined) clock.
+  disable_cfo: true
+
+  log_name: "logs_nrscope_x410.csv"
+  google_dataset_id: "ngscope5g_dci_log_wanhr"
+
+log_config:
+  local_log: true
+  push_to_google: false
+  google_service_account_credential: "/home/wanhr/Downloads/nsf-2223556-222187-02b924918c95.json"
+  enable_gui: false

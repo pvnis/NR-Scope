@@ -167,6 +167,13 @@ int load_config(std::vector<Radio>& radios, std::string file_name)
         radios[i].cpu_affinity = false;
       }
 
+      if (config_yaml[setting_name]["disable_cfo"]) {
+        radios[i].disable_cfo = config_yaml[setting_name]["disable_cfo"].as<bool>();
+      } else {
+        radios[i].disable_cfo = false;
+      }
+      std::cout << "    disable_cfo: " << (radios[i].disable_cfo ? "true" : "false") << std::endl;
+
       if (config_yaml[setting_name]["nof_workers"]) {
         radios[i].nof_workers = config_yaml[setting_name]["nof_workers"].as<int>();
         if (radios[i].nof_workers > 128) {

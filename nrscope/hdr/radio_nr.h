@@ -92,6 +92,7 @@ public:
   bool          rk_initialized = false;
 
   bool cpu_affinity;
+  bool disable_cfo = false; // skip CFO compensation in ue_sync, for radios with a disciplined clock (e.g. X410)
 
   std::string log_name;
   bool        local_log;

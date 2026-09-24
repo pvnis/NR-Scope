@@ -690,6 +690,8 @@ static int uhd_init(rf_uhd_handler_t* handler, char* args, uint32_t nof_channels
       type = "e3x0";
     } else if (find_string(devices_str, "type=n3xx")) {
       type = "n3xx";
+    } else if (find_string(devices_str, "type=x4xx")) {
+      type = "x4xx";
     }
 
     if (not type.empty()) {

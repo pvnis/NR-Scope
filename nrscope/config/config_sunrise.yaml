@@ -31,6 +31,7 @@ usrp_setting_0:
   nof_bwps: 1 # number of BWP of the cell
   nof_workers: 4 # using worker pool to asynchronously process the slot data
   cpu_affinity: false # pin the worker's thread into CPU or not.
+  disable_cfo: false # skip CFO compensation in sync; keep false on the bladeRF, its clock drifts too much
 
   log_name: "logs_nrscope.csv"
   google_dataset_id: "ngscope5g_dci_log_wanhr"

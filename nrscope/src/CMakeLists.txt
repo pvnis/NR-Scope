@@ -59,7 +59,7 @@ target_link_libraries(nrscan    srsue_phy
 # and picked by passing them as the first argument, e.g.
 #   sudo ./nrscope config_sunrise.yaml
 set(NRSCOPE_CONFIG_DIR ${PROJECT_SOURCE_DIR}/nrscope/config)
-set(NRSCOPE_CONFIGS config.yaml config_sunrise.yaml)
+set(NRSCOPE_CONFIGS config.yaml config_sunrise.yaml config_x410_UC200.yaml)
 
 set(NRSCOPE_CONFIG_LINK_COMMANDS)
 foreach(cfg ${NRSCOPE_CONFIGS})

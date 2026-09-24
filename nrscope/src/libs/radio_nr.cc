@@ -1,5 +1,6 @@
 #include "nrscope/hdr/radio_nr.h"
 #include <chrono>
+#include <cstdlib>
 #include <liquid/liquid.h>
 #include <semaphore>
 
@@ -31,7 +32,7 @@ Radio::Radio() :
   nof_trials                          = 2000;
   nof_trials_scan                     = 200;
   sf_round                            = 0;
-  srsran_searcher_args_t.max_srate_hz = 184.32e6;
+  srsran_searcher_args_t.max_srate_hz = 245.76e6; // X410 master clock rate, enough for a 100 MHz carrier
   srsran_searcher_args_t.ssb_min_scs  = srsran_subcarrier_spacing_15kHz;
   srsran_searcher.init(srsran_searcher_args_t);
 
@@ -743,7 +744,7 @@ int Radio::SyncandDownlinkInit()
     SSB on the first channel and applies the resulting timing and CFO to the
     whole buffer, which is what keeps the chains sample-aligned with each other. */
   ue_sync_nr_args.nof_rx_channels = nof_antennas;
-  ue_sync_nr_args.disable_cfo     = false;
+  ue_sync_nr_args.disable_cfo     = disable_cfo;
   ue_sync_nr_args.pbch_dmrs_thr   = 0.5;
   ue_sync_nr_args.cfo_alpha       = 0.1;
   ue_sync_nr_args.recv_obj        = radio.get();
@@ -785,6 +786,13 @@ int Radio::FetchAndResample()
   bool     in_sync = false;
   uint32_t pre_resampling_sf_sz =
       SRSRAN_NOF_SLOTS_PER_SF_NR(task_scheduler_nrscope.task_scheduler_state.args_t.ssb_scs) * pre_resampling_slot_sz;
+
+  /* Each failed sync attempt reads one subframe and takes one count from
+    smph_sf_data_finished, which starts at 9999 and is only refilled once the
+    decoder runs, i.e. after sync. So a cell that never syncs would block this
+    thread forever after ~10 s; give up just before that, with a clear message. */
+  const uint32_t max_sync_attempts = 9000;
+  uint32_t       nof_sync_attempts = 0;
 
   while (true) {
     int current_value;
@@ -840,6 +848,12 @@ int Radio::FetchAndResample()
       // a new sf data ready; let decoder consume
       next_produce_at++;
       sem_post(&smph_sf_data_prod_cons);
+    } else if (!in_sync && ++nof_sync_attempts >= max_sync_attempts) {
+      ERROR("Can't sync to the cell after %u subframes, please get better signal quality, exiting...",
+            nof_sync_attempts);
+      /* The decoder and worker threads are blocked or looping with no way to be
+        stopped, so returning would end in std::terminate; exit the process. */
+      std::exit(NR_FAILURE);
     }
 
     gettimeofday(&t1, NULL);
