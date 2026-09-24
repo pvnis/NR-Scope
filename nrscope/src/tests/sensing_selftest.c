@@ -35,9 +35,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "nrscope/hdr/sensing/nr_ue_dmrs_despread.h"
 #include "nrscope/hdr/sensing/nr_ue_map.h"
 #include "nrscope/hdr/sensing/nr_ue_sensing.h"
 #include "nrscope/hdr/sensing/sensing_defs.h"
+#include "srsran/phy/common/sequence.h"
+#include "srsran/phy/phch/phch_cfg_nr.h"
 
 /* Carrier the X410 configuration targets: the 100 MHz Sunrise cell, 273 RBs at
 30 kHz. The numbers matter because the delay axis scale and the Doppler-to-speed
@@ -262,6 +265,148 @@ static bool test_run_scene(const char* name,
   return true;
 }
 
+
+/* Round trip through the DM-RS stage: place real pilots on a grid behind a known
+   channel, estimate, and check the channel comes back.
+   
+   This is the one stage whose failure mode is silent. The pilot sequence has no
+   random access: it must be walked forward and stepped over PRBs the grant does
+   not use, and a skip that is wrong by a single PRB yields pilots that are
+   perfectly valid values in the wrong places. Every estimate then becomes noise
+   and nothing reports an error.
+
+   The transmitter here therefore walks the sequence a different way from the
+   receiver. It generates the pilots of the whole carrier in one call and indexes
+   them absolutely, pilot (p, n', k') at index p*n_pilot_rb + 2n' + k', which is
+   the property that makes a gNB's grid independent of who is scheduled. The
+   receiver streams and skips. If the two agree on a gapped allocation, the skip
+   arithmetic is right; if they do not, the error is total rather than subtle. */
+static void test_dmrs_roundtrip(void)
+{
+  printf("\nDM-RS round trip: gapped allocation, type 1, rank 1\n");
+
+  /* A small carrier keeps the test quick; the sequence walk does not care how
+  wide it is, only that it is stepped correctly. */
+  const uint32_t nof_prb  = 51;
+  const int      n_sc     = (int)nof_prb * SRSRAN_NRE;
+  const uint32_t slot_idx = 7;
+  const uint32_t symbol   = 2;
+
+  srsran_carrier_nr_t carrier = {};
+  carrier.pci                 = 632; // the Sunrise cell; N_ID falls back to this
+  carrier.nof_prb             = nof_prb;
+
+  srsran_dmrs_sch_cfg_t dmrs_cfg = {};
+  dmrs_cfg.type                  = srsran_dmrs_sch_type_1;
+  // scrambling_id0/1 left absent on purpose: that is the case a sniffer sees
+
+  srsran_sch_grant_nr_t grant = {};
+  grant.n_scid                = false;
+  grant.beta_dmrs             = 0.0f; // unset reads as 1
+
+  /* Two disjoint runs with a gap between them and a gap before the first. This
+  is what exercises the advance; a contiguous allocation from PRB 0 would pass
+  even with the skip logic removed entirely. */
+  const uint32_t runs[][2] = {{4, 12}, {20, 31}};
+  uint32_t       n_alloc   = 0;
+  for (uint32_t r = 0; r < sizeof(runs) / sizeof(runs[0]); r++) {
+    for (uint32_t p = runs[r][0]; p < runs[r][1]; p++) {
+      grant.prb_idx[p] = true;
+      n_alloc++;
+    }
+  }
+
+  nr_dmrs_layout_t lay;
+  if (!nr_ue_dmrs_layout(0, srsran_dmrs_sch_type_1, &lay)) {
+    printf("  layout rejected\n");
+    failures++;
+    return;
+  }
+  check(lay.k_step == 2, "layout k_step (rank 1, type 1)", lay.k_step, 2, 0);
+  check(!lay.despread, "layout despread flag", lay.despread, 0, 0);
+
+  const uint32_t cinit = nr_ue_dmrs_seed(&carrier, &dmrs_cfg, &grant, slot_idx, symbol);
+
+  /* The channel the test hides behind the pilots: two delay paths, so H varies
+  across subcarriers and a constant would not pass. */
+  static cf_t H_true[51 * SRSRAN_NRE];
+  for (int k = 0; k < n_sc; k++) {
+    const double ph1 = -2.0 * M_PI * (double)k * 0.013;
+    const double ph2 = -2.0 * M_PI * (double)k * 0.041;
+    H_true[k]        = (cf_t)(cos(ph1) + 0.4 * cos(ph2)) + I * (cf_t)(sin(ph1) + 0.4 * sin(ph2));
+  }
+
+  /* Transmitter: the whole carrier's pilots in one call, placed by absolute
+  index at the REs 38.211 gives, and only on the allocated PRBs. */
+  static cf_t tx_pilots[51 * 6];
+  srsran_sequence_state_t tx_state = {};
+  srsran_sequence_state_init(&tx_state, cinit);
+  srsran_sequence_state_gen_f(&tx_state, M_SQRT1_2, (float*)tx_pilots, nof_prb * 6 * 2);
+
+  static cf_t rxF[51 * SRSRAN_NRE];
+  memset(rxF, 0, sizeof(rxF));
+  int n_placed = 0;
+  for (uint32_t p = 0; p < nof_prb; p++) {
+    if (!grant.prb_idx[p]) {
+      continue;
+    }
+    for (int np = 0; np < 3; np++) {
+      for (int kp = 0; kp < 2; kp++) {
+        const int k = (int)p * SRSRAN_NRE + 4 * np + 2 * kp; // delta = 0 for port 0
+        const int i = (int)p * 6 + 2 * np + kp;
+        rxF[k]      = H_true[k] * tx_pilots[i];
+        n_placed++;
+      }
+    }
+  }
+
+  // Receiver: the streaming walk under test
+  static cf_t H_est[51 * SRSRAN_NRE];
+  static bool H_valid[51 * SRSRAN_NRE];
+  memset(H_est, 0, sizeof(H_est));
+  memset(H_valid, 0, sizeof(H_valid));
+
+  const int n_written =
+      nr_ue_dmrs_estimate_symbol(&lay, 0, cinit, &grant, nof_prb, dmrs_cfg.reference_point_k_rb, rxF, n_sc, H_est,
+                                 H_valid);
+
+  check(n_written == n_placed, "REs estimated vs placed", n_written, n_placed, 0);
+
+  /* Worst error over every pilot the estimator claims to have written. A
+  mis-stepped sequence does not degrade this gracefully: the pilots are unit
+  modulus, so a wrong one leaves an error of order |H| rather than a small bias. */
+  double worst = 0.0;
+  int    n_cmp = 0;
+  for (int k = 0; k < n_sc; k++) {
+    if (!H_valid[k]) {
+      continue;
+    }
+    const double e = cabs(H_est[k] - H_true[k]);
+    if (e > worst) {
+      worst = e;
+    }
+    n_cmp++;
+  }
+  check(n_cmp == n_placed, "REs marked valid", n_cmp, n_placed, 0);
+  check(worst < 1e-4, "worst |H_est - H_true|", worst, 0.0, 1e-4);
+
+  /* Nothing outside the allocation may be touched: the lattice stage reads
+  valid_row to decide what was measured, and a stray true there would feed an
+  unmeasured RE into the transform as if it were data. */
+  int n_outside = 0;
+  for (uint32_t p = 0; p < nof_prb; p++) {
+    if (grant.prb_idx[p]) {
+      continue;
+    }
+    for (int k = (int)p * SRSRAN_NRE; k < (int)(p + 1) * SRSRAN_NRE; k++) {
+      if (H_valid[k]) {
+        n_outside++;
+      }
+    }
+  }
+  check(n_outside == 0, "REs written outside the grant", n_outside, 0, 0);
+}
+
 int main(void)
 {
   printf("sensing self-test: %d RB, %d kHz SCS, %.2f MHz carrier, %.3f m/bin\n",
@@ -307,6 +452,8 @@ int main(void)
                  NR_CLUTTER_MEAN,
                  25.0 * m_per_bin,
                  -12.0);
+
+  test_dmrs_roundtrip();
 
   nr_ue_sensing_idft_free();
 
