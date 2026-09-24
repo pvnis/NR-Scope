@@ -54,15 +54,25 @@ target_link_libraries(nrscan    srsue_phy
 # This links rather than copies, so that editing nrscope/config/config.yaml
 # takes effect on the next run (no rebuild), and so that rebuilding can never
 # overwrite the config: a symlink has no content to clobber.
-set(NRSCOPE_CONFIG_SRC ${PROJECT_SOURCE_DIR}/nrscope/config/config.yaml)
-set(NRSCOPE_CONFIG_DST ${CMAKE_CURRENT_BINARY_DIR}/config.yaml)
+#
+# config.yaml is the default (the lab srsRAN gNB). Other configs are linked too
+# and picked by passing them as the first argument, e.g.
+#   sudo ./nrscope config_sunrise.yaml
+set(NRSCOPE_CONFIG_DIR ${PROJECT_SOURCE_DIR}/nrscope/config)
+set(NRSCOPE_CONFIGS config.yaml config_sunrise.yaml)
+
+set(NRSCOPE_CONFIG_LINK_COMMANDS)
+foreach(cfg ${NRSCOPE_CONFIGS})
+  list(APPEND NRSCOPE_CONFIG_LINK_COMMANDS
+       COMMAND ${CMAKE_COMMAND}
+               -DSRC=${NRSCOPE_CONFIG_DIR}/${cfg}
+               -DDST=${CMAKE_CURRENT_BINARY_DIR}/${cfg}
+               -P ${PROJECT_SOURCE_DIR}/cmake/modules/LinkNrscopeConfig.cmake)
+endforeach()
 
 add_custom_target(nrscope_config ALL
-  COMMAND ${CMAKE_COMMAND}
-          -DSRC=${NRSCOPE_CONFIG_SRC}
-          -DDST=${NRSCOPE_CONFIG_DST}
-          -P ${PROJECT_SOURCE_DIR}/cmake/modules/LinkNrscopeConfig.cmake
-  COMMENT "Linking config.yaml -> ${NRSCOPE_CONFIG_SRC}"
+  ${NRSCOPE_CONFIG_LINK_COMMANDS}
+  COMMENT "Linking ${NRSCOPE_CONFIGS} from ${NRSCOPE_CONFIG_DIR}"
   VERBATIM)
 
 add_dependencies(nrscope nrscope_config)

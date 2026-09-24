@@ -116,7 +116,9 @@ int srsran_pdcch_nr_locations_coreset(const srsran_coreset_t*      coreset,
 
   uint32_t nof_candidates = search_space->nof_candidates[aggregation_level];
 
-  nof_candidates = SRSRAN_MIN(nof_candidates, SRSRAN_SEARCH_SPACE_MAX_NOF_CANDIDATES_NR);
+  // Networks may configure candidates at an aggregation level the CORESET cannot hold, e.g. AL16 on a 48 RB, 1 symbol
+  // CORESET 0 of 8 CCEs. A UE simply has no candidates at that level, rather than failing the whole search.
+  nof_candidates = SRSRAN_MIN(nof_candidates, (uint32_t)srsran_pdcch_nr_max_candidates_coreset(coreset, aggregation_level));
 
   for (uint32_t candidate = 0; candidate < nof_candidates; candidate++) {
     int ret = srsran_pdcch_nr_get_ncce(coreset, search_space, rnti, aggregation_level, slot_idx, candidate);

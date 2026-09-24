@@ -13,7 +13,13 @@ int main(int argc, char** argv){
   // Initialise logging infrastructure
   srslog::init();
 
-  std::string file_name = "config.yaml";
+  // Usage: nrscan [config file], defaults to config.yaml in the working directory
+  std::string file_name = (argc > 1) ? argv[1] : "config.yaml";
+  if (access(file_name.c_str(), R_OK) != 0) {
+    std::cout << "Cannot read config file: " << file_name << std::endl;
+    return NR_FAILURE;
+  }
+  std::cout << "Using config: " << file_name << std::endl;
 
   int nof_usrp = get_nof_usrp(file_name);
   std::vector<Radio> radios(nof_usrp);
