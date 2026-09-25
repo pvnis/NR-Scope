@@ -1023,6 +1023,11 @@ static int ue_dl_nr_find_dci_ss_nrscope_dciloop(srsran_ue_dl_nr_t*           q,
     // Reset the pdcch_info_count.
     // q->pdcch_info_count = 0;
     // Iterate all possible aggregation levels
+    /* Set once this format has yielded a DCI, so the aggregation level and
+    candidate sweep stops without leaving the format loop: another format in the
+    same search space is a different payload size and may carry its own DCI. */
+    bool found_this_format = false;
+
     /* Aggregation levels, hinted one first.
     
     Every level is still visited, only the order changes, so a hint can never
@@ -1161,7 +1166,11 @@ static int ue_dl_nr_find_dci_ss_nrscope_dciloop(srsran_ue_dl_nr_t*           q,
           hint->L        = L;
           hint->cand_idx = (uint32_t)ncce_idx;
         }
-        return SRSRAN_SUCCESS;
+        found_this_format = true;
+        break; // no more candidates at this level
+      }
+      if (found_this_format) {
+        break; // no more aggregation levels for this format
       }
     }
   }
