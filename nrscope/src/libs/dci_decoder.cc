@@ -1055,6 +1055,9 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
 
   DCIFeedback new_result;
   sharded_results[dci_decoder_id] = new_result;
+  /* Cleared per slot: this is the slot's full grant list, not a per-RNTI slot
+  that gets overwritten. */
+  sharded_results[dci_decoder_id].all_dl_grants.clear();
   sharded_results[dci_decoder_id].dl_grants.resize(n_rntis);
   sharded_results[dci_decoder_id].ul_grants.resize(n_rntis);
   sharded_results[dci_decoder_id].spare_dl_prbs.resize(n_rntis);
@@ -1117,6 +1120,25 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
     if (nof_dl_dci > 0) {
       dci_dl[rnti_idx] = dci_dl_tmp[0];
       total_dl_dci += nof_dl_dci;
+
+      /* Keep every grant, not just the first. The search can return a DCI per
+      format and per search space, and dci_dl[] holds one per RNTI, so the rest
+      used to be dropped here. Each one places its own DM-RS, which for sensing
+      is another set of channel estimates, so they are converted now while
+      dci_dl_tmp still holds them. */
+      for (int k = 0; k < nof_dl_dci && k < 4; k++) {
+        if (dci_dl_tmp[k].ctx.format != srsran_dci_format_nr_1_1) {
+          continue; // only 1_1 carries the fields the grant conversion needs
+        }
+        DLGrantRecord rec = {};
+        rec.rnti          = sharded_rntis[dci_decoder_id][rnti_idx];
+        rec.dci           = dci_dl_tmp[k];
+        rec.grant.dmrs.typeA_pos = state->cell.mib.dmrs_typeA_pos;
+        if (srsran_ra_dl_dci_to_grant_nr(&carrier_dl, slot, &pdsch_hl_cfg, &dci_dl_tmp[k], &rec.grant, &rec.grant.grant)
+            >= SRSRAN_SUCCESS) {
+          sharded_results[dci_decoder_id].all_dl_grants.push_back(rec);
+        }
+      }
     }
 
     if (nof_ul_dci > 0) {
@@ -1205,6 +1227,21 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
     if (nof_dl_dci_nca > 0) {
       dci_dl[rnti_idx] = dci_dl_tmp[0];
       total_dl_dci += nof_dl_dci_nca;
+
+      // Same as the carrier-aggregation path above: keep every grant, not just the first.
+      for (int k = 0; k < nof_dl_dci_nca && k < 4; k++) {
+        if (dci_dl_tmp[k].ctx.format != srsran_dci_format_nr_1_1) {
+          continue;
+        }
+        DLGrantRecord rec = {};
+        rec.rnti          = sharded_rntis[dci_decoder_id][rnti_idx];
+        rec.dci           = dci_dl_tmp[k];
+        rec.grant.dmrs.typeA_pos = state->cell.mib.dmrs_typeA_pos;
+        if (srsran_ra_dl_dci_to_grant_nr(&carrier_dl, slot, &pdsch_hl_cfg, &dci_dl_tmp[k], &rec.grant, &rec.grant.grant)
+            >= SRSRAN_SUCCESS) {
+          sharded_results[dci_decoder_id].all_dl_grants.push_back(rec);
+        }
+      }
     }
 
     if (nof_ul_dci_nca > 0) {

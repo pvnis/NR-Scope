@@ -189,11 +189,33 @@ struct coreset0_args {
   int      sfn_c                   = 0;
 };
 
+/* One downlink grant, with the RNTI whose DCI carried it.
+ *
+ * Sensing wants every grant of a slot, not one per UE. Each grant places its own
+ * DM-RS on the resource grid, so each is another set of REs whose sequence can be
+ * regenerated and divided out; two grants in a slot are twice the channel
+ * estimates. The RNTI travels with it because the precoder is per UE, and
+ * snapshots of different UEs cannot be combined coherently in slow time. */
+typedef struct _DLGrantRecord {
+  uint16_t            rnti;
+  srsran_dci_dl_nr_t  dci;
+  srsran_sch_cfg_nr_t grant;
+} DLGrantRecord;
+
 typedef struct _DCIFeedback {
   std::vector<srsran_dci_dl_nr_t>  dl_dcis;
   std::vector<srsran_dci_ul_nr_t>  ul_dcis;
   std::vector<srsran_sch_cfg_nr_t> dl_grants;
   std::vector<srsran_sch_cfg_nr_t> ul_grants;
+
+  /* Every downlink grant found in this slot, in the order found.
+  
+  dl_grants above keeps at most one per known RNTI and is indexed by position in
+  known_rntis, which is what the CSV logger walks. That shape cannot hold a UE
+  with two grants in a slot, and discards exactly the DM-RS sensing wants, so
+  this carries the full set alongside rather than changing a structure the
+  logging path depends on. */
+  std::vector<DLGrantRecord> all_dl_grants;
   std::vector<int>                 spare_dl_prbs;
   std::vector<int>                 spare_dl_tbs;
   std::vector<int>                 spare_dl_bits;

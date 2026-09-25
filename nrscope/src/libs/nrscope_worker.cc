@@ -1,5 +1,7 @@
 #include "nrscope/hdr/nrscope_worker.h"
 #include <chrono>
+#include <atomic>
+#include <ctime>
 #include <mutex>
 #include <semaphore>
 
@@ -235,6 +237,13 @@ int NRScopeWorker::MergeResults()
       results[b].nof_dl_used_prbs += sharded_results[thread_id].nof_dl_used_prbs;
       results[b].nof_ul_used_prbs += sharded_results[thread_id].nof_ul_used_prbs;
 
+      /* Concatenated rather than indexed by RNTI position: this is every grant
+      the slot carried, and a UE may appear in it more than once. Each entry names
+      its own RNTI, so the shard offset does not apply. */
+      results[b].all_dl_grants.insert(results[b].all_dl_grants.end(),
+                                      sharded_results[thread_id].all_dl_grants.begin(),
+                                      sharded_results[thread_id].all_dl_grants.end());
+
       for (uint32_t k = 0; k < n_rntis; k++) {
         results[b].dl_dcis[k + rnti_s]   = sharded_results[thread_id].dl_dcis[k];
         results[b].ul_dcis[k + rnti_s]   = sharded_results[thread_id].ul_dcis[k];
@@ -376,6 +385,40 @@ void NRScopeWorker::Run()
     if (worker_state.dci_inited) {
       MergeResults();
       slot_result.dci_feedback_results = results;
+
+      /* How much DM-RS this slot actually offers, reported once a second.
+      
+      Grants, not UEs: each grant places its own pilots, so this is the number of
+      independent channel estimates a slot can yield, and the PRB total is how
+      much of the band they cover. Rate limited because it is a running health
+      figure rather than an event. */
+      {
+        static std::atomic<uint64_t> n_slots{0}, n_grants{0}, n_prbs{0}, last_report{0};
+        uint64_t                     g = 0, prb = 0;
+        for (const auto& r : results) {
+          g += r.all_dl_grants.size();
+          for (const auto& rec : r.all_dl_grants) {
+            prb += rec.grant.grant.nof_prb;
+          }
+        }
+        n_slots.fetch_add(1, std::memory_order_relaxed);
+        n_grants.fetch_add(g, std::memory_order_relaxed);
+        n_prbs.fetch_add(prb, std::memory_order_relaxed);
+
+        const uint64_t now  = (uint64_t)time(NULL);
+        uint64_t       prev = last_report.load(std::memory_order_relaxed);
+        if (now != prev && last_report.compare_exchange_strong(prev, now)) {
+          const uint64_t sl = n_slots.exchange(0, std::memory_order_relaxed);
+          const uint64_t gr = n_grants.exchange(0, std::memory_order_relaxed);
+          const uint64_t pb = n_prbs.exchange(0, std::memory_order_relaxed);
+          if (gr > 0) {
+            printf("DM-RS available: %lu grant(s) over %lu slot(s), %.1f PRB per grant\n",
+                   (unsigned long)gr,
+                   (unsigned long)sl,
+                   (double)pb / (double)gr);
+          }
+        }
+      }
     }
 
     // std::cout << "After processing sf_round: " << sf_round << ", sfn: "
