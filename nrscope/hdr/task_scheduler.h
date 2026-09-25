@@ -58,6 +58,11 @@ public:
                 float                          resample_ratio_,
                 uint32_t                       raw_srate_);
 
+  /* Build every worker's SIB decoder before the capture starts. Doing it on
+    demand made all of the workers stall on the same slot, which overflowed the
+    slot queue; doing it here costs the same time while nothing is arriving. */
+  int PrewarmWorkers();
+
   int UpdateStateandLog();
 
   int UpdatewithResult(SlotResult now_result);

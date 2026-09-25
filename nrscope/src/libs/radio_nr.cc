@@ -667,6 +667,14 @@ int Radio::RadioInitandStart()
         return NR_FAILURE;
       }
 
+      /* Build the workers' SIB decoders here, while nothing is arriving. Left to
+      the first slot, every worker built one at the same moment and none of them
+      consumed while they did, which overflowed the slot queue. */
+      if (task_scheduler_nrscope.PrewarmWorkers() < SRSRAN_SUCCESS) {
+        ERROR("Error pre-warming the workers");
+        return NR_FAILURE;
+      }
+
       if (RadioCapture() < SRSASN_SUCCESS) {
         ERROR("Error in RadioCapture");
         return NR_FAILURE;

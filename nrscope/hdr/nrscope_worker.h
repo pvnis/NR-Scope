@@ -71,6 +71,11 @@ public:
                          srsran_ue_sync_nr_outcome_t outcome_,
                          cf_t* const* rx_buffer_);
 
+  /* Build what can be built before the capture starts, so the pool is not
+    stalling on it while slots are arriving. Only the SIB decoder qualifies: RACH
+    needs a SIB1 and the DCI decoders need an RNTI, neither of which exists yet. */
+  int PrewarmDecoders(WorkState* task_scheduler_state);
+
   int InitSIBDecoder();
   int InitRACHDecoder();
   int InitDCIDecoders();

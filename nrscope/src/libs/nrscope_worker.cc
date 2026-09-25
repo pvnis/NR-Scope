@@ -1,5 +1,6 @@
 #include "nrscope/hdr/nrscope_worker.h"
 #include <chrono>
+#include <mutex>
 #include <semaphore>
 
 namespace NRScopeTask {
@@ -89,6 +90,20 @@ void NRScopeWorker::CopySlotandBuffer(uint64_t                    sf_round_,
   for (uint32_t a = 0; a < worker_state.nof_antennas; a++) {
     srsran_vec_cf_copy(rx_buffer[a], rx_buffer_[a], worker_state.slot_sz);
   }
+}
+
+int NRScopeWorker::PrewarmDecoders(WorkState* task_scheduler_state)
+{
+  if (SyncState(task_scheduler_state) < SRSRAN_SUCCESS) {
+    return SRSRAN_ERROR;
+  }
+  if (!worker_state.sib1_inited) {
+    if (InitSIBDecoder() < SRSRAN_SUCCESS) {
+      return SRSRAN_ERROR;
+    }
+    worker_state.sib1_inited = true;
+  }
+  return SRSRAN_SUCCESS;
 }
 
 int NRScopeWorker::InitSIBDecoder()
@@ -264,7 +279,7 @@ void NRScopeWorker::Run()
     // busy = true;
     busy.store(true, std::memory_order_release);
     // worker_locks[worker_id].unlock();
-    struct timeval t0, t1;
+    // (per-slot timing removed with the sub-threads it measured)
 
     if (NRSCOPE_TRACE_PER_SLOT)
       std::cout << "Processing sf_round: " << sf_round << ", sfn: " << outcome.sfn << ", slot.idx: " << slot.idx
@@ -280,54 +295,63 @@ void NRScopeWorker::Run()
     slot_result.outcome     = outcome;
     slot_result.sf_round    = sf_round;
 
-    /* Put the initialization delay into the worker's thread */
-    if (!worker_state.sib1_inited) {
-      InitSIBDecoder();
-      worker_state.sib1_inited = true;
-    }
+    /* Decoder construction, at most one worker at a time.
 
-    if (!worker_state.rach_inited && worker_state.sib1_found) {
-      InitRACHDecoder();
-      worker_state.rach_inited = true;
-    }
+    Building a decoder allocates srsRAN objects -- transforms, softbuffers,
+    tables -- and takes long enough that the worker stops consuming slots while
+    it happens. Every worker discovers it needs the same decoder in the same
+    slot, so all sixteen used to stall together and the slot queue overflowed
+    each time: once for SIB, once for RACH, and once for the DCI decoders when
+    the first C-RNTI appeared. Those three moments accounted for every dropped
+    slot in a seventy second run; the steady state never dropped one.
 
-    if (!worker_state.dci_inited && worker_state.rach_found) {
-      InitDCIDecoders();
-      worker_state.dci_inited = true;
-    }
+    SIB is normally built before capture starts, by PrewarmWorkers(). The other
+    two cannot be, because they need a SIB1 and an RNTI that only exist once the
+    capture is running. So they are serialised instead: a worker that cannot take
+    the lock leaves the decoder for a later slot and processes this one without
+    it, which is what it did before being initialised anyway. One worker stalls
+    rather than sixteen. */
+    static std::mutex init_lock;
 
-    std::thread sibs_thread;
-    /* If sib1 is not found, we run the sibs_thread; if it's found, we skip. */
-    if (worker_state.sib1_inited and !worker_state.sib1_found) {
-      if (worker_state.cpu_affinity) {
-        cpu_set_t cpu_set_sib;
-        CPU_ZERO(&cpu_set_sib);
-        CPU_SET(worker_id * (3 + worker_state.nof_threads) + 1, &cpu_set_sib);
-        sibs_thread =
-            std::thread{&SIBsDecoder::DecodeandParseSIB1fromSlot, &sibs_decoder, &slot, &worker_state, &slot_result};
-        assert(pthread_setaffinity_np(sibs_thread.native_handle(), sizeof(cpu_set_t), &cpu_set_sib) == 0);
-      } else {
-        sibs_thread =
-            std::thread{&SIBsDecoder::DecodeandParseSIB1fromSlot, &sibs_decoder, &slot, &worker_state, &slot_result};
+    if (!worker_state.sib1_inited || (!worker_state.rach_inited && worker_state.sib1_found)
+        || (!worker_state.dci_inited && worker_state.rach_found)) {
+      std::unique_lock<std::mutex> lk(init_lock, std::try_to_lock);
+      if (lk.owns_lock()) {
+        if (!worker_state.sib1_inited) {
+          InitSIBDecoder();
+          worker_state.sib1_inited = true;
+        }
+        if (!worker_state.rach_inited && worker_state.sib1_found) {
+          InitRACHDecoder();
+          worker_state.rach_inited = true;
+        }
+        if (!worker_state.dci_inited && worker_state.rach_found) {
+          InitDCIDecoders();
+          worker_state.dci_inited = true;
+        }
       }
     }
 
-    std::thread rach_thread;
+    /* SIB, RACH and DCI decoding run inline on this worker thread.
+    
+    They used to be spawned as std::threads per slot and joined immediately,
+    which cost a create and a join for each -- measured at 15.6 us a pair on this
+    machine, about 4000 a second across the pool. The concurrency bought nothing:
+    the worker pool already runs one slot per worker, so sixteen slots are in
+    flight at once, and splitting a single slot three ways on top of that only
+    added syscalls and scheduler churn. Running them in order here also makes the
+    worker a plain function again, which matters because the sensing path will
+    add per-slot work to it. */
+
+    /* If SIB1 is not found we decode it; once found this is skipped for good. */
+    if (worker_state.sib1_inited && !worker_state.sib1_found) {
+      sibs_decoder.DecodeandParseSIB1fromSlot(&slot, &worker_state, &slot_result);
+    }
+
     if (worker_state.rach_inited) {
-      if (worker_state.cpu_affinity) {
-        cpu_set_t cpu_set_rach;
-        CPU_ZERO(&cpu_set_rach);
-        CPU_SET(worker_id * (3 + worker_state.nof_threads) + 2, &cpu_set_rach);
-        rach_thread =
-            std::thread{&RachDecoder::DecodeandParseMS4fromSlot, &rach_decoder, &slot, &worker_state, &slot_result};
-        assert(pthread_setaffinity_np(rach_thread.native_handle(), sizeof(cpu_set_t), &cpu_set_rach) == 0);
-      } else {
-        rach_thread =
-            std::thread{&RachDecoder::DecodeandParseMS4fromSlot, &rach_decoder, &slot, &worker_state, &slot_result};
-      }
+      rach_decoder.DecodeandParseMS4fromSlot(&slot, &worker_state, &slot_result);
     }
 
-    std::vector<std::thread> dci_threads;
     if (worker_state.dci_inited) {
       slot_result.dci_result = true;
 
@@ -336,55 +360,17 @@ void NRScopeWorker::Run()
       dl_prb_bits_rate.resize(worker_state.nof_known_rntis);
       ul_prb_bits_rate.resize(worker_state.nof_known_rntis);
 
-      gettimeofday(&t0, NULL);
-      if (worker_state.cpu_affinity) {
-        for (uint32_t i = 0; i < worker_state.nof_threads; i++) {
-          cpu_set_t cpu_set_dci;
-          CPU_ZERO(&cpu_set_dci);
-          CPU_SET(worker_id * (3 + worker_state.nof_threads) + i + 3, &cpu_set_dci);
-          dci_threads.emplace_back(&DCIDecoder::DecodeandParseDCIfromSlot,
-                                   dci_decoders[i].get(),
-                                   &slot,
-                                   &worker_state,
-                                   std::ref(sharded_results),
-                                   std::ref(sharded_rntis),
-                                   std::ref(nof_sharded_rntis),
-                                   std::ref(dl_prb_rate),
-                                   std::ref(dl_prb_bits_rate),
-                                   std::ref(ul_prb_rate),
-                                   std::ref(ul_prb_bits_rate));
-          assert(pthread_setaffinity_np(dci_threads[i].native_handle(), sizeof(cpu_set_t), &cpu_set_dci) == 0);
-        }
-      } else {
-        for (uint32_t i = 0; i < worker_state.nof_threads; i++) {
-          dci_threads.emplace_back(&DCIDecoder::DecodeandParseDCIfromSlot,
-                                   dci_decoders[i].get(),
-                                   &slot,
-                                   &worker_state,
-                                   std::ref(sharded_results),
-                                   std::ref(sharded_rntis),
-                                   std::ref(nof_sharded_rntis),
-                                   std::ref(dl_prb_rate),
-                                   std::ref(dl_prb_bits_rate),
-                                   std::ref(ul_prb_rate),
-                                   std::ref(ul_prb_bits_rate));
-        }
-      }
-
       for (uint32_t i = 0; i < worker_state.nof_threads; i++) {
-        if (dci_threads[i].joinable()) {
-          dci_threads[i].join();
-        }
+        dci_decoders[i]->DecodeandParseDCIfromSlot(&slot,
+                                                   &worker_state,
+                                                   sharded_results,
+                                                   sharded_rntis,
+                                                   nof_sharded_rntis,
+                                                   dl_prb_rate,
+                                                   dl_prb_bits_rate,
+                                                   ul_prb_rate,
+                                                   ul_prb_bits_rate);
       }
-      gettimeofday(&t1, NULL);
-    }
-
-    if (sibs_thread.joinable()) {
-      sibs_thread.join();
-    }
-
-    if (rach_thread.joinable()) {
-      rach_thread.join();
     }
 
     if (worker_state.dci_inited) {
