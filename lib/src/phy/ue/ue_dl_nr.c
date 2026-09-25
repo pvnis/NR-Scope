@@ -792,6 +792,7 @@ static int ue_dl_nr_find_dci_ss(srsran_ue_dl_nr_t*           q,
         // Append DCI message into the list
         q->dl_dci_msg[q->dl_dci_msg_count] = dci_msg;
         q->dl_dci_msg_count++;
+
       }
     }
   }
@@ -964,7 +965,8 @@ static int ue_dl_nr_find_dci_ss_nrscope_dciloop(srsran_ue_dl_nr_t*           q,
                                 const srsran_slot_cfg_t*     slot_cfg,
                                 const srsran_search_space_t* search_space,
                                 uint16_t                     rnti,
-                                srsran_rnti_type_t           rnti_type)
+                                srsran_rnti_type_t           rnti_type,
+                                srsran_dci_loc_hint_t*       hint)
 {
   uint32_t dci_sizes[SRSRAN_DCI_NR_MAX_NOF_SIZES] = {};
   uint32_t dci_sizes_count                        = 0;
@@ -1021,10 +1023,24 @@ static int ue_dl_nr_find_dci_ss_nrscope_dciloop(srsran_ue_dl_nr_t*           q,
     // Reset the pdcch_info_count.
     // q->pdcch_info_count = 0;
     // Iterate all possible aggregation levels
-    for (uint32_t L = 0;
-        L < SRSRAN_SEARCH_SPACE_NOF_AGGREGATION_LEVELS_NR && q->dl_dci_msg_count < SRSRAN_MAX_DCI_MSG_NR;
-        L++) {
+    /* Aggregation levels, hinted one first.
     
+    Every level is still visited, only the order changes, so a hint can never
+    cause a DCI to be missed. Combined with the early exit below, a UE that the
+    scheduler keeps at the same level and candidate is found on the first polar
+    decode instead of after tens of them. */
+    for (uint32_t L_i = 0;
+        L_i < SRSRAN_SEARCH_SPACE_NOF_AGGREGATION_LEVELS_NR && q->dl_dci_msg_count < SRSRAN_MAX_DCI_MSG_NR;
+        L_i++) {
+      uint32_t L = L_i;
+      if (hint != NULL && hint->valid && hint->L < SRSRAN_SEARCH_SPACE_NOF_AGGREGATION_LEVELS_NR) {
+        if (L_i == 0) {
+          L = hint->L;                 // try the remembered level first
+        } else if (L_i <= hint->L) {
+          L = L_i - 1;                 // then the ones it displaced
+        }
+      }
+
       // Calculate possible PDCCH DCI candidates
       uint32_t candidates[SRSRAN_SEARCH_SPACE_MAX_NOF_CANDIDATES_NR] = {};
       int      nof_candidates                                        = srsran_pdcch_nr_locations_coreset(
@@ -1034,8 +1050,16 @@ static int ue_dl_nr_find_dci_ss_nrscope_dciloop(srsran_ue_dl_nr_t*           q,
         return SRSRAN_ERROR;
       }
 
-      // Iterate over the candidates
-      for (int ncce_idx = 0; ncce_idx < nof_candidates && q->dl_dci_msg_count < SRSRAN_MAX_DCI_MSG_NR; ncce_idx++) {
+      // Candidates, hinted one first, same reasoning as the level above
+      for (int cand_i = 0; cand_i < nof_candidates && q->dl_dci_msg_count < SRSRAN_MAX_DCI_MSG_NR; cand_i++) {
+        int ncce_idx = cand_i;
+        if (hint != NULL && hint->valid && L == hint->L && (int)hint->cand_idx < nof_candidates) {
+          if (cand_i == 0) {
+            ncce_idx = (int)hint->cand_idx;
+          } else if (cand_i <= (int)hint->cand_idx) {
+            ncce_idx = cand_i - 1;
+          }
+        }
         // Build DCI context
         srsran_dci_ctx_t ctx = {};
         ctx.location.L       = L;
@@ -1124,6 +1148,20 @@ static int ue_dl_nr_find_dci_ss_nrscope_dciloop(srsran_ue_dl_nr_t*           q,
         // Append DCI message into the list
         q->dl_dci_msg[q->dl_dci_msg_count] = dci_msg;
         q->dl_dci_msg_count++;
+
+        /* Remember where it was, and stop looking.
+        
+        The caller keeps only dci_dl_list[0], so every decode after the first was
+        already being discarded; sweeping the remaining levels and candidates
+        bought nothing. Stopping here makes the hint above worth having, because
+        a hit now costs one decode rather than one decode plus the rest of the
+        sweep. */
+        if (hint != NULL) {
+          hint->valid    = true;
+          hint->L        = L;
+          hint->cand_idx = (uint32_t)ncce_idx;
+        }
+        return SRSRAN_SUCCESS;
       }
     }
   }
@@ -1253,7 +1291,8 @@ int srsran_ue_dl_nr_find_dl_dci_nrscope_dciloop(srsran_ue_dl_nr_t*       q,
                                                 uint16_t                 rnti,
                                                 srsran_rnti_type_t       rnti_type,
                                                 srsran_dci_dl_nr_t*      dci_dl_list,
-                                                uint32_t                 nof_dci_msg)
+                                                uint32_t                 nof_dci_msg,
+                                                srsran_dci_loc_hint_t*   hint)
 {
   // Check inputs
   if (q == NULL || slot_cfg == NULL || dci_dl_list == NULL) {
@@ -1279,7 +1318,7 @@ int srsran_ue_dl_nr_find_dl_dci_nrscope_dciloop(srsran_ue_dl_nr_t*       q,
 
     // Find DCIs in the selected search space
     // int ret = ue_dl_nr_find_dci_ss_nrscope(q, slot_cfg, &q->cfg.search_space[i], rnti_list[0], rnti_type);
-    int ret = ue_dl_nr_find_dci_ss_nrscope_dciloop(q, slot_cfg, &q->cfg.search_space[i], rnti, rnti_type);
+    int ret = ue_dl_nr_find_dci_ss_nrscope_dciloop(q, slot_cfg, &q->cfg.search_space[i], rnti, rnti_type, hint);
 
     if (ret < SRSRAN_SUCCESS) {
       ERROR("Error searching DCI");

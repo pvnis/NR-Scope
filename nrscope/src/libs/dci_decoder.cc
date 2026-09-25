@@ -659,11 +659,57 @@ int DCIDecoder::DCIDecoderandReceptionInit(WorkState* state, int bwp_id, cf_t* i
   }
 
   dci_cfg.pdsch_dynamic_bundling = false;
-  if (bwp_dl_ded_s_ptr->pdsch_cfg.setup().prb_bundling_type.type() ==
-      asn1::rrc_nr::pdsch_cfg_s::prb_bundling_type_c_::types_opts::dynamic_bundling) {
-    dci_cfg.pdsch_dynamic_bundling = true;
-    ERROR("PRB dynamic bundling not implemented, which can cause being unable"
-          "to find DCIs. We are working on it.");
+
+  /* PRB bundling, reported once because it decides whether a wideband delay
+  transform over a grant is meaningful at all.
+
+  prb-BundlingType is the granularity over which a receiver may assume the
+  precoder is constant (38.214 5.1.2.3). It is not the PMI sub-band size, which
+  is only what the UE recommends. Sensing divides the DM-RS out of a grant and
+  transforms the whole measured span as one coherent frequency response, which
+  holds only if one precoder covers it: at wideband it does, at a bundle size of
+  2 or 4 PRBs the precoder may change many times inside a single grant and the
+  delay profile is smeared by the scheduler rather than by the scene.
+
+  Note the default. staticBundling offers n4 or wideband, and 38.331 reads an
+  absent bundle size as n2, so silence here means the tightest bundling rather
+  than the loosest. */
+  {
+    const auto& pbt = bwp_dl_ded_s_ptr->pdsch_cfg.setup().prb_bundling_type;
+    switch (pbt.type().value) {
+      case asn1::rrc_nr::pdsch_cfg_s::prb_bundling_type_c_::types_opts::static_bundling: {
+        const auto& sb = pbt.static_bundling();
+        if (!sb.bundle_size_present) {
+          printf("PRB bundling: static, bundle size absent -> n2 (default). "
+                 "The precoder may change every 2 PRBs within a grant; a wideband delay "
+                 "transform over the grant is NOT valid.\n");
+        } else {
+          const bool wideband =
+              sb.bundle_size.value == asn1::rrc_nr::pdsch_cfg_s::prb_bundling_type_c_::static_bundling_s_::
+                                          bundle_size_opts::wideband;
+          printf("PRB bundling: static, bundle size %s. %s\n",
+                 sb.bundle_size.to_string(),
+                 wideband ? "One precoder spans the grant; a wideband delay transform is valid."
+                          : "The precoder may change every 4 PRBs within a grant; a wideband delay "
+                            "transform over the grant is NOT valid.");
+        }
+        break;
+      }
+      case asn1::rrc_nr::pdsch_cfg_s::prb_bundling_type_c_::types_opts::dynamic_bundling: {
+        dci_cfg.pdsch_dynamic_bundling = true;
+        const auto& db = pbt.dynamic_bundling();
+        printf("PRB bundling: dynamic, set1 %s, set2 %s. The DCI selects between them per grant, "
+               "so validity of a wideband delay transform varies grant by grant.\n",
+               db.bundle_size_set1_present ? db.bundle_size_set1.to_string() : "absent(n2)",
+               db.bundle_size_set2_present ? db.bundle_size_set2.to_string() : "absent(n2)");
+        ERROR("PRB dynamic bundling not implemented, which can cause being unable"
+              "to find DCIs. We are working on it.");
+        break;
+      }
+      default:
+        printf("PRB bundling: not configured in this PDSCH config.\n");
+        break;
+    }
   }
 
   switch (bwp_dl_ded_s_ptr->pdsch_cfg.setup().res_alloc) {
@@ -1048,8 +1094,12 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
     memcpy(ue_dl_tmp, &ue_dl_dci, sizeof(srsran_ue_dl_nr_t));
     memcpy(slot_tmp, slot, sizeof(srsran_slot_cfg_t));
 
+    /* Start from wherever this RNTI's DCI was last found. The search still
+    visits everything on a miss, so this only reorders work. */
+    srsran_dci_loc_hint_t& loc_hint = dci_loc_hints[sharded_rntis[dci_decoder_id][rnti_idx]];
+
     int nof_dl_dci = srsran_ue_dl_nr_find_dl_dci_nrscope_dciloop(
-        ue_dl_tmp, slot_tmp, sharded_rntis[dci_decoder_id][rnti_idx], srsran_rnti_type_c, dci_dl_tmp, 4);
+        ue_dl_tmp, slot_tmp, sharded_rntis[dci_decoder_id][rnti_idx], srsran_rnti_type_c, dci_dl_tmp, 4, &loc_hint);
 
     if (nof_dl_dci < SRSRAN_SUCCESS) {
       ERROR("Error in blind search");
@@ -1132,8 +1182,12 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
     //   ue_dl_tmp->cfg.search_space[1].nof_candidates[4]
     // );
 
+    /* Start from wherever this RNTI's DCI was last found. The search still
+    visits everything on a miss, so this only reorders work. */
+    srsran_dci_loc_hint_t& loc_hint_nca = dci_loc_hints[sharded_rntis[dci_decoder_id][rnti_idx]];
+
     int nof_dl_dci_nca = srsran_ue_dl_nr_find_dl_dci_nrscope_dciloop(
-        ue_dl_tmp, slot_tmp, sharded_rntis[dci_decoder_id][rnti_idx], srsran_rnti_type_c, dci_dl_tmp, 4);
+        ue_dl_tmp, slot_tmp, sharded_rntis[dci_decoder_id][rnti_idx], srsran_rnti_type_c, dci_dl_tmp, 4, &loc_hint_nca);
 
     if (nof_dl_dci_nca < SRSRAN_SUCCESS) {
       ERROR("Error in blind search");

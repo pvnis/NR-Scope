@@ -1,6 +1,8 @@
 #ifndef DCI_DECODER_H
 #define DCI_DECODER_H
 
+#include <unordered_map>
+
 #include "nrscope/hdr/nrscope_def.h"
 // #include "nrscope/hdr/task_scheduler.h"
 
@@ -44,6 +46,13 @@ public:
 
   // std::vector<float> dl_prb_bits_rate;
   // std::vector<float> ul_prb_bits_rate;
+
+  /* Where each RNTI's DCI was last found, so the next slot's blind search can
+    start there instead of sweeping every aggregation level and candidate. Keyed
+    by RNTI rather than by position in the shard, because the shard is rebuilt as
+    UEs come and go. A stale entry only costs one wasted decode before the sweep
+    resumes, so entries are never invalidated explicitly. */
+  std::unordered_map<uint16_t, srsran_dci_loc_hint_t> dci_loc_hints;
 
   srsran_dci_dl_nr_t dci_dl_tmp[4];
   srsran_dci_ul_nr_t dci_ul_tmp[4];

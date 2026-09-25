@@ -134,12 +134,34 @@ SRSRAN_API int srsran_ue_dl_nr_find_dl_dci_nrscope(srsran_ue_dl_nr_t*       q,
                                 uint32_t                 nof_dci_msg);
 
 // For DCI Loop only!
+/**
+ * @brief Where an RNTI's DCI was last found, so the next search can start there.
+ *
+ * The blind search tries every aggregation level and every candidate of each,
+ * which is tens of polar decodes per RNTI per slot. A scheduler reuses an
+ * aggregation level and candidate index for a UE over long stretches, so trying
+ * last time's position first usually finds the DCI on the first decode.
+ *
+ * The candidate index is cached rather than the CCE, because
+ * srsran_pdcch_nr_locations_coreset() hashes the slot number: the same logical
+ * candidate sits at a different CCE every slot, so only its index is stable.
+ *
+ * A miss costs one extra decode and then falls back to the full sweep, so the
+ * hint can never make the search miss a DCI it would otherwise have found.
+ */
+typedef struct SRSRAN_API {
+  bool     valid;
+  uint32_t L;        ///< aggregation level index the DCI was found at
+  uint32_t cand_idx; ///< index within that level's candidate list
+} srsran_dci_loc_hint_t;
+
 SRSRAN_API int srsran_ue_dl_nr_find_dl_dci_nrscope_dciloop(srsran_ue_dl_nr_t*       q,
                                 const srsran_slot_cfg_t* slot_cfg,
                                 uint16_t                 rnti,
                                 srsran_rnti_type_t       rnti_type,
                                 srsran_dci_dl_nr_t*      dci_dl_list,
-                                uint32_t                 nof_dci_msg);
+                                uint32_t                 nof_dci_msg,
+                                srsran_dci_loc_hint_t*   hint);
 
 SRSRAN_API int srsran_ue_dl_nr_find_ul_dci(srsran_ue_dl_nr_t*       q,
                                            const srsran_slot_cfg_t* slot_cfg,
