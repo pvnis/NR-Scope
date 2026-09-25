@@ -1,4 +1,5 @@
 #include "nrscope/hdr/task_scheduler.h"
+#include <ctime>
 
 namespace NRScopeTask {
 
@@ -540,15 +541,19 @@ int TaskSchedulerNRScope::StoreSlotData(uint64_t                    sf_round,
   const uint32_t i = next_slot_idx.load(std::memory_order_relaxed);
   SlotData_&     s = slot_data[i];
 
-  // Check full
+  /* Queue full: the entry about to be written has not been taken by a worker
+  yet. Counted rather than printed per occurrence -- under sustained overrun this
+  fired thousands of times a second, and the printing itself then became part of
+  why the workers were behind. One line a second says the same thing. */
   if (!slot_data[i].processed.load(std::memory_order_acquire)) {
-    // Ring full → drop-newest (or switch to drop-oldest if you prefer)
-    // dropped_slots.fetch_add(1, std::memory_order_relaxed);
-    ERROR("Overwriting the unprocessed data... Consider improving processing"
-          "throughput.");
-    printf("Overwriting the unprocessed data... Consider improving processing"
-           "throughput.\n");
-    // return SRSRAN_SUCCESS;
+    static std::atomic<uint64_t> dropped{0};
+    static std::atomic<uint64_t> last_report{0};
+    const uint64_t               n   = dropped.fetch_add(1, std::memory_order_relaxed) + 1;
+    const uint64_t               now = (uint64_t)time(NULL);
+    uint64_t                     prev = last_report.load(std::memory_order_relaxed);
+    if (now != prev && last_report.compare_exchange_strong(prev, now)) {
+      ERROR("Slot queue full: %lu slot(s) overwritten so far; workers are behind", (unsigned long)n);
+    }
   }
 
   s.sf_round = sf_round;

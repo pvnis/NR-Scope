@@ -797,7 +797,8 @@ int Radio::FetchAndResample()
   while (true) {
     int current_value;
     sem_getvalue(&smph_sf_data_finished, &current_value);
-    std::cout << "current value: " << current_value << std::endl;
+    if (NRSCOPE_TRACE_PER_SLOT)
+      std::cout << "current value: " << current_value << std::endl;
     sem_wait(&smph_sf_data_finished);
 
     outcome.timestamp = last_rx_time.get(0);
@@ -857,7 +858,8 @@ int Radio::FetchAndResample()
     }
 
     gettimeofday(&t1, NULL);
-    std::cout << "producer time_spend: " << (t1.tv_usec - t0.tv_usec) << "(us)" << std::endl;
+    if (NRSCOPE_TRACE_PER_SLOT)
+      std::cout << "producer time_spend: " << (t1.tv_usec - t0.tv_usec) << "(us)" << std::endl;
   }
 
   return SRSRAN_SUCCESS;
@@ -953,7 +955,8 @@ int Radio::DecodeAndProcess()
     sem_post(&smph_sf_data_finished);
 
     gettimeofday(&t1, NULL);
-    std::cout << "consumer time_spend: " << (int)(t1.tv_usec - t0.tv_usec) << "(us)" << std::endl;
+    if (NRSCOPE_TRACE_PER_SLOT)
+      std::cout << "consumer time_spend: " << (int)(t1.tv_usec - t0.tv_usec) << "(us)" << std::endl;
     next_consume_at++;
     first_time = false;
   } // true loop

@@ -144,7 +144,7 @@ int SIBsDecoder::DecodeandParseSIB1fromSlot(srsran_slot_cfg_t* slot,
     info->result.crc ? "OK" : "KO");
   }
   if (nof_found_dci < 1) {
-    printf("SIBDecoder -- No DCI found :'(\n");
+    NRSCOPE_SLOT_TRACE("SIBDecoder -- No DCI found :'(\n");
     return SRSRAN_ERROR;
   }
 

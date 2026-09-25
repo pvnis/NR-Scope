@@ -75,6 +75,19 @@
  * is built for. */
 #define NRSCOPE_SLOT_QUEUE_DEPTH 64
 
+/* Per-slot tracing. Off by default: at 2000 slots/s these printed about 7000
+lines a second, which is a write syscall and a lock on stdout each time, so every
+worker serialised on it. Set to 1 to get them back while debugging. */
+#ifndef NRSCOPE_TRACE_PER_SLOT
+#define NRSCOPE_TRACE_PER_SLOT 0
+#endif
+#define NRSCOPE_SLOT_TRACE(...)      \
+  do {                               \
+    if (NRSCOPE_TRACE_PER_SLOT) {    \
+      printf(__VA_ARGS__);           \
+    }                                \
+  } while (0)
+
 #define NR_FAILURE -1
 #define NR_SUCCESS 0
 
