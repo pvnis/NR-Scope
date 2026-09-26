@@ -237,9 +237,14 @@ namespace ToGoogle{
     }
   }     
 
+  /* Same reasoning as NRScopeLog::exit_logger: a namespace-scope std::thread
+    left joinable at teardown aborts the process, so reap it here. */
   void exit_to_google(){
     to_google_lock.lock();
     run_google = false;
     to_google_lock.unlock();
+    if (google_thread.joinable()) {
+      google_thread.join();
+    }
   }
 };

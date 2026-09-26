@@ -53,7 +53,17 @@ int main(int argc, char** argv){
     if(t.joinable()){
       t.join();
     }
-  } 
+  }
+
+  /* Stop the writer threads before returning. Without this the process aborts
+    on the way out and whatever the radio was reporting is lost behind
+    "terminate called without an active exception". */
+  if(radios[0].to_google){
+    ToGoogle::exit_to_google();
+  }
+  if(radios[0].local_log){
+    NRScopeLog::exit_logger();
+  }
 
   return NR_SUCCESS;
 }

@@ -232,7 +232,15 @@ namespace NRScopeLog{
     }
   }
 
+  /* Stop the writer and reap it. The thread has to be joined here: it is a
+    namespace-scope std::thread, so if it is still joinable when the process
+    tears down, its destructor calls std::terminate and the run ends in
+    "terminate called without an active exception" instead of whatever the
+    program was actually trying to report. */
   void exit_logger(){
     run_log = false;
+    if (log_thread.joinable()) {
+      log_thread.join();
+    }
   }
 };

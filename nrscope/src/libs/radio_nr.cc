@@ -585,6 +585,15 @@ int Radio::RadioInitandStart()
     rf_buffer.set_nof_samples(pre_resampling_slot_sz);
     rf_buffer.set(0, pre_resampling_rx_buffer); // + slot_sz);
 
+    /* What the trials saw, so a search that finds nothing can say why rather
+      than just ending the process. best_snr_db separates "no signal at all"
+      from "signal present but PBCH never decoded", and nof_other_pci from
+      "decoded a cell, but not the one pci asks for". */
+    float    best_snr_db   = -INFINITY;
+    uint32_t nof_pbch_crc  = 0;
+    uint32_t nof_other_pci = 0;
+    uint32_t last_other_pci = 0;
+
     for (uint32_t trial = 0; trial < nof_trials; trial++) {
       if (trial == 0) {
         srsran_vec_cf_zero(rx_buffer[0], slot_sz);
@@ -595,6 +604,7 @@ int Radio::RadioInitandStart()
       srsran::rf_timestamp_t& rf_timestamp = last_rx_time;
 
       if (not radio->rx_now(rf_buffer, rf_timestamp)) {
+        std::cout << "Cell search: rx_now failed on trial " << trial << ", giving up" << std::endl;
         return SRSRAN_ERROR;
       }
 
@@ -635,6 +645,10 @@ int Radio::RadioInitandStart()
       *(last_rx_time.get_ptr(0)) = rf_timestamp.get(0);
       cs_ret                     = srsran_searcher.run_slot(rx_buffer[0], slot_sz);
       // std::cout << "Slot_sz: " << slot_sz << std::endl;
+      best_snr_db = std::max(best_snr_db, cs_ret.ssb_res.measurements.snr_dB);
+      if (cs_ret.ssb_res.pbch_msg.crc) {
+        nof_pbch_crc++;
+      }
       if (cs_ret.result == srsue::nr::cell_search::ret_t::CELL_FOUND) {
         if (pci == 9999) {
           // pci not configured, return the first detected cell
@@ -645,10 +659,21 @@ int Radio::RadioInitandStart()
             break;
           } else {
             // pci configured but not match, skip the current cell
-            cs_ret.result = srsue::nr::cell_search::ret_t::CELL_NOT_FOUND;
+            nof_other_pci++;
+            last_other_pci = cs_ret.ssb_res.N_id;
+            cs_ret.result  = srsue::nr::cell_search::ret_t::CELL_NOT_FOUND;
           }
         }
       }
+    }
+    if (cs_ret.result != srsue::nr::cell_search::ret_t::CELL_FOUND) {
+      std::cout << "Cell search: no cell after " << nof_trials << " slots at "
+                << srsran_searcher_cfg_t.ssb_freq_hz / 1e6 << " MHz"
+                << " (best SSB SNR " << best_snr_db << " dB, PBCH CRC ok " << nof_pbch_crc << "x";
+      if (nof_other_pci > 0) {
+        std::cout << ", " << nof_other_pci << "x decoded pci " << last_other_pci << " != configured " << pci;
+      }
+      std::cout << ")" << std::endl;
     }
     if (cs_ret.result == srsue::nr::cell_search::ret_t::CELL_FOUND) {
       std::cout << "Cell Found!" << std::endl;
