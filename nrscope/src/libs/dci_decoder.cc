@@ -146,24 +146,43 @@ int DCIDecoder::DCIDecoderandReceptionInit(WorkState* state, int bwp_id, cf_t* i
       // printf("pdcch_cfg.search_space[%d].coreset_id in bwp%u: %u\n", pdcch_cfg.search_space[ss_id].id,
       // bwp_id, pdcch_cfg.search_space[ss_id].coreset_id);
 
-      pdcch_cfg.search_space[ss_id].type = srsran_search_space_type_ue;
-      if (bwp_dl_ded_s_ptr->pdcch_cfg.setup()
-              .search_spaces_to_add_mod_list[ss_id]
-              .search_space_type.ue_specific()
-              .dci_formats.formats0_minus1_and_minus1_minus1) {
-        pdcch_cfg.search_space[ss_id].formats[0] = srsran_dci_format_nr_1_1;
-        pdcch_cfg.search_space[ss_id].formats[1] = srsran_dci_format_nr_0_1;
-        dci_cfg.monitor_0_0_and_1_0              = false;
-        dci_cfg.monitor_common_0_0               = false;
-      } else if (bwp_dl_ded_s_ptr->pdcch_cfg.setup()
-                     .search_spaces_to_add_mod_list[ss_id]
-                     .search_space_type.ue_specific()
-                     .dci_formats.formats0_minus0_and_minus1_minus0) {
-        pdcch_cfg.search_space[ss_id].formats[0] = srsran_dci_format_nr_1_0;
-        pdcch_cfg.search_space[ss_id].formats[1] = srsran_dci_format_nr_0_0;
-        dci_cfg.monitor_0_1_and_1_1              = false;
+      /* searchSpaceType is a CHOICE of common or ue-Specific, and a dedicated
+      PDCCH configuration may carry either. Reading ue_specific() without
+      checking works only while every entry happens to be UE-specific; the
+      Sunrise cell configures a common search space here, and the access then
+      returned a default object after asn1 logged "Invalid field access for
+      choice type searchSpaceType", which crashed the decoder a few slots later.
+      Checked the way srsran_rrc_nr_utils does it. */
+      const auto& ss_cfg = bwp_dl_ded_s_ptr->pdcch_cfg.setup().search_spaces_to_add_mod_list[ss_id];
+
+      if (!ss_cfg.search_space_type_present) {
+        // Nothing says what to monitor, so monitor nothing rather than guess.
+        pdcch_cfg.search_space_present[ss_id] = false;
+        continue;
       }
-      pdcch_cfg.search_space[ss_id].nof_formats = 2;
+
+      if (ss_cfg.search_space_type.type().value
+          == asn1::rrc_nr::search_space_s::search_space_type_c_::types_opts::ue_specific) {
+        pdcch_cfg.search_space[ss_id].type = srsran_search_space_type_ue;
+        if (ss_cfg.search_space_type.ue_specific().dci_formats.formats0_minus1_and_minus1_minus1) {
+          pdcch_cfg.search_space[ss_id].formats[0] = srsran_dci_format_nr_1_1;
+          pdcch_cfg.search_space[ss_id].formats[1] = srsran_dci_format_nr_0_1;
+          dci_cfg.monitor_0_0_and_1_0              = false;
+          dci_cfg.monitor_common_0_0               = false;
+        } else {
+          pdcch_cfg.search_space[ss_id].formats[0] = srsran_dci_format_nr_1_0;
+          pdcch_cfg.search_space[ss_id].formats[1] = srsran_dci_format_nr_0_0;
+          dci_cfg.monitor_0_1_and_1_1              = false;
+        }
+        pdcch_cfg.search_space[ss_id].nof_formats = 2;
+      } else {
+        /* A common search space in the dedicated configuration. Only formats 0_0
+        and 1_0 are carried there, and the sniffer wants the downlink one. */
+        pdcch_cfg.search_space[ss_id].type        = srsran_search_space_type_common_3;
+        pdcch_cfg.search_space[ss_id].formats[0]  = srsran_dci_format_nr_1_0;
+        pdcch_cfg.search_space[ss_id].formats[1]  = srsran_dci_format_nr_0_0;
+        pdcch_cfg.search_space[ss_id].nof_formats = 2;
+      }
     }
   } else {
     // Use some default settings
