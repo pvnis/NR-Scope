@@ -166,6 +166,10 @@ int DCIDecoder::DCIDecoderandReceptionInit(WorkState* state, int bwp_id, cf_t* i
           == asn1::rrc_nr::search_space_s::search_space_type_c_::types_opts::ue_specific) {
         pdcch_cfg.search_space[ss_id].type = srsran_search_space_type_ue;
         if (ss_cfg.search_space_type.ue_specific().dci_formats.formats0_minus1_and_minus1_minus1) {
+        /* Formats the blind search will try. Each one is a separate decode pass
+        over every candidate, and DCI 0_1 and 1_1 are different sizes, so
+        carrying the uplink format here doubles the work. Dropped for sensing;
+        see NRSCOPE_SEARCH_UL_DCI. */
           pdcch_cfg.search_space[ss_id].formats[0] = srsran_dci_format_nr_1_1;
           pdcch_cfg.search_space[ss_id].formats[1] = srsran_dci_format_nr_0_1;
           dci_cfg.monitor_0_0_and_1_0              = false;
@@ -175,14 +179,14 @@ int DCIDecoder::DCIDecoderandReceptionInit(WorkState* state, int bwp_id, cf_t* i
           pdcch_cfg.search_space[ss_id].formats[1] = srsran_dci_format_nr_0_0;
           dci_cfg.monitor_0_1_and_1_1              = false;
         }
-        pdcch_cfg.search_space[ss_id].nof_formats = 2;
+        pdcch_cfg.search_space[ss_id].nof_formats = NRSCOPE_SEARCH_UL_DCI ? 2 : 1;
       } else {
         /* A common search space in the dedicated configuration. Only formats 0_0
         and 1_0 are carried there, and the sniffer wants the downlink one. */
         pdcch_cfg.search_space[ss_id].type        = srsran_search_space_type_common_3;
         pdcch_cfg.search_space[ss_id].formats[0]  = srsran_dci_format_nr_1_0;
         pdcch_cfg.search_space[ss_id].formats[1]  = srsran_dci_format_nr_0_0;
-        pdcch_cfg.search_space[ss_id].nof_formats = 2;
+        pdcch_cfg.search_space[ss_id].nof_formats = NRSCOPE_SEARCH_UL_DCI ? 2 : 1;
       }
     }
   } else {
@@ -194,7 +198,7 @@ int DCIDecoder::DCIDecoderandReceptionInit(WorkState* state, int bwp_id, cf_t* i
     pdcch_cfg.search_space[0].formats[1]  = srsran_dci_format_nr_0_1;
     dci_cfg.monitor_0_0_and_1_0           = false;
     dci_cfg.monitor_common_0_0            = false;
-    pdcch_cfg.search_space[0].nof_formats = 2;
+    pdcch_cfg.search_space[0].nof_formats = NRSCOPE_SEARCH_UL_DCI ? 2 : 1;
   }
   pdcch_cfg.coreset[0] = coreset0_t;
 
@@ -1052,8 +1056,14 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
       ERROR("Error in blind search");
     }
 
-    int nof_ul_dci = srsran_ue_dl_nr_find_ul_dci(
-        ue_dl_tmp, slot_tmp, sharded_rntis[dci_decoder_id][rnti_idx], srsran_rnti_type_c, dci_ul_tmp, 4);
+    /* Uplink blind search, off for sensing; see NRSCOPE_SEARCH_UL_DCI. Kept as a
+    branch rather than removed so the telemetry use is one define away, and so
+    everything downstream still compiles against a zero count. */
+    int nof_ul_dci = 0;
+    if (NRSCOPE_SEARCH_UL_DCI) {
+      nof_ul_dci = srsran_ue_dl_nr_find_ul_dci(
+          ue_dl_tmp, slot_tmp, sharded_rntis[dci_decoder_id][rnti_idx], srsran_rnti_type_c, dci_ul_tmp, 4);
+    }
 
     if (nof_dl_dci > 0) {
       dci_dl[rnti_idx] = dci_dl_tmp[0];
@@ -1130,8 +1140,14 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
       ERROR("Error in blind search");
     }
 
-    int nof_ul_dci_nca = srsran_ue_dl_nr_find_ul_dci(
-        ue_dl_tmp, slot_tmp, sharded_rntis[dci_decoder_id][rnti_idx], srsran_rnti_type_c, dci_ul_tmp, 4);
+    /* Uplink blind search, off for sensing; see NRSCOPE_SEARCH_UL_DCI. Kept as a
+    branch rather than removed so the telemetry use is one define away, and so
+    everything downstream still compiles against a zero count. */
+    int nof_ul_dci_nca = 0;
+    if (NRSCOPE_SEARCH_UL_DCI) {
+      nof_ul_dci_nca = srsran_ue_dl_nr_find_ul_dci(
+          ue_dl_tmp, slot_tmp, sharded_rntis[dci_decoder_id][rnti_idx], srsran_rnti_type_c, dci_ul_tmp, 4);
+    }
 
     if (nof_dl_dci_nca > 0) {
       dci_dl[rnti_idx] = dci_dl_tmp[0];

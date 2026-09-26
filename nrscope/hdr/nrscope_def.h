@@ -88,6 +88,20 @@ worker serialised on it. Set to 1 to get them back while debugging. */
     }                                \
   } while (0)
 
+/* Search uplink DCIs as well as downlink ones.
+ *
+ * Off for a sensing listener. Sensing reads PDSCH DM-RS, which the gNB
+ * transmits, so the bistatic path is gNB to target to listener. PUSCH DM-RS
+ * comes from the UE instead, whose position is unknown and moving, so an uplink
+ * grant says nothing usable about the scene. Searching for one doubles the blind
+ * decode done for every known RNTI on every slot, which is the dominant per-slot
+ * cost.
+ *
+ * Set to 1 to restore it, for telemetry work where uplink scheduling matters. */
+#ifndef NRSCOPE_SEARCH_UL_DCI
+#define NRSCOPE_SEARCH_UL_DCI 0
+#endif
+
 #define NR_FAILURE -1
 #define NR_SUCCESS 0
 
