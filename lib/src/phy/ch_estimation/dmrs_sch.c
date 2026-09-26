@@ -85,7 +85,6 @@ srsran_dmrs_get_pilots_type1(uint32_t start_prb, uint32_t nof_prb, uint32_t delt
       // printf("pilot[%u]: %f %fi, ", count, creal(pilots[count]), cimag(pilots[count]));
     }
   }
-  printf("\n");
 
   return count;
 }
