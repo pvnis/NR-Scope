@@ -2,6 +2,12 @@
 #include "nrscope/hdr/run_recorder.h"
 
 SIBsDecoder::SIBsDecoder(){
+  /* NR-Scope fills only some fields of the higher-layer PDSCH config and
+    leaves the rest (the NZP/ZP CSI-RS sets among them) as "not configured".
+    Without this they held whatever was on the heap, and the grant conversion
+    walked garbage CSI-RS sets: "csi_rs.c: Unhandled configuration row=invalid",
+    then "Error in resource mapping" and a grant cut short. */
+  pdsch_hl_cfg = {};
   data_pdcch = srsran_vec_u8_malloc(SRSRAN_SLOT_MAX_NOF_BITS_NR);
   if (data_pdcch == NULL) {
     ERROR("Error malloc");

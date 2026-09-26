@@ -3,6 +3,14 @@
 
 DCIDecoder::DCIDecoder(uint32_t max_nof_rntis)
 {
+  /* NR-Scope fills only some fields of the higher-layer PDSCH/PUSCH config and
+    leaves the rest (the NZP/ZP CSI-RS sets among them) as "not configured".
+    Without this they held whatever was on the heap, and the grant conversion
+    walked garbage CSI-RS sets: "csi_rs.c: Unhandled configuration row=invalid",
+    then "Error in resource mapping" and a grant cut short. */
+  pdsch_hl_cfg = {};
+  pusch_hl_cfg = {};
+
   ue_dl_tmp = (srsran_ue_dl_nr_t*)malloc(sizeof(srsran_ue_dl_nr_t));
   slot_tmp  = (srsran_slot_cfg_t*)malloc(sizeof(srsran_slot_cfg_t));
 
@@ -1002,7 +1010,7 @@ int DCIDecoder::DCIDecoderandReceptionInit(WorkState* state, int bwp_id, cf_t* i
     ERROR("Error init soft-buffer");
     return SRSRAN_ERROR;
   }
-  std::cout << "ending.." << std::endl;
+  if (!RunRecorder::enabled()) std::cout << "ending.." << std::endl;
   return SRSRAN_SUCCESS;
 }
 

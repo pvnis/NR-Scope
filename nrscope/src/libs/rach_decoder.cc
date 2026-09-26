@@ -13,6 +13,12 @@ RachDecoder::RachDecoder()
   prach_cfg_nr = {};
   prach        = {};
   prach_cfg    = {};
+  /* NR-Scope fills only some fields of the higher-layer PDSCH config and
+    leaves the rest (the NZP/ZP CSI-RS sets among them) as "not configured".
+    Without this they held whatever was on the heap, and the grant conversion
+    walked garbage CSI-RS sets: "csi_rs.c: Unhandled configuration row=invalid",
+    then "Error in resource mapping" and a grant cut short. */
+  pdsch_hl_cfg = {};
 
   dci_rach = (srsran_dci_dl_nr_t*)malloc(sizeof(srsran_dci_dl_nr_t) * (SRSRAN_MAX_DCI_MSG_NR));
 
