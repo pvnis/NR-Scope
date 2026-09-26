@@ -541,19 +541,32 @@ int TaskSchedulerNRScope::StoreSlotData(uint64_t                    sf_round,
   const uint32_t i = next_slot_idx.load(std::memory_order_relaxed);
   SlotData_&     s = slot_data[i];
 
-  /* Queue full: the entry about to be written has not been taken by a worker
-  yet. Counted rather than printed per occurrence -- under sustained overrun this
-  fired thousands of times a second, and the printing itself then became part of
-  why the workers were behind. One line a second says the same thing. */
+  /* Queue full: the entry at the write cursor has not been taken by a worker
+  yet. The incoming slot is dropped and the cursor left where it is.
+
+  It used to be written anyway, over an entry a worker might be reading, and
+  TasksDispatch() would then hand a worker a buffer being rewritten underneath
+  it. Under sustained overrun that showed up as a free() of an invalid pointer.
+  A sniffer that misses a slot loses the grants in it; one that corrupts memory
+  loses the capture, so dropping is strictly better.
+
+  Dropping the newest rather than the oldest is deliberate: the oldest entries
+  are the ones workers are about to take, and stealing those would turn a full
+  queue into lost work as well as lost slots.
+
+  Counted rather than printed per occurrence -- at thousands a second the
+  printing became part of why the workers were behind. One line a second with a
+  running total says the same thing. */
   if (!slot_data[i].processed.load(std::memory_order_acquire)) {
     static std::atomic<uint64_t> dropped{0};
     static std::atomic<uint64_t> last_report{0};
-    const uint64_t               n   = dropped.fetch_add(1, std::memory_order_relaxed) + 1;
-    const uint64_t               now = (uint64_t)time(NULL);
+    const uint64_t               n    = dropped.fetch_add(1, std::memory_order_relaxed) + 1;
+    const uint64_t               now  = (uint64_t)time(NULL);
     uint64_t                     prev = last_report.load(std::memory_order_relaxed);
     if (now != prev && last_report.compare_exchange_strong(prev, now)) {
-      ERROR("Slot queue full: %lu slot(s) overwritten so far; workers are behind", (unsigned long)n);
+      ERROR("Slot queue full: %lu slot(s) dropped so far; workers are behind", (unsigned long)n);
     }
+    return SRSRAN_SUCCESS; // dropped, not an error the caller can act on
   }
 
   s.sf_round = sf_round;
