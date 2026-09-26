@@ -14,6 +14,35 @@ DCIDecoder::DCIDecoder(uint32_t max_nof_rntis)
 
 DCIDecoder::~DCIDecoder() {}
 
+/* Search this RNTI with its own PDCCH DM-RS scrambling ID (from its RRCSetup), or
+  the configured one if it has none. The ID is changed only where the search and
+  the estimator read it, not through set_pdcch_config: re-initialising the
+  estimator for a different CORESET on this shallow copy would free buffers it
+  shares with ue_dl_dci. The CORESET is re-estimated only when its buffers hold
+  another ID, so consecutive RNTIs with the configured ID cost nothing extra. */
+void DCIDecoder::UseUePdcchScrambling(uint16_t rnti, const WorkState* state, const srsran_slot_cfg_t* slot)
+{
+  const auto ue = state->pdcch_dmrs_ids_by_rnti.find(rnti);
+  for (uint32_t i = 0; i < SRSRAN_UE_DL_NR_MAX_NOF_CORESET; i++) {
+    if (!pdcch_cfg.coreset_present[i] || !pdcch_cfg.coreset[i].dmrs_scrambling_id_present) {
+      continue;
+    }
+    uint32_t want = pdcch_cfg.coreset[i].dmrs_scrambling_id;
+    if (ue != state->pdcch_dmrs_ids_by_rnti.end()) {
+      const auto id = ue->second.find(i);
+      if (id != ue->second.end()) {
+        want = id->second;
+      }
+    }
+    ue_dl_tmp->cfg.coreset[i].dmrs_scrambling_id    = want; // DCI descrambling
+    ue_dl_tmp->dmrs_pdcch[i].coreset.dmrs_scrambling_id = want; // DM-RS sequence
+    if (est_dmrs_id[i] != want) {
+      srsran_dmrs_pdcch_estimate_nrscope(&ue_dl_tmp->dmrs_pdcch[i], slot, ue_dl_tmp->sf_symbols[0]);
+      est_dmrs_id[i] = want;
+    }
+  }
+}
+
 int DCIDecoder::DCIDecoderandReceptionInit(WorkState* state, int bwp_id, cf_t* input[SRSRAN_MAX_PORTS])
 {
   memcpy(&base_carrier, &state->args_t.base_carrier, sizeof(srsran_carrier_nr_t));
@@ -1042,6 +1071,10 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
   }
 
   srsran_ue_dl_nr_estimate_fft_nrscope(&ue_dl_dci, slot, arg_scs);
+  // The estimates above use the configured (first RRCSetup's) scrambling IDs
+  for (uint32_t i = 0; i < SRSRAN_UE_DL_NR_MAX_NOF_CORESET; i++) {
+    est_dmrs_id[i] = pdcch_cfg.coreset[i].dmrs_scrambling_id;
+  }
 
   int total_dl_dci = 0;
   int total_ul_dci = 0;
@@ -1050,6 +1083,7 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
     // With carrier aggregation
     memcpy(ue_dl_tmp, &ue_dl_dci, sizeof(srsran_ue_dl_nr_t));
     memcpy(slot_tmp, slot, sizeof(srsran_slot_cfg_t));
+    UseUePdcchScrambling(sharded_rntis[dci_decoder_id][rnti_idx], state, slot);
 
     int nof_dl_dci = srsran_ue_dl_nr_find_dl_dci_nrscope_dciloop(
         ue_dl_tmp, slot_tmp, sharded_rntis[dci_decoder_id][rnti_idx], srsran_rnti_type_c, dci_dl_tmp, 4);
@@ -1122,6 +1156,8 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
       ERROR("Error setting CORESET");
       return SRSRAN_ERROR;
     }
+    // After set_pdcch_config, which put back the configured IDs
+    UseUePdcchScrambling(sharded_rntis[dci_decoder_id][rnti_idx], state, slot);
 
     // printf("id: %d, search space: %d, l1: %d, l2: %d, l3: %d, l4: %d, l5: %d\n",
     //   0,

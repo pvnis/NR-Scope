@@ -250,6 +250,9 @@ int TaskSchedulerNRScope::UpdatewithResult(SlotResult now_result)
   /* This slot contains the RACH decoder's result */
   if (now_result.rach_result) {
     if (now_result.found_rach) {
+      for (const auto& ue : now_result.new_rnti_pdcch_dmrs_ids) {
+        task_scheduler_state.pdcch_dmrs_ids_by_rnti[ue.first] = ue.second;
+      }
       if (!task_scheduler_state.rach_found) {
         /* The first time that we found the RACH */
         task_scheduler_state.rrc_setup         = now_result.rrc_setup;
@@ -347,7 +350,10 @@ int TaskSchedulerNRScope::UpdatewithResult(SlotResult now_result)
     }
   }
 
-  /* Check the last seen time for each UE in the list*/
+  /* Check the last seen time for each UE in the list. Under the lock: SyncState
+    copies these lists into the workers under it, and erasing while a copy runs
+    reads freed memory. */
+  std::lock_guard<std::mutex>     prune_lock(task_scheduler_lock);
   std::vector<double>::iterator   last_seen_iter = task_scheduler_state.last_seen.begin();
   std::vector<uint16_t>::iterator ue_list_iter   = task_scheduler_state.known_rntis.begin();
 
@@ -356,6 +362,7 @@ int TaskSchedulerNRScope::UpdatewithResult(SlotResult now_result)
     if (now - *last_seen_iter > 5) {
       // std::cout << "C-RNTI: " << (int)*ue_list_iter << " expires."
       //   << std::endl;
+      task_scheduler_state.pdcch_dmrs_ids_by_rnti.erase(*ue_list_iter);
       last_seen_iter = task_scheduler_state.last_seen.erase(last_seen_iter);
       ue_list_iter   = task_scheduler_state.known_rntis.erase(ue_list_iter);
       --task_scheduler_state.nof_known_rntis;

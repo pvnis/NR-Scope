@@ -52,6 +52,12 @@ public:
   srsran_slot_cfg_t* slot_tmp;
 
   srsran_dci_dl_nr_t* dci_dl;
+  /* Which PDCCH DM-RS scrambling ID the CORESET channel estimates currently hold,
+  per CORESET. ue_dl_tmp is a shallow copy of ue_dl_dci, so re-estimating
+  through it rewrites ue_dl_dci's estimate buffers too; this tracks what they
+  contain. See UseUePdcchScrambling. */
+  uint32_t est_dmrs_id[SRSRAN_UE_DL_NR_MAX_NOF_CORESET];
+  void     UseUePdcchScrambling(uint16_t rnti, const WorkState* state, const srsran_slot_cfg_t* slot);
   /* For recording_mode only: the raw payload of the DCI kept in dci_dl, as a
   string of '0'/'1', and whether it matched the carrier aggregation DCI sizes
   (dci_cfg_ca) rather than the normal ones. */

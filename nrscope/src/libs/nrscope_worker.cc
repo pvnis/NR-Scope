@@ -179,6 +179,7 @@ int NRScopeWorker::SyncState(WorkState* task_scheduler_state)
 
   worker_state.all_sibs_found = task_scheduler_state->all_sibs_found;
 
+  worker_state.pdcch_dmrs_ids_by_rnti = task_scheduler_state->pdcch_dmrs_ids_by_rnti;
   worker_state.nof_known_rntis = task_scheduler_state->nof_known_rntis;
   worker_state.known_rntis.resize(worker_state.nof_known_rntis);
   for (long unsigned int i = 0; i < worker_state.nof_known_rntis; i++) {

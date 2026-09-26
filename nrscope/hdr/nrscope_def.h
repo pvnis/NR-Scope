@@ -10,6 +10,7 @@
 #include <cmath>
 #include <complex>
 #include <iostream>
+#include <map>
 #include <math.h>
 #include <pthread.h>
 #include <semaphore.h>
@@ -285,6 +286,13 @@ struct WorkState_ {
   /* SFN of the slot being processed, set by the worker before its decoders run
   so the DCI recordings can say which frame a grant was in. Not synced. */
   uint32_t sfn;
+
+  /* Each UE's own PDCCH DM-RS scrambling ID per CORESET (pdcch-DMRS-ScramblingID),
+  from its RRCSetup: C-RNTI -> (CORESET id -> scrambling ID). The DCI decoders
+  are configured from the first RRCSetup of the run, but this ID is per UE: on
+  the Sunrise cell it is C-RNTI + PCI. It seeds both the PDCCH DM-RS and the
+  DCI scrambling, so a UE searched with another UE's ID is never found. */
+  std::map<uint16_t, std::map<uint32_t, uint32_t> > pdcch_dmrs_ids_by_rnti;
 };
 
 typedef struct SlotResult_ SlotResult;
@@ -310,6 +318,8 @@ struct SlotResult_ {
   asn1::rrc_nr::cell_group_cfg_s master_cell_group;
   uint32_t                       new_rnti_number;
   std::vector<uint16_t>          new_rntis_found;
+  /* The new UEs' PDCCH DM-RS scrambling IDs, see WorkState::pdcch_dmrs_ids_by_rnti */
+  std::map<uint16_t, std::map<uint32_t, uint32_t> > new_rnti_pdcch_dmrs_ids;
 
   /* The worker works on DCI decoding */
   bool                     dci_result;

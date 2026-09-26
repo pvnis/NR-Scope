@@ -328,6 +328,7 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
   result->found_rach      = false;
   result->new_rnti_number = 0;
   result->new_rntis_found.clear();
+  result->new_rnti_pdcch_dmrs_ids.clear();
 
   uint16_t tc_rnti;
   uint16_t c_rnti;
@@ -580,6 +581,18 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
       known_rnti vector in the end of the threads. */
     result->new_rnti_number += 1;
     result->new_rntis_found.emplace_back(c_rnti);
+
+    /* This UE's own PDCCH DM-RS scrambling IDs, which are per UE rather than
+      per cell; see WorkState::pdcch_dmrs_ids_by_rnti. */
+    const auto& sp_ded = result->master_cell_group.sp_cell_cfg.sp_cell_cfg_ded;
+    if (sp_ded.init_dl_bwp_present && sp_ded.init_dl_bwp.pdcch_cfg_present &&
+        sp_ded.init_dl_bwp.pdcch_cfg.type().value == asn1::setup_release_opts::setup) {
+      for (const auto& cs : sp_ded.init_dl_bwp.pdcch_cfg.setup().ctrl_res_set_to_add_mod_list) {
+        if (cs.pdcch_dmrs_scrambling_id_present) {
+          result->new_rnti_pdcch_dmrs_ids[c_rnti][cs.ctrl_res_set_id] = cs.pdcch_dmrs_scrambling_id;
+        }
+      }
+    }
 
     srsran_softbuffer_rx_free(&softbuffer);
   }
