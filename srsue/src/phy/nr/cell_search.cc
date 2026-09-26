@@ -68,6 +68,8 @@ bool cell_search::start(const cfg_t& cfg)
   ssb_cfg.scs              = cfg.ssb_scs;
   ssb_cfg.pattern          = cfg.ssb_pattern;
   ssb_cfg.duplex_mode      = cfg.duplex_mode;
+  ssb_cfg.search_N_id_2_enable = cfg.search_N_id_2_enable;
+  ssb_cfg.search_N_id_2        = cfg.search_N_id_2;
 
   // Print SSB configuration, helps debugging gNb and UE
   if (logger.info.enabled()) {

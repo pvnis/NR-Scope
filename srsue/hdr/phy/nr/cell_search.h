@@ -43,6 +43,8 @@ public:
     srsran_subcarrier_spacing_t ssb_scs;
     srsran_ssb_pattern_t        ssb_pattern;
     srsran_duplex_mode_t        duplex_mode;
+    bool                        search_N_id_2_enable = false; ///< Only look for PSS search_N_id_2
+    uint32_t                    search_N_id_2        = 0;
   };
 
   struct ret_t {

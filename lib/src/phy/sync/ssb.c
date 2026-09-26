@@ -923,6 +923,11 @@ static int ssb_pss_search(srsran_ssb_t* q,
 
     // Try each N_id_2 sequence
     for (uint32_t N_id_2 = 0; N_id_2 < SRSRAN_NOF_NID_2_NR; N_id_2++) {
+      // Only the strongest PSS is kept, so a louder co-channel cell with another N_id_2 would otherwise hide the
+      // wanted one for good
+      if (q->cfg.search_N_id_2_enable && N_id_2 != q->cfg.search_N_id_2) {
+        continue;
+      }
       // Steer coarse frequency offset
       // if(N_id_2 == 0){
       //   FILE *fp;

@@ -78,6 +78,8 @@ typedef struct SRSRAN_API {
   float                       beta_pbch;      ///< PBCH power allocation
   float                       beta_pbch_dmrs; ///< PBCH DMRS power allocation
   float                       scaling;        ///< IFFT scaling (used for modulation), set to 0 for default
+  bool     search_N_id_2_enable; ///< Restrict the PSS search to search_N_id_2, instead of the strongest of all three
+  uint32_t search_N_id_2;        ///< N_id_2 searched when search_N_id_2_enable is set
 } srsran_ssb_cfg_t;
 
 /**

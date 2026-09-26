@@ -568,6 +568,11 @@ int Radio::RadioInitandStart()
     srsran_searcher_cfg_t.ssb_scs        = args_t.ssb_scs;
     srsran_searcher_cfg_t.ssb_pattern    = args_t.ssb_pattern;
     srsran_searcher_cfg_t.duplex_mode    = args_t.duplex_mode;
+    /* The search keeps only the strongest PSS, so with a configured pci a louder
+      co-channel neighbour (e.g. 147 or 732 over 632) would win every slot and be
+      rejected forever. Look only for the wanted cell's N_id_2 = pci mod 3. */
+    srsran_searcher_cfg_t.search_N_id_2_enable = (pci != 9999);
+    srsran_searcher_cfg_t.search_N_id_2        = pci % SRSRAN_NOF_NID_2_NR;
     if (not srsran_searcher.start(srsran_searcher_cfg_t)) {
       std::cout << "Searcher: failed to start cell search" << std::endl;
       return NR_FAILURE;
