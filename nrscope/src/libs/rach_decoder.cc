@@ -1,4 +1,7 @@
 #include "nrscope/hdr/rach_decoder.h"
+#include "srsran/mac/mac_sch_pdu_nr.h"
+#include <string>
+#include <sys/time.h>
 
 std::mutex lock_rach;
 
@@ -274,6 +277,43 @@ int RachDecoder::RACHReceptionInit(WorkState* state, cf_t* input[SRSRAN_MAX_PORT
   return SRSRAN_SUCCESS;
 }
 
+/* Append one line per RACH-decoder PDSCH that passed its CRC to msg4_bytes.log,
+  in the working directory next to the CSV logs, so what the gNB actually sent
+  can be decoded offline. Workers decode in parallel, hence the lock; these are
+  rare, so opening the file each time costs nothing that matters. */
+static void log_msg4_bytes(uint32_t       slot_idx,
+                           uint16_t       rnti,
+                           const char*    dci_str,
+                           const char*    outcome,
+                           uint32_t       rrc_offset,
+                           const uint8_t* payload,
+                           uint32_t       nof_bytes)
+{
+  static std::mutex           mtx;
+  std::lock_guard<std::mutex> lock(mtx);
+  FILE*                       f = fopen("msg4_bytes.log", "a");
+  if (f == nullptr) {
+    return;
+  }
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  fprintf(f,
+          "%ld.%06ld slot=%u rnti=0x%04x outcome=%s rrc_offset=%u nof_bytes=%u dci={%s} bytes=",
+          (long)tv.tv_sec,
+          (long)tv.tv_usec,
+          slot_idx,
+          rnti,
+          outcome,
+          rrc_offset,
+          nof_bytes,
+          dci_str);
+  for (uint32_t i = 0; i < nof_bytes; i++) {
+    fprintf(f, "%02x", payload[i]);
+  }
+  fprintf(f, "\n");
+  fclose(f);
+}
+
 int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* state, SlotResult* result)
 {
   if (!state->sib1_found or !state->rach_inited) {
@@ -381,11 +421,14 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
     // printf("Decoded PDSCH (%d B)\n", pdsch_cfg.grant.tb[0].tbs / 8);
     // srsran_vec_fprint_byte(stdout, pdsch_res.tb[0].payload,
     //    pdsch_cfg.grant.tb[0].tbs / 8);
-    uint32_t bytes_offset = 0;
+    uint32_t bytes_offset  = 0;
+    uint32_t msg_len       = pdsch_cfg.grant.tb[0].tbs / 8;
+    bool     found_pattern = false;
 
     for (uint32_t pdsch_res_idx = 0; pdsch_res_idx < (uint32_t)pdsch_cfg.grant.tb[0].tbs / 8 - 1; pdsch_res_idx++) {
       if (pdsch_res.tb[0].payload[pdsch_res_idx] == 0x20 && pdsch_res.tb[0].payload[pdsch_res_idx + 1] == 0x40) {
-        bytes_offset = pdsch_res_idx;
+        bytes_offset  = pdsch_res_idx;
+        found_pattern = true;
         break;
       }
     }
@@ -409,20 +452,70 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
       return SRSRAN_ERROR;
     }
 
+    char dci_str[512] = {};
+    srsran_dci_dl_nr_to_str(&(ue_dl_rach.dci), &dci_rach[dci_id], dci_str, (uint32_t)sizeof(dci_str));
+
     if (pdsch_cfg.grant.tb[0].tbs / 8 < 40) {
       ERROR("Too short for RRC Setup");
+      log_msg4_bytes(slot->idx, tc_rnti, dci_str, "too_short", 0, pdsch_res.tb[0].payload, pdsch_cfg.grant.tb[0].tbs / 8);
       return SRSRAN_ERROR;
+    }
+
+    /* The 0x20 0x40 pattern is the start of an RRCSetup only for some gNBs: its
+      first byte assumes rrc-TransactionIdentifier 0, the second depends on the
+      cell's configuration. When it is absent, locate the CCCH SDU (LCID 0) by
+      walking the MAC subheaders instead, past the contention resolution
+      identity and any other MAC CE the gNB put in front of it. */
+    if (!found_pattern) {
+      srsran::mac_sch_pdu_nr mac_pdu(false);
+      mac_pdu.unpack(pdsch_res.tb[0].payload, msg_len);
+      for (uint32_t i = 0; i < mac_pdu.get_num_subpdus(); i++) {
+        srsran::mac_sch_subpdu_nr& subpdu = mac_pdu.get_subpdu(i);
+        if (subpdu.is_sdu() && subpdu.get_lcid() == srsran::mac_sch_subpdu_nr::CCCH) {
+          bytes_offset = subpdu.get_sdu() - pdsch_res.tb[0].payload;
+          msg_len      = bytes_offset + subpdu.get_sdu_length();
+          break;
+        }
+      }
     }
 
     std::cout << "Decoding Msg 4..." << std::endl;
     asn1::rrc_nr::dl_ccch_msg_s dlcch_msg;
     /* What the first few bytes are? In srsgNB there are 10 extra bytes and for
       small cell there are 3 extra bytes before the RRCSetup message. */
-    asn1::cbit_ref    dlcch_bref(pdsch_res.tb[0].payload + bytes_offset, pdsch_cfg.grant.tb[0].tbs / 8 - bytes_offset);
+    asn1::cbit_ref    dlcch_bref(pdsch_res.tb[0].payload + bytes_offset, msg_len - bytes_offset);
     asn1::SRSASN_CODE err = dlcch_msg.unpack(dlcch_bref);
     if (err != asn1::SRSASN_SUCCESS) {
-      ERROR("Failed to unpack DL-CCCH message (%d B)", pdsch_cfg.grant.tb[0].tbs / 8 - bytes_offset);
+      ERROR("Failed to unpack DL-CCCH message (%d B at byte %u, found by %s)",
+            msg_len - bytes_offset,
+            bytes_offset,
+            found_pattern ? "0x20 0x40 pattern" : "MAC subheaders");
     }
+
+    /* The PDSCH CRC passed, so these are the real bytes whatever they turn out
+      to be: keep them for offline decoding. */
+    std::string outcome = found_pattern ? "pattern:" : "mac:";
+    switch (dlcch_msg.msg.c1().type().value) {
+      case asn1::rrc_nr::dl_ccch_msg_type_c::c1_c_::types::rrc_reject:
+        outcome += "rrc_reject";
+        break;
+      case asn1::rrc_nr::dl_ccch_msg_type_c::c1_c_::types::rrc_setup:
+        outcome += "rrc_setup";
+        break;
+      default:
+        outcome += "other";
+        break;
+    }
+    if (err != asn1::SRSASN_SUCCESS) {
+      outcome += ":asn1_error";
+    }
+    log_msg4_bytes(slot->idx,
+                   tc_rnti,
+                   dci_str,
+                   outcome.c_str(),
+                   bytes_offset,
+                   pdsch_res.tb[0].payload,
+                   pdsch_cfg.grant.tb[0].tbs / 8);
 
     result->rrc_setup = dlcch_msg.msg.c1().rrc_setup();
     std::cout << "Msg 4 Decoded." << std::endl;
@@ -437,7 +530,7 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
         result->found_rach = true;
       } break;
       default: {
-        std::cout << "None detected, skip." << std::endl;
+        std::cout << "None detected, skip. Bytes in msg4_bytes.log" << std::endl;
         return SRSRAN_ERROR;
       } break;
     }
