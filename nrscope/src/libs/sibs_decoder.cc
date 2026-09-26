@@ -127,7 +127,7 @@ int SIBsDecoder::DecodeandParseSIB1fromSlot(srsran_slot_cfg_t* slot,
     return SRSRAN_ERROR;
   }
   /* Print PDCCH blind search candidates */
-  for (uint32_t pdcch_idx = 0; pdcch_idx < ue_dl_sibs.pdcch_info_count; pdcch_idx++) {
+  for (uint32_t pdcch_idx = 0; NRSCOPE_TRACE_PER_SLOT && pdcch_idx < ue_dl_sibs.pdcch_info_count; pdcch_idx++) {
     const srsran_ue_dl_nr_pdcch_info_t* info = &(ue_dl_sibs.pdcch_info[pdcch_idx]);
     printf("PDCCH: %s-rnti=0x%x, crst_id=%d, ss_type=%s, ncce=%d, al=%d, EPRE=%+.2f, RSRP=%+.2f, corr=%.3f; "
     "nof_bits=%d; crc=%s;\n",
@@ -144,7 +144,7 @@ int SIBsDecoder::DecodeandParseSIB1fromSlot(srsran_slot_cfg_t* slot,
     info->result.crc ? "OK" : "KO");
   }
   if (nof_found_dci < 1) {
-    printf("SIBDecoder -- No DCI found :'(\n");
+    NRSCOPE_SLOT_TRACE("SIBDecoder -- No DCI found :'(\n");
     return SRSRAN_ERROR;
   }
 

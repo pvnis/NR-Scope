@@ -266,7 +266,8 @@ void NRScopeWorker::Run()
     // worker_locks[worker_id].unlock();
     struct timeval t0, t1;
 
-    std::cout << "Processing sf_round: " << sf_round << ", sfn: " << outcome.sfn << ", slot.idx: " << slot.idx
+    if (NRSCOPE_TRACE_PER_SLOT)
+      std::cout << "Processing sf_round: " << sf_round << ", sfn: " << outcome.sfn << ", slot.idx: " << slot.idx
               << std::endl;
 
     SlotResult slot_result = {};

@@ -927,7 +927,7 @@ static int ue_dl_nr_find_dci_ss_nrscope(srsran_ue_dl_nr_t*           q,
 
         // If UL grant, enqueue in UL list
         if (dci_msg.ctx.format == srsran_dci_format_nr_0_0 || dci_msg.ctx.format == srsran_dci_format_nr_0_1) {
-          printf("ul grant\n");
+          INFO("ul grant");
           // If the pending UL grant list is full or has the dci message, keep moving
           if (q->ul_dci_count >= SRSRAN_MAX_DCI_MSG_NR || find_dci_msg(q->ul_dci_msg, q->ul_dci_count, &dci_msg)) {
             continue;
@@ -944,12 +944,11 @@ static int ue_dl_nr_find_dci_ss_nrscope(srsran_ue_dl_nr_t*           q,
         // Check if the grant exists already in the DL list
         if (find_dci_msg(q->dl_dci_msg, q->dl_dci_msg_count, &dci_msg)) {
           // The same DCI is in the list, keep moving
-          printf("The same DCI is in the list, keep moving\n");
+          INFO("The same DCI is in the list, keep moving");
           continue;
         }
 
         INFO("Found DCI in L=%d,ncce=%d", dci_msg.ctx.location.L, dci_msg.ctx.location.ncce);
-        printf("Found DCI in L=%d,ncce=%d\n", dci_msg.ctx.location.L, dci_msg.ctx.location.ncce);
         // Append DCI message into the list
         q->dl_dci_msg[q->dl_dci_msg_count] = dci_msg;
         q->dl_dci_msg_count++;
