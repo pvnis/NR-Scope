@@ -43,7 +43,7 @@ const char* DCI_HEADER =
     "freq_alloc,time_alloc,dci_mcs,dci_ndi,dci_rv,harq_id,tpc,ports,dmrs_id,srs_request,"
     "k,mapping,time_start,time_length,prbs,nof_prb,nof_layers,"
     "dmrs_type,dmrs_add_pos,dmrs_len,dmrs_typeA_pos,nof_dmrs_cdm_groups,n_scid,beta_dmrs,"
-    "modulation,mcs,tbs,code_rate,rv,ndi,nof_re,nof_bits,mcs_table,xoverhead,dci\n";
+    "modulation,mcs,tbs,code_rate,rv,ndi,nof_re,nof_bits,mcs_table,xoverhead,ca_variant,dci_bits,dci\n";
 
 double now_s()
 {
@@ -292,6 +292,8 @@ void record_dci(uint32_t                   pci,
                 uint32_t                   dmrs_id,
                 uint32_t                   srs_request,
                 const srsran_sch_cfg_nr_t* sch_cfg,
+                bool                       ca_variant,
+                const char*                dci_bits,
                 const char*                dci_str)
 {
   if (!is_enabled) {
@@ -361,6 +363,9 @@ void record_dci(uint32_t                   pci,
   } else {
     row += ",,,,,,,,,,,,,,,,,,,,,,,,"; // no grant derived: 24 empty columns
   }
+  row += ca_variant ? "1," : "0,";
+  row += dci_bits;
+  row += ',';
   append_quoted(row, trimmed(dci_str).c_str());
   row += '\n';
 

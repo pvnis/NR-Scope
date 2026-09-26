@@ -42,8 +42,10 @@ void record_rrc_setup(uint32_t           pci,
                       const std::string& master_cell_group_json);
 
 /* sch_cfg is the PDSCH/PUSCH configuration derived from the DCI, or NULL when
-  the decoder did not derive one (downlink formats other than 1_1). dci_str is
-  the line printed as "Found DCI", kept whole for fields without a column. */
+  the decoder did not derive one (downlink formats other than 1_1). ca_variant
+  says the DCI matched the carrier aggregation DCI sizes rather than the normal
+  ones, and dci_bits is its raw payload as '0'/'1', so other field layouts can
+  be tested offline. dci_str is the line printed as "Found DCI", kept whole. */
 void record_dci(uint32_t                   pci,
                 uint32_t                   sfn,
                 uint32_t                   slot_idx,
@@ -60,6 +62,8 @@ void record_dci(uint32_t                   pci,
                 uint32_t                   dmrs_id,
                 uint32_t                   srs_request,
                 const srsran_sch_cfg_nr_t* sch_cfg,
+                bool                       ca_variant,
+                const char*                dci_bits,
                 const char*                dci_str);
 
 } // namespace RunRecorder

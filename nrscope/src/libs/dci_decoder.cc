@@ -7,6 +7,8 @@ DCIDecoder::DCIDecoder(uint32_t max_nof_rntis)
   slot_tmp  = (srsran_slot_cfg_t*)malloc(sizeof(srsran_slot_cfg_t));
 
   dci_dl = (srsran_dci_dl_nr_t*)malloc(sizeof(srsran_dci_dl_nr_t) * (max_nof_rntis));
+  dci_dl_bits.resize(max_nof_rntis);
+  dci_dl_ca.resize(max_nof_rntis);
   dci_ul = (srsran_dci_ul_nr_t*)malloc(sizeof(srsran_dci_ul_nr_t) * (max_nof_rntis));
 }
 
@@ -1067,6 +1069,14 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
 
     if (nof_dl_dci > 0) {
       dci_dl[rnti_idx] = dci_dl_tmp[0];
+      if (RunRecorder::enabled()) {
+        const srsran_dci_msg_nr_t& m = ue_dl_tmp->dl_dci_msg[0];
+        dci_dl_bits[rnti_idx].assign(m.nof_bits, '0');
+        for (uint32_t b = 0; b < m.nof_bits; b++) {
+          dci_dl_bits[rnti_idx][b] = m.payload[b] ? '1' : '0';
+        }
+        dci_dl_ca[rnti_idx] = true;
+      }
       total_dl_dci += nof_dl_dci;
     }
 
@@ -1151,6 +1161,14 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
 
     if (nof_dl_dci_nca > 0) {
       dci_dl[rnti_idx] = dci_dl_tmp[0];
+      if (RunRecorder::enabled()) {
+        const srsran_dci_msg_nr_t& m = ue_dl_tmp->dl_dci_msg[0];
+        dci_dl_bits[rnti_idx].assign(m.nof_bits, '0');
+        for (uint32_t b = 0; b < m.nof_bits; b++) {
+          dci_dl_bits[rnti_idx][b] = m.payload[b] ? '1' : '0';
+        }
+        dci_dl_ca[rnti_idx] = false;
+      }
       total_dl_dci += nof_dl_dci_nca;
     }
 
@@ -1208,7 +1226,8 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
           const srsran_dci_dl_nr_t& d = dci_dl[dci_idx_dl];
           RunRecorder::record_dci(state->cs_ret.ssb_res.N_id, state->sfn, slot->idx, true, d.ctx,
                                   d.freq_domain_assigment, d.time_domain_assigment, d.mcs, d.ndi, d.rv, d.pid,
-                                  d.tpc, d.ports, d.dmrs_id, d.srs_request, &pdsch_cfg, str);
+                                  d.tpc, d.ports, d.dmrs_id, d.srs_request, &pdsch_cfg,
+                                  dci_dl_ca[dci_idx_dl], dci_dl_bits[dci_idx_dl].c_str(), str);
           if (!RunRecorder::enabled()) {
             srsran_sch_cfg_nr_info(&pdsch_cfg, str, (uint32_t)sizeof(str));
             printf("DCIDecoder -- PDSCH_cfg:\n%s", str);
@@ -1226,7 +1245,8 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
           const srsran_dci_dl_nr_t& d = dci_dl[dci_idx_dl];
           RunRecorder::record_dci(state->cs_ret.ssb_res.N_id, state->sfn, slot->idx, true, d.ctx,
                                   d.freq_domain_assigment, d.time_domain_assigment, d.mcs, d.ndi, d.rv, d.pid,
-                                  d.tpc, d.ports, d.dmrs_id, d.srs_request, nullptr, str);
+                                  d.tpc, d.ports, d.dmrs_id, d.srs_request, nullptr,
+                                  dci_dl_ca[dci_idx_dl], dci_dl_bits[dci_idx_dl].c_str(), str);
         }
       }
     }
@@ -1283,7 +1303,7 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
         const srsran_dci_ul_nr_t& u = dci_ul[dci_idx_ul];
         RunRecorder::record_dci(state->cs_ret.ssb_res.N_id, state->sfn, slot->idx, false, u.ctx,
                                 u.freq_domain_assigment, u.time_domain_assigment, u.mcs, u.ndi, u.rv, u.pid,
-                                u.tpc, u.ports, u.dmrs_id, u.srs_request, &pusch_cfg, str);
+                                u.tpc, u.ports, u.dmrs_id, u.srs_request, &pusch_cfg, false, "", str);
         if (!RunRecorder::enabled()) {
           srsran_sch_cfg_nr_info(&pusch_cfg, str, (uint32_t)sizeof(str));
           printf("DCIDecoder -- PUSCH_cfg:\n%s", str);

@@ -27,7 +27,7 @@ DCI_COLUMNS = ("timestamp,pci,sfn,slot,direction,rnti,rnti_type,dci_format,ss_ty
                "freq_alloc,time_alloc,dci_mcs,dci_ndi,dci_rv,harq_id,tpc,ports,dmrs_id,srs_request,"
                "k,mapping,time_start,time_length,prbs,nof_prb,nof_layers,"
                "dmrs_type,dmrs_add_pos,dmrs_len,dmrs_typeA_pos,nof_dmrs_cdm_groups,n_scid,beta_dmrs,"
-               "modulation,mcs,tbs,code_rate,rv,ndi,nof_re,nof_bits,mcs_table,xoverhead,dci").split(",")
+               "modulation,mcs,tbs,code_rate,rv,ndi,nof_re,nof_bits,mcs_table,xoverhead,ca_variant,dci_bits,dci").split(",")
 MSG4_COLUMNS = ("timestamp,pci,sfn,slot,tc_rnti,c_rnti,rrc_transaction_id,rrc_offset,nof_bytes,dci,"
                 "msg4_bytes,master_cell_group").split(",")
 
@@ -93,6 +93,9 @@ def dci_row(dci_str, d, cfg, pci):
         "dmrs_id": d.get("dmrs_id", ""),
         "srs_request": d.get("srs_request", d.get("srs_req", "")),
         "dci": dci_str,
+        # ca_variant and dci_bits stay empty: the printed text cannot tell them. Every
+        # DCI is printed through the CA-configured decoder, so even DCIs matched with
+        # the normal sizes show cc=0.
     })
     if cfg:
         s, l = cfg.get("t_alloc", ":").split(":")

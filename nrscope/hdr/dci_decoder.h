@@ -52,6 +52,11 @@ public:
   srsran_slot_cfg_t* slot_tmp;
 
   srsran_dci_dl_nr_t* dci_dl;
+  /* For recording_mode only: the raw payload of the DCI kept in dci_dl, as a
+  string of '0'/'1', and whether it matched the carrier aggregation DCI sizes
+  (dci_cfg_ca) rather than the normal ones. */
+  std::vector<std::string> dci_dl_bits;
+  std::vector<bool>        dci_dl_ca;
   srsran_dci_ul_nr_t* dci_ul;
 
   // uint8_t* data_pdcch;
