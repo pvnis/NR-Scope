@@ -377,12 +377,15 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
     printf("RACHDecoder -- Found DCI: %s\n", str);
     tc_rnti = dci_rach[dci_id].ctx.rnti;
 
-    if (state->rach_found) {
-      result->found_rach = true;
-      result->new_rnti_number += 1;
-      result->new_rntis_found.emplace_back(tc_rnti);
-      continue;
-    }
+    /* Every candidate's Msg4 is decoded, also after the first RRCSetup of the
+      run. The RNTI is only taken from a real RRCSetup (PDSCH CRC ok), which
+      also gives each attach its own row in the msg4 recording. Previously,
+      once one RRCSetup had been seen, every RNTI recovered here was added
+      without decoding anything; since the RNTI is recovered from the PDCCH CRC
+      with only 8 of its bits checked, on the Sunrise cell that added 15 RNTIs
+      in 27 s that never received a DCI, each costing a blind search per slot
+      until it timed out. The DCI decoders keep using the first RRCSetup's
+      configuration, as before. */
 
     srsran_sch_cfg_nr_t pdsch_cfg         = {};
     pdsch_cfg.dmrs.typeA_pos              = state->cell.mib.dmrs_typeA_pos;
