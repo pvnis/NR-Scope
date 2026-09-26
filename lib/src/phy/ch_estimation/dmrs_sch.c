@@ -681,7 +681,7 @@ static uint32_t srsran_dmrs_sch_seed(const srsran_carrier_nr_t*   carrier,
     // n_scid = 1 and ID1 present
     n_id = dmrs_cfg->scrambling_id1;
   }
-  printf("slot_idx in srsran_dmrs_sch_seed: %d\n", slot_idx);
+  DEBUG("slot_idx in srsran_dmrs_sch_seed: %d", slot_idx);
   return SRSRAN_SEQUENCE_MOD((((SRSRAN_NSYMB_PER_SLOT_NR * slot_idx + symbol_idx + 1UL) * (2UL * n_id + 1UL)) << 17UL) +
                              (2UL * n_id + n_scid));
 }
@@ -933,7 +933,7 @@ int srsran_dmrs_sch_estimate(srsran_dmrs_sch_t*           q,
 
   cf_t*    ce        = q->temp;
   uint32_t symbol_sz = q->carrier.nof_prb * SRSRAN_NRE; // Symbol size in resource elements
-  printf("symbol_sz in dmrs_sch: %u\n", symbol_sz);
+  DEBUG("symbol_sz in dmrs_sch: %u", symbol_sz);
 
   // Get symbols indexes
   uint32_t symbols[SRSRAN_DMRS_SCH_MAX_SYMBOLS] = {};
@@ -978,7 +978,7 @@ int srsran_dmrs_sch_estimate(srsran_dmrs_sch_t*           q,
   for (uint32_t i = 0; i < nof_symbols; i++) {
       sync_err += srsran_vec_estimate_frequency(&q->pilot_estimates[nof_pilots_x_symbol * i], nof_pilots_x_symbol);
 
-    printf("srsran_vec_estimate_freq: %f\n", srsran_vec_estimate_frequency(&q->pilot_estimates[nof_pilots_x_symbol * i], nof_pilots_x_symbol));
+    DEBUG("srsran_vec_estimate_freq: %f", srsran_vec_estimate_frequency(&q->pilot_estimates[nof_pilots_x_symbol * i], nof_pilots_x_symbol));
   }
   sync_err /= (float)nof_symbols;
   float delay_us = sync_err / (dmrs_stride * SRSRAN_SUBC_SPACING_NR(q->carrier.scs));
@@ -1078,12 +1078,6 @@ int srsran_dmrs_sch_estimate(srsran_dmrs_sch_t*           q,
 #endif // DMRS_SCH_CFO_PRECOMPENSATE
 
   INFO("PDSCH-DMRS: RSRP=%+.2fdB EPRE=%+.2fdB CFO=%+.0fHz Sync=%.3fus",
-       chest_res->rsrp_dbm,
-       srsran_convert_power_to_dB(epre),
-       cfo_avg_hz,
-       chest_res->sync_error * 1e6);
-  
-  printf("PDSCH-DMRS: RSRP=%+.2fdB EPRE=%+.2fdB CFO=%+.0fHz Sync=%.3fus\n",
        chest_res->rsrp_dbm,
        srsran_convert_power_to_dB(epre),
        cfo_avg_hz,
@@ -1202,7 +1196,7 @@ int srsran_dmrs_sch_estimate_nrscope(srsran_dmrs_sch_t*           q,
 
   cf_t*    ce        = q->temp;
   uint32_t symbol_sz = q->carrier.nof_prb * SRSRAN_NRE; // Symbol size in resource elements
-  // printf("symbol_sz in dmrs_sch: %u\n", symbol_sz);
+  // DEBUG("symbol_sz in dmrs_sch: %u", symbol_sz);
 
   // Get symbols indexes
   uint32_t symbols[SRSRAN_DMRS_SCH_MAX_SYMBOLS] = {};
@@ -1244,7 +1238,7 @@ int srsran_dmrs_sch_estimate_nrscope(srsran_dmrs_sch_t*           q,
   float sync_err    = 0.0f;
   for (uint32_t i = 0; i < nof_symbols; i++) {
     sync_err += srsran_vec_estimate_frequency(&q->pilot_estimates[nof_pilots_x_symbol * i], nof_pilots_x_symbol);
-    // printf("srsran_vec_estimate_freq: %f\n", srsran_vec_estimate_frequency(&q->pilot_estimates[nof_pilots_x_symbol * i], nof_pilots_x_symbol));
+    // DEBUG("srsran_vec_estimate_freq: %f", srsran_vec_estimate_frequency(&q->pilot_estimates[nof_pilots_x_symbol * i], nof_pilots_x_symbol));
   }
   sync_err /= (float)nof_symbols;
   float delay_us = sync_err / (dmrs_stride * SRSRAN_SUBC_SPACING_NR(q->carrier.scs));

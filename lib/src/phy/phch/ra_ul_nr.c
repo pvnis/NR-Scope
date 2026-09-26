@@ -490,7 +490,7 @@ int srsran_ra_ul_nr_freq(const srsran_carrier_nr_t*    carrier,
 
   // Otherwise the UE shall use the uplink frequency resource allocation type as defined by the higher layer parameter
   // resourceAllocation.
-  printf("carrier->nof_prb: %u\n", carrier->nof_prb);
+  DEBUG("carrier->nof_prb: %u", carrier->nof_prb);
   if (cfg->alloc == srsran_resource_alloc_type1) {
     return ra_helper_freq_type1(carrier->nof_prb, 0, dci_ul->freq_domain_assigment, grant);
   }
