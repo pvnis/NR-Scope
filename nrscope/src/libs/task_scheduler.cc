@@ -484,7 +484,15 @@ void TaskSchedulerNRScope::TasksDispatch()
     s.processed.store(true, std::memory_order_release);
     current_slot_idx.store((i + 1) % slot_data_len, std::memory_order_relaxed);
 
-    w.SyncState(&task_scheduler_state);
+    /* SyncState deep-copies the shared state, including the RRCSetup's
+      masterCellGroup (ASN.1 lists on the heap) and known_rntis, which
+      UpdatewithResult rewrites under task_scheduler_lock. Copying them without
+      the lock while a new RRCSetup is stored read freed memory and crashed with
+      free(): invalid pointer right after the first RRCSetup. */
+    {
+      std::lock_guard<std::mutex> state_lock(task_scheduler_lock);
+      w.SyncState(&task_scheduler_state);
+    }
     sem_post(&w.smph_has_job);
   }
 }
@@ -507,8 +515,11 @@ int TaskSchedulerNRScope::AssignTask(uint64_t                    sf_round,
       /* Copy the rx_buffer_ to the worker's rx_buffer. This won't be
       interfering with other threads? */
       workers[i].get()->CopySlotandBuffer(sf_round, slot, outcome, rx_buffer_);
-      /* Update the worker's state */
-      workers[i].get()->SyncState(&task_scheduler_state);
+      /* Update the worker's state, under the same lock UpdatewithResult writes it with */
+      {
+        std::lock_guard<std::mutex> state_lock(task_scheduler_lock);
+        workers[i].get()->SyncState(&task_scheduler_state);
+      }
       /* Set the worker's sem to let the task run */
       sem_post(&workers[i].get()->smph_has_job);
       workers[i].get()->busy = true;
