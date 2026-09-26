@@ -1,7 +1,9 @@
 #include "nrscope/hdr/rach_decoder.h"
 #include "nrscope/hdr/run_recorder.h"
 #include "srsran/mac/mac_sch_pdu_nr.h"
+#include <set>
 #include <string>
+#include <tuple>
 #include <sys/time.h>
 
 std::mutex lock_rach;
@@ -381,7 +383,8 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
   for (int dci_id = 0; dci_id < nof_found_dci; dci_id++) {
     char str[1024] = {};
     srsran_dci_dl_nr_to_str(&(ue_dl_rach.dci), &dci_rach[dci_id], str, (uint32_t)sizeof(str));
-    printf("RACHDecoder -- Found DCI: %s\n", str);
+    // While recording, printed only once its PDSCH has decoded: most candidates are chance CRC matches
+    if (!RunRecorder::enabled()) printf("RACHDecoder -- Found DCI: %s\n", str);
     tc_rnti = dci_rach[dci_id].ctx.rnti;
 
     /* Every candidate's Msg4 is decoded, also after the first RRCSetup of the
@@ -394,13 +397,25 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
       until it timed out. The DCI decoders keep using the first RRCSetup's
       configuration, as before. */
 
+    /* The RNTI comes from the PDCCH CRC with only 8 of its bits checked, so about
+      1 candidate in 256 matches by chance and carries random fields. Some of
+      those cannot be a transmission at all: a time domain row the cell never
+      configured (SIB1 lists them; default table A has 16), or MCS 29-31, which
+      the 64QAM table reserves for retransmissions whose size cannot be
+      derived. Both would fail below after an srsRAN error line each, so they
+      are skipped here; nothing that could decode is lost. */
+    const uint32_t nof_time_rows = pdsch_hl_cfg.nof_common_time_ra > 0 ? pdsch_hl_cfg.nof_common_time_ra : 16;
+    if (dci_rach[dci_id].time_domain_assigment >= nof_time_rows || dci_rach[dci_id].mcs > 28) {
+      continue;
+    }
+
     srsran_sch_cfg_nr_t pdsch_cfg         = {};
     pdsch_cfg.dmrs.typeA_pos              = state->cell.mib.dmrs_typeA_pos;
     dci_rach[dci_id].ctx.coreset_start_rb = start_rb;
 
     if (srsran_ra_dl_dci_to_grant_nr(
             &pdsch_carrier, slot, &pdsch_hl_cfg, &dci_rach[dci_id], &pdsch_cfg, &pdsch_cfg.grant) < SRSRAN_SUCCESS) {
-      ERROR("RACHDecoder -- Error decoding PDSCH search");
+      if (!RunRecorder::enabled()) ERROR("RACHDecoder -- Error decoding PDSCH search");
       return SRSRAN_ERROR;
     }
 
@@ -427,7 +442,7 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
 
     // Decode PDSCH
     if (srsran_ue_dl_nr_decode_pdsch(&ue_dl_pdsch, slot, &pdsch_cfg, &pdsch_res) < SRSRAN_SUCCESS) {
-      printf("Error decoding PDSCH search\n");
+      if (!RunRecorder::enabled()) printf("Error decoding PDSCH search\n");
       return SRSRAN_ERROR;
     }
 
@@ -461,15 +476,16 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
       }
     }
     if (all_zero) {
-      ERROR("RACHDecoder -- PDSCH payload is all zeros");
+      if (!RunRecorder::enabled()) ERROR("RACHDecoder -- PDSCH payload is all zeros");
       return SRSRAN_ERROR;
     }
 
     char dci_str[512] = {};
     srsran_dci_dl_nr_to_str(&(ue_dl_rach.dci), &dci_rach[dci_id], dci_str, (uint32_t)sizeof(dci_str));
+    if (RunRecorder::enabled()) printf("RACHDecoder -- Found DCI: %s\n", dci_str);
 
     if (pdsch_cfg.grant.tb[0].tbs / 8 < 40) {
-      ERROR("Too short for RRC Setup");
+      if (!RunRecorder::enabled()) ERROR("Too short for RRC Setup");
       log_msg4_bytes(slot->idx, tc_rnti, dci_str, "too_short", 0, pdsch_res.tb[0].payload, pdsch_cfg.grant.tb[0].tbs / 8);
       return SRSRAN_ERROR;
     }
@@ -479,17 +495,59 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
       cell's configuration. When it is absent, locate the CCCH SDU (LCID 0) by
       walking the MAC subheaders instead, past the contention resolution
       identity and any other MAC CE the gNB put in front of it. */
+    bool                   found_ccch = false;
+    srsran::mac_sch_pdu_nr mac_pdu(false);
     if (!found_pattern) {
-      srsran::mac_sch_pdu_nr mac_pdu(false);
       mac_pdu.unpack(pdsch_res.tb[0].payload, msg_len);
       for (uint32_t i = 0; i < mac_pdu.get_num_subpdus(); i++) {
         srsran::mac_sch_subpdu_nr& subpdu = mac_pdu.get_subpdu(i);
         if (subpdu.is_sdu() && subpdu.get_lcid() == srsran::mac_sch_subpdu_nr::CCCH) {
           bytes_offset = subpdu.get_sdu() - pdsch_res.tb[0].payload;
           msg_len      = bytes_offset + subpdu.get_sdu_length();
+          found_ccch   = true;
           break;
         }
       }
+    }
+
+    /* No RRC message on CCCH, so this is not a Msg4: the DCI was for a UE that
+      is already connected, found here because the gNB also schedules it with
+      DCI 1_0 in the common search space. Parsing it as DL-CCCH, as before, read
+      the MAC header as RRC and could even call it an RRCReject. Its RRC
+      messages go on SRB1-3, ciphered, but their RLC and PDCP headers are not:
+      report each one once. On the Sunrise cell every UE gets a 326 byte one
+      about 2 s after its RRCSetup, and its DCI 1_1 grows by 5 bits right after:
+      that is the RRCReconfiguration. */
+    if (!found_pattern && !found_ccch) {
+      static std::mutex                                           srb_mtx;
+      static std::set<std::tuple<uint16_t, uint32_t, uint32_t> > srb_seen;
+      for (uint32_t i = 0; i < mac_pdu.get_num_subpdus(); i++) {
+        srsran::mac_sch_subpdu_nr& subpdu = mac_pdu.get_subpdu(i);
+        const uint32_t             lcid   = subpdu.get_lcid();
+        const uint32_t             len    = subpdu.get_sdu_length();
+        if (!subpdu.is_sdu() || lcid < 1 || lcid > 3 || len < 4) {
+          continue;
+        }
+        // RLC AM, 12 bit SN: D/C P SI(2) SN(12); a segment with an SO has 2 more bytes. Then PDCP for SRB: 4 R + SN(12).
+        const uint8_t* sdu    = subpdu.get_sdu();
+        const uint32_t rlc_sn = ((sdu[0] & 0x0f) << 8) | sdu[1];
+        const uint32_t si     = (sdu[0] >> 4) & 0x3;
+        const uint32_t hdr    = (si >= 2) ? 4 : 2;
+        const bool     first  = (si == 0 || si == 1); // complete SDU or first segment carries the PDCP header
+        std::lock_guard<std::mutex> lock(srb_mtx);
+        if (!srb_seen.insert(std::make_tuple(tc_rnti, lcid, rlc_sn)).second) {
+          continue; // a retransmission of one already reported
+        }
+        if (first && len >= hdr + 2) {
+          const uint32_t pdcp_sn = ((sdu[hdr] & 0x0f) << 8) | sdu[hdr + 1];
+          printf("RRC on SRB%u for UE 0x%04x: %u bytes, RLC SN %u, PDCP SN %u (ciphered)\n", lcid, tc_rnti, len, rlc_sn, pdcp_sn);
+        } else {
+          printf("RRC on SRB%u for UE 0x%04x: %u bytes, RLC SN %u, segment (ciphered)\n", lcid, tc_rnti, len, rlc_sn);
+        }
+      }
+      log_msg4_bytes(slot->idx, tc_rnti, dci_str, "mac:srb", 0, pdsch_res.tb[0].payload, pdsch_cfg.grant.tb[0].tbs / 8);
+      srsran_softbuffer_rx_free(&softbuffer);
+      continue;
     }
 
     if (!RunRecorder::enabled()) std::cout << "Decoding Msg 4..." << std::endl;
