@@ -14,6 +14,7 @@
 #include <boost/program_options/parsers.hpp>
 
 #include "nrscope/hdr/load_config.h"
+#include "nrscope/hdr/run_recorder.h"
 #include "nrscope/hdr/nrscope_def.h"
 #include "nrscope/hdr/radio_nr.h"
 #include "nrscope/hdr/rrc_recfg_parse.h"
@@ -233,6 +234,11 @@ int load_config(std::vector<Radio>& radios, std::string file_name)
       radios[i].local_log = false;
     }
   }
+
+  /* Record RRCSetups and UE DCIs to per-run CSVs at the project root, and keep
+    the terminal to the "Found DCI" and "hooray" lines. See run_recorder.h. */
+  RunRecorder::init(config_yaml[setting_name]["recording_mode"] &&
+                    config_yaml[setting_name]["recording_mode"].as<bool>());
 
   if (config_yaml[setting_name]["push_to_google"]) {
     for (int i = 0; i < nof_usrp; i++) {

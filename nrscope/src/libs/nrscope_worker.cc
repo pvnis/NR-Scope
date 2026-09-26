@@ -279,6 +279,7 @@ void NRScopeWorker::Run()
     slot_result.slot        = slot;
     slot_result.outcome     = outcome;
     slot_result.sf_round    = sf_round;
+    worker_state.sfn        = outcome.sfn;
 
     /* Put the initialization delay into the worker's thread */
     if (!worker_state.sib1_inited) {

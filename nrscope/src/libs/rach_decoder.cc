@@ -1,4 +1,5 @@
 #include "nrscope/hdr/rach_decoder.h"
+#include "nrscope/hdr/run_recorder.h"
 #include "srsran/mac/mac_sch_pdu_nr.h"
 #include <string>
 #include <sys/time.h>
@@ -393,8 +394,10 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
       return SRSRAN_ERROR;
     }
 
-    srsran_sch_cfg_nr_info(&pdsch_cfg, str, (uint32_t)sizeof(str));
-    printf("PDSCH_cfg:\n%s", str);
+    if (!RunRecorder::enabled()) {
+      srsran_sch_cfg_nr_info(&pdsch_cfg, str, (uint32_t)sizeof(str));
+      printf("PDSCH_cfg:\n%s", str);
+    }
 
     if (srsran_softbuffer_rx_init_guru(&softbuffer, SRSRAN_SCH_NR_MAX_NOF_CB_LDPC, SRSRAN_LDPC_MAX_LEN_ENCODED_CB) <
         SRSRAN_SUCCESS) {
@@ -434,7 +437,7 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
     }
 
     if (!pdsch_res.tb[0].crc) {
-      printf("RACHDecoder -- Error decoding PDSCH (CRC)\n");
+      if (!RunRecorder::enabled()) printf("RACHDecoder -- Error decoding PDSCH (CRC)\n");
 
       return SRSRAN_ERROR;
     }
@@ -479,7 +482,7 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
       }
     }
 
-    std::cout << "Decoding Msg 4..." << std::endl;
+    if (!RunRecorder::enabled()) std::cout << "Decoding Msg 4..." << std::endl;
     asn1::rrc_nr::dl_ccch_msg_s dlcch_msg;
     /* What the first few bytes are? In srsgNB there are 10 extra bytes and for
       small cell there are 3 extra bytes before the RRCSetup message. */
@@ -518,7 +521,7 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
                    pdsch_cfg.grant.tb[0].tbs / 8);
 
     result->rrc_setup = dlcch_msg.msg.c1().rrc_setup();
-    std::cout << "Msg 4 Decoded." << std::endl;
+    if (!RunRecorder::enabled()) std::cout << "Msg 4 Decoded." << std::endl;
     switch (dlcch_msg.msg.c1().type().value) {
       case asn1::rrc_nr::dl_ccch_msg_type_c::c1_c_::types::rrc_reject: {
         std::cout << "Unfortunately, it's a rrc_reject ;(" << std::endl;
@@ -526,11 +529,11 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
       } break;
       case asn1::rrc_nr::dl_ccch_msg_type_c::c1_c_::types::rrc_setup: {
         std::cout << "It's a rrc_setup, hooray!" << std::endl;
-        printf("rrc-TransactionIdentifier: %u\n", (result->rrc_setup).rrc_transaction_id);
+        if (!RunRecorder::enabled()) printf("rrc-TransactionIdentifier: %u\n", (result->rrc_setup).rrc_transaction_id);
         result->found_rach = true;
       } break;
       default: {
-        std::cout << "None detected, skip. Bytes in msg4_bytes.log" << std::endl;
+        if (!RunRecorder::enabled()) std::cout << "None detected, skip. Bytes in msg4_bytes.log" << std::endl;
         return SRSRAN_ERROR;
       } break;
     }
@@ -547,13 +550,27 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
 
     asn1::json_writer js;
     result->master_cell_group.to_json(js);
-    printf("masterCellGroup: %s\n", js.to_string().c_str());
+    if (!RunRecorder::enabled()) {
+      printf("masterCellGroup: %s\n", js.to_string().c_str());
+    }
 
     if (!(result->master_cell_group).sp_cell_cfg.recfg_with_sync.new_ue_id) {
       c_rnti = tc_rnti;
     } else {
       c_rnti = result->master_cell_group.sp_cell_cfg.recfg_with_sync.new_ue_id;
     }
+
+    RunRecorder::record_rrc_setup(state->cs_ret.ssb_res.N_id,
+                                  result->outcome.sfn,
+                                  slot->idx,
+                                  tc_rnti,
+                                  c_rnti,
+                                  (result->rrc_setup).rrc_transaction_id,
+                                  dci_str,
+                                  bytes_offset,
+                                  pdsch_res.tb[0].payload,
+                                  pdsch_cfg.grant.tb[0].tbs / 8,
+                                  js.to_string());
     // std::cout << "c-rnti: " << c_rnti << std::endl;
 
     /* Add the new rntis into a different list and update the

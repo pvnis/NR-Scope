@@ -1,3 +1,4 @@
+#include "nrscope/hdr/run_recorder.h"
 #include <iostream>
 #include <string>
 #include <unistd.h>
@@ -64,6 +65,7 @@ int main(int argc, char** argv){
   if(radios[0].local_log){
     NRScopeLog::exit_logger();
   }
+  RunRecorder::close();
 
   return NR_SUCCESS;
 }

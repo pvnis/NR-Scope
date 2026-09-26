@@ -1,4 +1,5 @@
 #include "nrscope/hdr/nrscope_logger.h"
+#include "nrscope/hdr/run_recorder.h"
 
 namespace NRScopeLog{
   std::vector<std::string> filename;
@@ -211,7 +212,7 @@ namespace NRScopeLog{
             LogNode new_node = log_queue[rf_index].front();
             // Write to local disk
             write_entry(new_node, rf_index);
-            printf("new_node_timestamp: %f\n", new_node.timestamp);
+            if (!RunRecorder::enabled()) printf("new_node_timestamp: %f\n", new_node.timestamp);
             log_queue[rf_index].pop();
             lock.unlock();
           }

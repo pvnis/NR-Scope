@@ -15,3 +15,7 @@ __pycache__/
 # and too run-specific to belong in the history.
 gnb.log
 *.csv
+
+# Per-run recordings written by recording_mode (log_config in the yaml)
+/msg4/
+/DCIs/

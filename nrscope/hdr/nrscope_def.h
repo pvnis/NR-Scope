@@ -267,6 +267,10 @@ struct WorkState_ {
   /* The time that the UE is last seen by us, if it's too long (5 second),
   we delete the UE from the list. */
   std::vector<double> last_seen;
+
+  /* SFN of the slot being processed, set by the worker before its decoders run
+  so the DCI recordings can say which frame a grant was in. Not synced. */
+  uint32_t sfn;
 };
 
 typedef struct SlotResult_ SlotResult;

@@ -34,6 +34,12 @@ usrp_setting_0:
   google_dataset_id: "ngscope5g_dci_log_wanhr"
 
 log_config:
+  # Record each run for offline statistics, under the project root:
+  #   msg4/msg4_<date>_<time>_pci<N>.csv  one row per RRCSetup (DCI, Msg4 bytes, masterCellGroup JSON)
+  #   DCIs/dci_<date>_<time>_pci<N>.csv   one row per DCI found for a known UE, with its grant
+  # A file is only created if the run has at least one such row. The terminal
+  # then keeps only the "Found DCI" and "rrc_setup, hooray" lines: no grant dumps, no JSON.
+  recording_mode: true
   local_log: true
   push_to_google: false
   google_service_account_credential: "/home/wanhr/Downloads/nsf-2223556-222187-02b924918c95.json"

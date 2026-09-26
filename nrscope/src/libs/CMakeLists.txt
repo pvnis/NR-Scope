@@ -1,5 +1,8 @@
 file(GLOB_RECURSE SOURCES "*.cc" "*.c")
 add_library(nrscope_libs STATIC ${SOURCES})
+# Where recording_mode writes its msg4/ and DCIs/ folders: the project root,
+# not the build tree the binary runs from.
+target_compile_definitions(nrscope_libs PRIVATE NRSCOPE_ROOT_DIR="${CMAKE_SOURCE_DIR}")
 
 # message(${PROJECT_SOURCE_DIR})
 # target_include_directories(ngscope_dci PUBLIC ${PROJECT_SOURCE_DIR}/ngscope/hdr)
