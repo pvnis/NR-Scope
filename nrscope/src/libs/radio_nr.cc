@@ -9,7 +9,7 @@
 
 static SRSRAN_AGC_CALLBACK(radio_set_rx_gain_wrapper)
 {
-  printf("[AGC gain adj] new rx gain: %f\n", gain_db);
+  //printf("[AGC gain adj] new rx gain: %f\n", gain_db);
   ((srsran::radio_interface_phy*)h)->set_rx_gain(gain_db);
 }
 

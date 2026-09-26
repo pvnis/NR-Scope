@@ -40,7 +40,7 @@ log_config:
   # A file is only created if the run has at least one such row. The terminal
   # then keeps only the "Found DCI" and "rrc_setup, hooray" lines: no grant dumps, no JSON.
   recording_mode: true
-  local_log: true
+  local_log: false
   push_to_google: false
   google_service_account_credential: "/home/wanhr/Downloads/nsf-2223556-222187-02b924918c95.json"
   enable_gui: false

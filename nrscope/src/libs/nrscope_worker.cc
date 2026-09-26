@@ -4,6 +4,45 @@
 
 namespace NRScopeTask {
 
+/* True if every symbol of this slot is uplink in the cell's TDD pattern (SIB1
+  tdd-UL-DL-ConfigurationCommon): the gNB transmits nothing in it, so there is
+  no PDCCH or PDSCH, and no DM-RS, to look for. On the Sunrise cell (D D D S U,
+  2.5 ms) that is one slot in five. False whenever it cannot be sure: before
+  SIB1, FDD, a reference SCS other than the carrier's, or a period that is not
+  a whole number of slots. */
+static bool slot_is_uplink_only(const WorkState& st, uint32_t sfn, uint32_t slot_idx)
+{
+  if (!st.sib1_found || !st.sib1.serving_cell_cfg_common_present ||
+      !st.sib1.serving_cell_cfg_common.tdd_ul_dl_cfg_common_present) {
+    return false;
+  }
+  const asn1::rrc_nr::tdd_ul_dl_cfg_common_s& tdd = st.sib1.serving_cell_cfg_common.tdd_ul_dl_cfg_common;
+  const uint32_t                              mu  = (uint32_t)st.args_t.ssb_scs; // 0: 15 kHz, 1: 30 kHz, ...
+  if ((uint32_t)tdd.ref_subcarrier_spacing.value != mu) {
+    return false;
+  }
+  // Pattern period in slots of this numerology, 0 if not a whole number
+  auto period_slots = [mu](const asn1::rrc_nr::tdd_ul_dl_pattern_s& p) -> uint32_t {
+    static const uint32_t period_us[] = {500, 625, 1000, 1250, 2000, 2500, 5000, 10000};
+    uint32_t              us          = p.dl_ul_tx_periodicity_v1530_present ? 1000U * p.dl_ul_tx_periodicity_v1530.to_number()
+                                                                             : period_us[p.dl_ul_tx_periodicity.value];
+    uint32_t              slot_us     = 1000U >> mu;
+    return (us % slot_us == 0) ? us / slot_us : 0;
+  };
+  const uint32_t p1 = period_slots(tdd.pattern1);
+  const uint32_t p2 = tdd.pattern2_present ? period_slots(tdd.pattern2) : 0;
+  if (p1 == 0 || (tdd.pattern2_present && p2 == 0)) {
+    return false;
+  }
+  // Uplink-only slots close each pattern; patterns repeat from the start of the frame
+  uint32_t n = (sfn * SRSRAN_NSLOTS_PER_FRAME_NR(st.args_t.ssb_scs) + slot_idx) % (p1 + p2);
+  if (n < p1) {
+    return n >= p1 - SRSRAN_MIN(tdd.pattern1.nrof_ul_slots, p1);
+  }
+  n -= p1;
+  return n >= p2 - SRSRAN_MIN(tdd.pattern2.nrof_ul_slots, p2);
+}
+
 std::vector<SlotResult> global_slot_results;
 std::mutex              queue_lock;
 std::mutex              task_scheduler_lock;
@@ -298,6 +337,11 @@ void NRScopeWorker::Run()
       worker_state.dci_inited = true;
     }
 
+    /* Nothing is sent downlink in an uplink-only TDD slot: skip the RACH and DCI
+      decoders, their FFTs included. The slot still yields a result, empty, so
+      the scheduler's per-slot bookkeeping is unchanged. */
+    const bool uplink_only = slot_is_uplink_only(worker_state, outcome.sfn, slot.idx);
+
     std::thread sibs_thread;
     /* If sib1 is not found, we run the sibs_thread; if it's found, we skip. */
     if (worker_state.sib1_inited and !worker_state.sib1_found) {
@@ -315,7 +359,7 @@ void NRScopeWorker::Run()
     }
 
     std::thread rach_thread;
-    if (worker_state.rach_inited) {
+    if (worker_state.rach_inited && !uplink_only) {
       if (worker_state.cpu_affinity) {
         cpu_set_t cpu_set_rach;
         CPU_ZERO(&cpu_set_rach);
@@ -330,7 +374,7 @@ void NRScopeWorker::Run()
     }
 
     std::vector<std::thread> dci_threads;
-    if (worker_state.dci_inited) {
+    if (worker_state.dci_inited && !uplink_only) {
       slot_result.dci_result = true;
 
       dl_prb_rate.resize(worker_state.nof_known_rntis);
@@ -389,7 +433,7 @@ void NRScopeWorker::Run()
       rach_thread.join();
     }
 
-    if (worker_state.dci_inited) {
+    if (worker_state.dci_inited && !uplink_only) {
       MergeResults();
       slot_result.dci_feedback_results = results;
     }
