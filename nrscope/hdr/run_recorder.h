@@ -25,6 +25,42 @@ namespace RunRecorder {
 void init(bool enable);
 bool enabled();
 
+/* One-shot snapshot of the cell configuration recovered from the air, used to
+  draw the static cell map (SSB / CORESET#0 / SIB1 / initial DL BWP against
+  Point A). Every field comes from what NR-Scope itself decoded (MIB, SIB1,
+  CORESET#0 zero tables) or computed from it, never from a gNB-side log. All
+  frequencies are in Hz; RB counts use the resource block of the subcarrier
+  spacing named alongside them, except offset_to_point_a_rb which, per TS 38.211,
+  counts RBs of 15 kHz. */
+struct CellSummary {
+  uint32_t pci                       = 0;
+  double   dl_center_freq_hz         = 0.0; // capture centre
+  double   ssb_center_freq_hz        = 0.0; // SS/PBCH block centre
+  double   coreset0_lower_freq_hz    = 0.0; // lowest subcarrier of CORESET#0
+  double   coreset0_center_freq_hz   = 0.0;
+  uint32_t ssb_scs_khz               = 0;
+  uint32_t common_scs_khz            = 0;   // scs of the initial DL BWP / carrier
+  uint32_t k_ssb                     = 0;   // subcarrier offset SSB -> CRB grid
+  uint32_t ssb_idx                   = 0;
+  uint32_t coreset0_idx              = 0;   // pdcch-ConfigSIB1 4 MSBs
+  uint32_t ss0_idx                   = 0;   // pdcch-ConfigSIB1 4 LSBs
+  uint32_t coreset0_offset_rb        = 0;   // from Point A, in common-scs RBs
+  uint32_t coreset0_bw_rb            = 0;
+  uint32_t coreset0_duration_symbols = 0;
+  uint32_t coreset0_first_symbol     = 0;   // first OFDM symbol in its slot (table 13-11)
+  uint32_t coreset0_slot_n0          = 0;   // monitoring slot n_0 within a frame
+  uint32_t coreset0_sfn_c            = 0;   // 0 = even SFN, 1 = odd SFN
+  char     ssb_pattern[8]            = {0}; // "A".."E", sets the SSB symbol positions
+  uint32_t offset_to_point_a_rb      = 0;   // SIB1, in 15 kHz RBs
+  uint32_t carrier_bw_rb             = 0;   // SIB1 scs-SpecificCarrier, common-scs RBs
+  uint32_t carrier_offset_to_carrier = 0;   // SIB1 scs-SpecificCarrier
+  uint32_t init_dl_bwp_riv          = 0;    // SIB1 initialDownlinkBWP locationAndBandwidth
+};
+
+/* Written once, the first time SIB1 is decoded for a cell, to
+  cell/cell_<date>_<time>_pci<N>.json. No-op unless recording is enabled. */
+void record_cell_summary(const CellSummary& c);
+
 /* Flush and close the files. Rows are also flushed periodically, since runs
   usually end by being killed. */
 void close();

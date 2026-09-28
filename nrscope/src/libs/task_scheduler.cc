@@ -1,4 +1,5 @@
 #include "nrscope/hdr/task_scheduler.h"
+#include "nrscope/hdr/run_recorder.h"
 #include <ctime>
 
 namespace NRScopeTask {
@@ -179,6 +180,8 @@ int TaskSchedulerNRScope::DecodeMIB(cell_searcher_args_t*          args_t_,
   }
   std::cout << "After calling coreset_zero_t_f_nrscope" << std::endl;
 
+  task_scheduler_state.coreset0_args_t.first_symbol = coreset_zero_cfg.first_symbol_idx;
+
   task_scheduler_state.cell.u              = (int)args_t_->ssb_scs;
   task_scheduler_state.coreset0_args_t.n_0 = (coreset_zero_cfg.O * (int)pow(2, task_scheduler_state.cell.u) +
                                               (int)floor(task_scheduler_state.cell.mib.ssb_idx * coreset_zero_cfg.M)) %
@@ -219,6 +222,47 @@ int TaskSchedulerNRScope::UpdatewithResult(SlotResult now_result)
       }
       /* Since we got the SIB1, we can now init the RACH decoder*/
       task_scheduler_state.rach_inited = true;
+
+      /* Snapshot the cell configuration for the static cell map, purely from
+        what we decoded off the air (MIB + this SIB1 + CORESET#0 zero tables). */
+      if (RunRecorder::enabled()) {
+        RunRecorder::CellSummary cs = {};
+        cs.pci                       = task_scheduler_state.args_t.base_carrier.pci;
+        cs.dl_center_freq_hz         = task_scheduler_state.args_t.base_carrier.dl_center_frequency_hz;
+        cs.ssb_center_freq_hz        = task_scheduler_state.srsran_searcher_cfg_t.ssb_freq_hz;
+        cs.coreset0_lower_freq_hz    = task_scheduler_state.coreset0_args_t.coreset0_lower_freq_hz;
+        cs.coreset0_center_freq_hz   = task_scheduler_state.coreset0_args_t.coreset0_center_freq_hz;
+        cs.ssb_scs_khz               = 15u << (uint32_t)task_scheduler_state.args_t.ssb_scs;
+        cs.common_scs_khz            = 15u << (uint32_t)task_scheduler_state.cell.mib.scs_common;
+        cs.k_ssb                     = task_scheduler_state.cell.k_ssb;
+        cs.ssb_idx                   = task_scheduler_state.cell.mib.ssb_idx;
+        cs.coreset0_idx              = task_scheduler_state.cell.mib.coreset0_idx;
+        cs.ss0_idx                   = task_scheduler_state.cell.mib.ss0_idx;
+        cs.coreset0_offset_rb        = task_scheduler_state.coreset0_t.offset_rb;
+        cs.coreset0_bw_rb            = srsran_coreset_get_bw(&task_scheduler_state.coreset0_t);
+        cs.coreset0_duration_symbols = task_scheduler_state.coreset0_t.duration;
+        cs.coreset0_first_symbol     = task_scheduler_state.coreset0_args_t.first_symbol;
+        cs.coreset0_slot_n0          = task_scheduler_state.coreset0_args_t.n_0;
+        cs.coreset0_sfn_c            = task_scheduler_state.coreset0_args_t.sfn_c;
+        {
+          const char* p = srsran_ssb_pattern_to_str(task_scheduler_state.args_t.ssb_pattern);
+          strncpy(cs.ssb_pattern, p ? p : "", sizeof(cs.ssb_pattern) - 1);
+        }
+
+        if (task_scheduler_state.sib1.serving_cell_cfg_common_present) {
+          const auto& freq_dl =
+              task_scheduler_state.sib1.serving_cell_cfg_common.dl_cfg_common.freq_info_dl;
+          cs.offset_to_point_a_rb = freq_dl.offset_to_point_a;
+          if (freq_dl.scs_specific_carrier_list.size() > 0) {
+            cs.carrier_bw_rb             = freq_dl.scs_specific_carrier_list[0].carrier_bw;
+            cs.carrier_offset_to_carrier = freq_dl.scs_specific_carrier_list[0].offset_to_carrier;
+          }
+          cs.init_dl_bwp_riv = task_scheduler_state.sib1.serving_cell_cfg_common.dl_cfg_common.init_dl_bwp
+                                   .generic_params.location_and_bw;
+        }
+
+        RunRecorder::record_cell_summary(cs);
+      }
     }
 
     if (now_result.found_sib.size() > 0) {

@@ -188,6 +188,7 @@ struct coreset0_args {
   double   coreset0_center_freq_hz = 0.0;
   int      n_0                     = 0;
   int      sfn_c                   = 0;
+  int      first_symbol            = 0; // first OFDM symbol of CORESET#0 in its slot
 };
 
 typedef struct _DCIFeedback {

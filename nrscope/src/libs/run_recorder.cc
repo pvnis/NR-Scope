@@ -383,4 +383,74 @@ void record_dci(uint32_t                   pci,
   }
 }
 
+void record_cell_summary(const CellSummary& c)
+{
+  if (!is_enabled) {
+    return;
+  }
+
+  std::string dir_path = std::string(NRSCOPE_ROOT_DIR) + "/cell";
+  mkdir(dir_path.c_str(), 0755); // already there is fine
+  give_to_invoking_user(dir_path);
+
+  std::string path = dir_path + "/cell_" + run_stamp + "_pci" + std::to_string(c.pci) + ".json";
+  FILE*       f    = fopen(path.c_str(), "w");
+  if (f == nullptr) {
+    fprintf(stderr, "RunRecorder: cannot create %s, not recording the cell summary\n", path.c_str());
+    return;
+  }
+
+  fprintf(f,
+          "{\n"
+          "  \"pci\": %u,\n"
+          "  \"dl_center_freq_hz\": %.1f,\n"
+          "  \"ssb_center_freq_hz\": %.1f,\n"
+          "  \"coreset0_lower_freq_hz\": %.1f,\n"
+          "  \"coreset0_center_freq_hz\": %.1f,\n"
+          "  \"ssb_scs_khz\": %u,\n"
+          "  \"common_scs_khz\": %u,\n"
+          "  \"k_ssb\": %u,\n"
+          "  \"ssb_idx\": %u,\n"
+          "  \"coreset0_idx\": %u,\n"
+          "  \"ss0_idx\": %u,\n"
+          "  \"coreset0_offset_rb\": %u,\n"
+          "  \"coreset0_bw_rb\": %u,\n"
+          "  \"coreset0_duration_symbols\": %u,\n"
+          "  \"coreset0_first_symbol\": %u,\n"
+          "  \"coreset0_slot_n0\": %u,\n"
+          "  \"coreset0_sfn_c\": %u,\n"
+          "  \"ssb_pattern\": \"%s\",\n"
+          "  \"offset_to_point_a_rb\": %u,\n"
+          "  \"carrier_bw_rb\": %u,\n"
+          "  \"carrier_offset_to_carrier\": %u,\n"
+          "  \"init_dl_bwp_riv\": %u\n"
+          "}\n",
+          c.pci,
+          c.dl_center_freq_hz,
+          c.ssb_center_freq_hz,
+          c.coreset0_lower_freq_hz,
+          c.coreset0_center_freq_hz,
+          c.ssb_scs_khz,
+          c.common_scs_khz,
+          c.k_ssb,
+          c.ssb_idx,
+          c.coreset0_idx,
+          c.ss0_idx,
+          c.coreset0_offset_rb,
+          c.coreset0_bw_rb,
+          c.coreset0_duration_symbols,
+          c.coreset0_first_symbol,
+          c.coreset0_slot_n0,
+          c.coreset0_sfn_c,
+          c.ssb_pattern,
+          c.offset_to_point_a_rb,
+          c.carrier_bw_rb,
+          c.carrier_offset_to_carrier,
+          c.init_dl_bwp_riv);
+
+  fclose(f);
+  give_to_invoking_user(path);
+  printf("Recording cell summary to %s\n", path.c_str());
+}
+
 } // namespace RunRecorder
