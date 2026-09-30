@@ -150,8 +150,8 @@ def main():
     ap.add_argument("--carrier-prb", type=int, default=273)
     ap.add_argument("--zoom-prb", type=int, default=0, help="first PRB of the RE-resolution zoom (default 0)")
     ap.add_argument("--zoom-nprb", type=int, default=4, help="PRBs in the zoom (default 4)")
-    ap.add_argument("-o", "--output", help="PNG path (default: beside the CSV)")
-    ap.add_argument("--show", action="store_true")
+    ap.add_argument("-o", "--output", help="PNG path (default: beside the CSV, unless --show)")
+    ap.add_argument("--show", action="store_true", help="open a window instead of writing the PNG")
     a = ap.parse_args()
 
     path = a.dci_csv or max(glob.glob(os.path.join(ROOT, "DCIs", "dci_*.csv")), key=os.path.getmtime)
@@ -226,9 +226,11 @@ def main():
                loc="upper right", ncol=4, frameon=False, fontsize=9, bbox_to_anchor=(0.99, 0.975))
     fig.tight_layout(rect=(0, 0, 1, 0.95))
 
-    out = a.output or os.path.splitext(path)[0] + f"_grid_{start % (1024 * SLOTS_PER_FRAME)}.png"
-    fig.savefig(out, dpi=140, facecolor=fig.get_facecolor())
-    print(f"wrote {out}")
+    # --show opens a window instead of writing a file; -o still writes one
+    if a.output or not a.show:
+        out = a.output or os.path.splitext(path)[0] + f"_grid_{start % (1024 * SLOTS_PER_FRAME)}.png"
+        fig.savefig(out, dpi=140, facecolor=fig.get_facecolor())
+        print(f"wrote {out}")
     if a.show:
         plt.show()
 
