@@ -2,6 +2,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <liquid/liquid.h>
+#include <pthread.h>
+#include <sched.h>
 #include <semaphore>
 
 #define RING_BUF_SIZE 10
@@ -524,6 +526,9 @@ int Radio::RadioInitandStart()
 
   /* Initialize the task_scheduler and the workers in it.
      They will all remain inactive until the MIB is found. */
+  task_scheduler_nrscope.task_scheduler_state.worker_cpus    = cpu_affinity ? worker_cpus : std::vector<int>{};
+  task_scheduler_nrscope.task_scheduler_state.dispatcher_cpu = dispatcher_cpu;
+  task_scheduler_nrscope.task_scheduler_state.results_cpu    = results_cpu;
   task_scheduler_nrscope.InitandStart(local_log,
                                       to_google,
                                       rf_index,
@@ -598,6 +603,12 @@ int Radio::RadioInitandStart()
     uint32_t nof_pbch_crc  = 0;
     uint32_t nof_other_pci = 0;
     uint32_t last_other_pci = 0;
+    /* The search runs slower than real time at high rates, so the RF buffer
+      eventually overflows and one receive times out. The RF layer restarts the
+      stream on the next rx_now, so skip the slot and carry on rather than end
+      the search. Only a run of consecutive failures means the radio is gone. */
+    uint32_t nof_rx_fail        = 0;
+    uint32_t nof_rx_fail_in_row = 0;
 
     for (uint32_t trial = 0; trial < nof_trials; trial++) {
       if (trial == 0) {
@@ -609,9 +620,16 @@ int Radio::RadioInitandStart()
       srsran::rf_timestamp_t& rf_timestamp = last_rx_time;
 
       if (not radio->rx_now(rf_buffer, rf_timestamp)) {
-        std::cout << "Cell search: rx_now failed on trial " << trial << ", giving up" << std::endl;
-        return SRSRAN_ERROR;
+        nof_rx_fail++;
+        if (++nof_rx_fail_in_row >= 10) {
+          std::cout << "Cell search: rx_now failed " << nof_rx_fail_in_row << " times in a row at slot " << trial
+                    << ", giving up (best SSB SNR " << best_snr_db << " dB, PBCH CRC ok " << nof_pbch_crc << "x)"
+                    << std::endl;
+          return SRSRAN_ERROR;
+        }
+        continue;
       }
+      nof_rx_fail_in_row = 0;
 
       if (resample_needed) {
         // srsran_vec_fprint2_c(fp_time_series_pre_resample,
@@ -674,7 +692,8 @@ int Radio::RadioInitandStart()
     if (cs_ret.result != srsue::nr::cell_search::ret_t::CELL_FOUND) {
       std::cout << "Cell search: no cell after " << nof_trials << " slots at "
                 << srsran_searcher_cfg_t.ssb_freq_hz / 1e6 << " MHz"
-                << " (best SSB SNR " << best_snr_db << " dB, PBCH CRC ok " << nof_pbch_crc << "x";
+                << " (best SSB SNR " << best_snr_db << " dB, PBCH CRC ok " << nof_pbch_crc << "x"
+                << ", " << nof_rx_fail << " rx timeouts";
       if (nof_other_pci > 0) {
         std::cout << ", " << nof_other_pci << "x decoded pci " << last_other_pci << " != configured " << pci;
       }
@@ -804,14 +823,39 @@ int Radio::SyncandDownlinkInit()
     return SRSRAN_ERROR;
   }
 
-  srsran_ue_sync_nr_start_agc(&ue_sync_nr, radio_set_rx_gain_wrapper, rf_args.rx_gain, min_rx_gain, max_rx_gain);
+  /* AGC sets the gain from inside the capture loop, a blocking control call on
+    the real-time fetch thread, and every step shifts the level the PDCCH DM-RS
+    thresholds and the sensing path see from one slot to the next. */
+  if (agc) {
+    srsran_ue_sync_nr_start_agc(&ue_sync_nr, radio_set_rx_gain_wrapper, rf_args.rx_gain, min_rx_gain, max_rx_gain);
+  } else {
+    std::cout << "AGC off, Rx gain fixed at " << rf_args.rx_gain << " dB" << std::endl;
+  }
 
   return SRSRAN_SUCCESS;
 }
 
+/* The capture threads must never wait behind the workers: once the DCI decoders
+  start, the workers take every core, the receive thread gets starved, the
+  radio's buffer overflows and the stream stops. Real-time priority lets them
+  preempt the workers. Kept below the RT kernel's IRQ threads (50). */
+static void set_capture_thread_priority(int prio, const char* name)
+{
+  sched_param sp = {};
+  sp.sched_priority = prio;
+  int err           = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+  if (err != 0) {
+    std::cerr << name << ": could not set SCHED_FIFO " << prio << " (" << strerror(err)
+              << "), running at normal priority" << std::endl;
+  }
+}
+
 int Radio::FetchAndResample()
 {
+  nrscope_pin_and_name_self(nrscope_cpu_list(cpu_affinity, fetch_cpu), "nrs-fetch");
+  set_capture_thread_priority(45, "FetchAndResample");
   uint64_t next_produce_at = 0;
+  uint64_t nof_rx_errors   = 0;
 
   bool     in_sync = false;
   uint32_t pre_resampling_sf_sz =
@@ -823,6 +867,11 @@ int Radio::FetchAndResample()
     thread forever after ~10 s; give up just before that, with a clear message. */
   const uint32_t max_sync_attempts = 9000;
   uint32_t       nof_sync_attempts = 0;
+
+  // Sync losses after lock-in, reported on each transition
+  bool     sync_lost          = false;
+  uint64_t nof_sync_lost      = 0;
+  uint64_t nof_sf_out_of_sync = 0;
 
   while (true) {
     int current_value;
@@ -863,9 +912,16 @@ int Radio::FetchAndResample()
       beyond the boundary doesn't matter */
     if (srsran_ue_sync_nr_zerocopy_twinrx_nrscope(
             &ue_sync_nr, rf_buffer_t.to_cf_t(), &outcome, rk, resample_needed, RESAMPLE_WORKER_NUM) < SRSRAN_SUCCESS) {
-      std::cout << "SYNC: error in zerocopy" << std::endl;
+      /* Usually a receive that timed out after an overflow. Ending the thread
+        here, as before, stopped the whole capture for good. The RF layer
+        restarts the stream on the next receive and the sync re-acquires, so give
+        back the count this iteration took and carry on. */
+      if (nof_rx_errors++ % 100 == 0) {
+        std::cerr << "SYNC: receive failed (" << nof_rx_errors << " so far), restarting stream" << std::endl;
+      }
       logger.error("SYNC: error in zerocopy");
-      return false;
+      sem_post(&smph_sf_data_finished);
+      continue;
     }
     /* If in sync, update slot index.
       The synced data is stored in rf_buffer_t.to_cf_t()[0] */
@@ -873,13 +929,38 @@ int Radio::FetchAndResample()
       if (in_sync == false) {
         printf("in_sync change to true\n");
       }
+      if (sync_lost) {
+        printf("SYNC regained at SFN %u.%u after %lu subframe(s) out of sync (%lu loss(es) so far)\n",
+               outcome.sfn,
+               outcome.sf_idx,
+               (unsigned long)nof_sf_out_of_sync,
+               (unsigned long)nof_sync_lost);
+        sync_lost = false;
+      }
       in_sync = true;
       // std::cout << "System frame idx: " << outcome.sfn << std::endl;
       // std::cout << "Subframe idx: " << outcome.sf_idx << std::endl;
       // a new sf data ready; let decoder consume
       next_produce_at++;
       sem_post(&smph_sf_data_prod_cons);
-    } else if (!in_sync && ++nof_sync_attempts >= max_sync_attempts) {
+    } else if (in_sync) {
+      /* Sync lost after lock-in: a failed PBCH check sends ue_sync back to FIND.
+        This subframe goes to no decoder, so the consumer will never return the
+        count it took from smph_sf_data_finished; give it back here. Without
+        this, each lost subframe leaked one count, and after one or two of them
+        this thread blocked in sem_wait for good while the process stayed up. */
+      sem_post(&smph_sf_data_finished);
+      if (!sync_lost) {
+        sync_lost = true;
+        nof_sf_out_of_sync = 0;
+        nof_sync_lost++;
+        printf("SYNC lost at SFN %u.%u (%lu loss(es) so far)\n",
+               outcome.sfn,
+               outcome.sf_idx,
+               (unsigned long)nof_sync_lost);
+      }
+      nof_sf_out_of_sync++;
+    } else if (++nof_sync_attempts >= max_sync_attempts) {
       ERROR("Can't sync to the cell after %u subframes, please get better signal quality, exiting...",
             nof_sync_attempts);
       /* The decoder and worker threads are blocked or looping with no way to be
@@ -897,6 +978,8 @@ int Radio::FetchAndResample()
 
 int Radio::DecodeAndProcess()
 {
+  nrscope_pin_and_name_self(nrscope_cpu_list(cpu_affinity, consumer_cpu), "nrs-consume");
+  set_capture_thread_priority(44, "DecodeAndProcess");
   uint32_t pre_resampling_sf_sz =
       SRSRAN_NOF_SLOTS_PER_SF_NR(task_scheduler_nrscope.task_scheduler_state.args_t.ssb_scs) * pre_resampling_slot_sz;
 
@@ -999,8 +1082,10 @@ int Radio::RadioCapture()
   std::thread fetch_thread{&Radio::FetchAndResample, this};
   std::thread deco_thread{&Radio::DecodeAndProcess, this};
 
-  while (true) {
-  }
+  /* Neither thread returns; wait on them rather than spinning, which kept a
+    whole CPU at 100% for nothing. */
+  fetch_thread.join();
+  deco_thread.join();
 
   return SRSRAN_SUCCESS;
 }

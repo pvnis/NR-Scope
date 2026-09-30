@@ -92,7 +92,15 @@ public:
   bool          rk_initialized = false;
 
   bool cpu_affinity;
+  /* With cpu_affinity: one CPU for each serial stage, and a pool for the
+  workers. -1 or an empty list leaves that stage unpinned. */
+  int              fetch_cpu      = -1;
+  int              consumer_cpu   = -1;
+  int              dispatcher_cpu = -1;
+  int              results_cpu    = -1;
+  std::vector<int> worker_cpus;
   bool disable_cfo = false; // skip CFO compensation in ue_sync, for radios with a disciplined clock (e.g. X410)
+  bool agc = true; // let ue_sync adjust the Rx gain; off keeps rx_gain fixed for the whole run
 
   std::string log_name;
   bool        local_log;

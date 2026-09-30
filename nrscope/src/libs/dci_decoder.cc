@@ -815,7 +815,9 @@ int DCIDecoder::DCIDecoderandReceptionInit(WorkState* state, int bwp_id, cf_t* i
   pdsch_hl_cfg.alloc = dci_cfg.pdsch_alloc_type;
   pusch_hl_cfg.alloc = dci_cfg.pusch_alloc_type;
 
-  if (bwp_dl_ded_s_ptr->pdsch_cfg.setup().pdsch_time_domain_alloc_list.setup().size() > 0) {
+  // Optional in pdsch-Config; reading it unchecked logged an ASN1 error per decoder.
+  if (bwp_dl_ded_s_ptr->pdsch_cfg.setup().pdsch_time_domain_alloc_list_present &&
+      bwp_dl_ded_s_ptr->pdsch_cfg.setup().pdsch_time_domain_alloc_list.setup().size() > 0) {
     for (uint32_t pdsch_time_id = 0;
          pdsch_time_id < bwp_dl_ded_s_ptr->pdsch_cfg.setup().pdsch_time_domain_alloc_list.setup().size();
          pdsch_time_id++) {
@@ -876,7 +878,8 @@ int DCIDecoder::DCIDecoderandReceptionInit(WorkState* state, int bwp_id, cf_t* i
                                           .pdsch_time_domain_alloc_list.size();
   }
 
-  if (bwp_ul_ded_s_ptr->pusch_cfg.setup().pusch_time_domain_alloc_list.setup().size() > 0) {
+  if (bwp_ul_ded_s_ptr->pusch_cfg.setup().pusch_time_domain_alloc_list_present &&
+      bwp_ul_ded_s_ptr->pusch_cfg.setup().pusch_time_domain_alloc_list.setup().size() > 0) {
     for (uint32_t pusch_time_id = 0;
          pusch_time_id < bwp_ul_ded_s_ptr->pusch_cfg.setup().pusch_time_domain_alloc_list.setup().size();
          pusch_time_id++) {
@@ -1254,7 +1257,7 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
         sharded_results[dci_decoder_id].dl_dcis[dci_idx_dl] = dci_dl[dci_idx_dl];
         char str[1024]                                      = {};
         srsran_dci_dl_nr_to_str(&(ue_dl_dci.dci), &dci_dl[dci_idx_dl], str, (uint32_t)sizeof(str));
-        printf("DCIDecoder -- Found DCI: %s\n", str);
+        if (!RunRecorder::enabled()) printf("DCIDecoder -- Found DCI: %s\n", str);
         // The grant may not be decoded correctly, since srsRAN's code is not complete.
         // We can calculate the DL bandwidth for this subframe by ourselves.
         if (dci_dl[dci_idx_dl].ctx.format == srsran_dci_format_nr_1_1) {
@@ -1334,7 +1337,7 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
         sharded_results[dci_decoder_id].ul_dcis[dci_idx_ul] = dci_ul[dci_idx_ul];
         char str[1024]                                      = {};
         srsran_dci_ul_nr_to_str(&(ue_dl_dci.dci), &dci_ul[dci_idx_ul], str, (uint32_t)sizeof(str));
-        printf("DCIDecoder -- Found DCI: %s\n", str);
+        if (!RunRecorder::enabled()) printf("DCIDecoder -- Found DCI: %s\n", str);
         // The grant may not be decoded correctly, since srsRAN's code is not complete.
         // We can calculate the UL bandwidth for this subframe by ourselves.
         srsran_sch_cfg_nr_t pusch_cfg = {};

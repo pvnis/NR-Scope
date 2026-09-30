@@ -30,6 +30,16 @@ public:
   std::atomic<uint32_t> next_slot_idx;
   std::atomic<uint32_t> current_slot_idx;
   std::thread           task_thread;
+  /* Slots dropped because the queue was full, since start */
+  std::atomic<uint64_t> nof_dropped_slots{0};
+
+  /* Once-a-second status line, written by the results thread. Counts are for
+  the current one-second window. */
+  double   status_last_print = 0;
+  uint32_t status_nof_slots  = 0;
+  uint32_t status_nof_dl_dci = 0;
+  uint32_t status_nof_ul_dci = 0;
+  void     PrintStatus(const SlotResult& now_result, double now);
 
   bool local_log;
   bool to_google;

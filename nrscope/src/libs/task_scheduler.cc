@@ -381,6 +381,7 @@ int TaskSchedulerNRScope::UpdatewithResult(SlotResult now_result)
             log_node.dl_dci                   = result.dl_dcis[i];
             log_node.bwp_id                   = result.dl_dcis[i].bwp_id;
             task_scheduler_state.last_seen[i] = now;
+            status_nof_dl_dci++;
             if (local_log) {
               NRScopeLog::push_node(log_node, rf_index);
             }
@@ -399,6 +400,7 @@ int TaskSchedulerNRScope::UpdatewithResult(SlotResult now_result)
             log_node.ul_dci                   = result.ul_dcis[i];
             log_node.bwp_id                   = result.ul_dcis[i].bwp_id;
             task_scheduler_state.last_seen[i] = now;
+            status_nof_ul_dci++;
             if (local_log) {
               NRScopeLog::push_node(log_node, rf_index);
             }
@@ -421,8 +423,7 @@ int TaskSchedulerNRScope::UpdatewithResult(SlotResult now_result)
   while (last_seen_iter != task_scheduler_state.last_seen.end() &&
          ue_list_iter != task_scheduler_state.known_rntis.end()) {
     if (now - *last_seen_iter > 5) {
-      // std::cout << "C-RNTI: " << (int)*ue_list_iter << " expires."
-      //   << std::endl;
+      printf("C-RNTI 0x%04x expired: no DCI for %.1f s, no longer searched\n", *ue_list_iter, now - *last_seen_iter);
       task_scheduler_state.pdcch_dmrs_ids_by_rnti.erase(*ue_list_iter);
       last_seen_iter = task_scheduler_state.last_seen.erase(last_seen_iter);
       ue_list_iter   = task_scheduler_state.known_rntis.erase(ue_list_iter);
@@ -433,7 +434,47 @@ int TaskSchedulerNRScope::UpdatewithResult(SlotResult now_result)
     }
   }
 
+  PrintStatus(now_result, now);
   return SRSRAN_SUCCESS;
+}
+
+/* One line a second, so a quiet terminal in recording mode still shows the
+  capture is alive and whether DCIs are being found. slots/s should sit near
+  2000 at 30 kHz; a lower figure means slots are not reaching the results. The
+  caller holds task_scheduler_lock. */
+void TaskSchedulerNRScope::PrintStatus(const SlotResult& now_result, double now)
+{
+  status_nof_slots++;
+  if (status_last_print == 0) {
+    status_last_print = now;
+    return;
+  }
+  const double elapsed = now - status_last_print;
+  if (elapsed < 1.0) {
+    return;
+  }
+  std::string rntis;
+  for (uint16_t rnti : task_scheduler_state.known_rntis) {
+    char buf[8];
+    snprintf(buf, sizeof(buf), " 0x%04x", rnti);
+    rntis += buf;
+  }
+  printf("[status] SFN %u.%u: %.0f slots/s, %.0f DL DCI/s",
+         now_result.outcome.sfn,
+         now_result.slot.idx,
+         status_nof_slots / elapsed,
+         status_nof_dl_dci / elapsed);
+  if (NRSCOPE_SEARCH_UL_DCI) {
+    printf(", %.0f UL DCI/s", status_nof_ul_dci / elapsed);
+  }
+  printf(", %zu RNTI(s)%s, %lu slot(s) dropped so far\n",
+         task_scheduler_state.known_rntis.size(),
+         rntis.c_str(),
+         (unsigned long)nof_dropped_slots.load(std::memory_order_relaxed));
+  status_last_print = now;
+  status_nof_slots  = 0;
+  status_nof_dl_dci = 0;
+  status_nof_ul_dci = 0;
 }
 
 int TaskSchedulerNRScope::UpdateStateandLog()
@@ -485,18 +526,20 @@ void TaskSchedulerNRScope::UpdateNextResult()
 
 void TaskSchedulerNRScope::Run()
 {
+  nrscope_pin_and_name_self(nrscope_cpu_list(task_scheduler_state.cpu_affinity, task_scheduler_state.results_cpu),
+                            "nrs-results");
+  std::vector<SlotResult> incoming;
   while (true) {
-    /* Try to extract results from the global result queue*/
-    queue_lock.lock();
-    auto queue_len = global_slot_results.size();
-    if (queue_len > 0) {
-      while (global_slot_results.size() > 0) {
-        /* dequeue from the head of the queue */
-        slot_results.push_back(global_slot_results[0]);
-        global_slot_results.erase(global_slot_results.begin());
-      }
+    /* Sleep until a worker has pushed a result, then take the whole batch in
+      one swap. This loop used to lock and unlock queue_lock back to back with no
+      wait, which kept a CPU at 100% and contended with every worker posting. */
+    {
+      std::unique_lock<std::mutex> lock(queue_lock);
+      queue_cv.wait(lock, [] { return !global_slot_results.empty(); });
+      incoming.swap(global_slot_results);
     }
-    queue_lock.unlock();
+    slot_results.insert(slot_results.end(), incoming.begin(), incoming.end());
+    incoming.clear();
 
     /* reorder the local slot_results and
       wait for the correct data for output */
@@ -522,6 +565,8 @@ int TaskSchedulerNRScope::ClaimIdleWorker()
 
 void TaskSchedulerNRScope::TasksDispatch()
 {
+  nrscope_pin_and_name_self(nrscope_cpu_list(task_scheduler_state.cpu_affinity, task_scheduler_state.dispatcher_cpu),
+                            "nrs-dispatch");
   while (true) {
     sem_wait(&smph_data);
     sem_wait(&smph_idle);
@@ -637,9 +682,8 @@ int TaskSchedulerNRScope::StoreSlotData(uint64_t                    sf_round,
   printing became part of why the workers were behind. One line a second with a
   running total says the same thing. */
   if (!slot_data[i].processed.load(std::memory_order_acquire)) {
-    static std::atomic<uint64_t> dropped{0};
     static std::atomic<uint64_t> last_report{0};
-    const uint64_t               n    = dropped.fetch_add(1, std::memory_order_relaxed) + 1;
+    const uint64_t               n    = nof_dropped_slots.fetch_add(1, std::memory_order_relaxed) + 1;
     const uint64_t               now  = (uint64_t)time(NULL);
     uint64_t                     prev = last_report.load(std::memory_order_relaxed);
     if (now != prev && last_report.compare_exchange_strong(prev, now)) {

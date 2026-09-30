@@ -9,6 +9,8 @@
 #include <assert.h>
 #include <cmath>
 #include <complex>
+#include <condition_variable>
+#include <vector>
 #include <iostream>
 #include <map>
 #include <math.h>
@@ -105,6 +107,35 @@ worker serialised on it. Set to 1 to get them back while debugging. */
 
 #define NR_FAILURE -1
 #define NR_SUCCESS 0
+
+/* Names the calling thread (at most 15 characters), so top -H, perf and gdb show
+ * which pipeline stage is which, and pins it to cpus when that list is not empty.
+ * Threads it creates afterwards inherit the same CPU mask. A failed pin is
+ * reported and the thread carries on unpinned. */
+inline void nrscope_pin_and_name_self(const std::vector<int>& cpus, const char* name)
+{
+  pthread_setname_np(pthread_self(), name);
+  if (cpus.empty()) {
+    return;
+  }
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  for (int c : cpus) {
+    if (c >= 0 && c < CPU_SETSIZE) {
+      CPU_SET(c, &set);
+    }
+  }
+  int err = pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+  if (err != 0) {
+    fprintf(stderr, "%s: could not pin to its CPUs (%s), running unpinned\n", name, strerror(err));
+  }
+}
+
+/* One CPU as a pin list, or no pinning when affinity is off or cpu < 0. */
+inline std::vector<int> nrscope_cpu_list(bool affinity, int cpu)
+{
+  return (affinity && cpu >= 0) ? std::vector<int>{cpu} : std::vector<int>{};
+}
 
 struct cell_searcher_args_t {
   // Generic parameters
@@ -243,6 +274,11 @@ struct WorkState_ {
   uint32_t nof_rnti_worker_groups;
   uint8_t  nof_bwps;
   bool     cpu_affinity;
+  /* With cpu_affinity, where the scheduler's threads and the worker pool run.
+  Empty or negative means unpinned. */
+  std::vector<int> worker_cpus;
+  int              dispatcher_cpu = -1;
+  int              results_cpu    = -1;
 
   uint32_t slot_sz;
   /* Receive chains actually captured, after clamping args_t.nof_antennas to
@@ -309,6 +345,18 @@ struct SlotResult_ {
   bool                                  sib_result;
   bool                                  found_sib1;
   asn1::rrc_nr::sib1_s                  sib1;
+  /* SIB1's PDSCH allocation, as scheduled by the SI-RNTI DCI in CORESET#0.
+    prb_start / nof_prb are in RBs of the CORESET#0 grid (RB 0 = CORESET#0's
+    lowest RB); symbol_start / nof_symbols and slot_idx locate it in time. */
+  uint32_t                              sib1_prb_start    = 0;
+  uint32_t                              sib1_nof_prb      = 0;
+  uint32_t                              sib1_symbol_start = 0;
+  uint32_t                              sib1_nof_symbols  = 0;
+  uint32_t                              sib1_slot_idx     = 0;
+  /* Where SIB1's PDCCH sat inside CORESET#0: aggregation level (logarithmic,
+    so 1<<L CCEs) and the index of its first CCE. */
+  uint32_t                              sib1_pdcch_L      = 0;
+  uint32_t                              sib1_pdcch_ncce   = 0;
   std::vector<asn1::rrc_nr::sys_info_s> sibs;
   std::vector<int>                      found_sib;
 
@@ -345,18 +393,6 @@ struct SlotResult_ {
     /* If the sfn is the same */
     return slot.idx < other.slot.idx;
   }
-  /* SIB1's PDSCH allocation, as scheduled by the SI-RNTI DCI in CORESET#0.
-    prb_start / nof_prb are in RBs of the CORESET#0 grid (RB 0 = CORESET#0's
-    lowest RB); symbol_start / nof_symbols and slot_idx locate it in time. */
-  uint32_t                              sib1_prb_start    = 0;
-  uint32_t                              sib1_nof_prb      = 0;
-  uint32_t                              sib1_symbol_start = 0;
-  uint32_t                              sib1_nof_symbols  = 0;
-  uint32_t                              sib1_slot_idx     = 0;
-  /* Where SIB1's PDCCH sat inside CORESET#0: aggregation level (logarithmic,
-    so 1<<L CCEs) and the index of its first CCE. */
-  uint32_t                              sib1_pdcch_L      = 0;
-  uint32_t                              sib1_pdcch_ncce   = 0;
 
   bool operator==(const SlotResult& other) const
   {
@@ -386,6 +422,9 @@ bool CompareSlotResult(SlotResult a, SlotResult b);
 namespace NRScopeTask {
 extern std::vector<SlotResult> global_slot_results;
 extern std::mutex              queue_lock;
+/* Signalled by a worker after it pushes into global_slot_results, so the
+  scheduler's result loop can sleep instead of spinning on queue_lock. */
+extern std::condition_variable queue_cv;
 extern std::mutex              slot_data_lock;
 extern std::mutex              task_scheduler_lock;
 extern std::mutex              worker_locks[128];

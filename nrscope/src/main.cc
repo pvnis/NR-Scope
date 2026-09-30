@@ -11,6 +11,11 @@
 
 int main(int argc, char** argv){
 
+  /* Line-buffer stdout: piped into tee it is block-buffered, and a run stopped by
+    timeout or Ctrl-C lost its last few KB of output, often the very line that
+    said why it stopped. */
+  setvbuf(stdout, nullptr, _IOLBF, 0);
+
   // Initialise logging infrastructure
   srslog::init();
 

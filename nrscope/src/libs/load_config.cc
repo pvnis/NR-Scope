@@ -167,6 +167,22 @@ int load_config(std::vector<Radio>& radios, std::string file_name)
       } else {
         radios[i].cpu_affinity = false;
       }
+      for (auto& [key, cpu] : {std::pair<const char*, int*>{"fetch_cpu", &radios[i].fetch_cpu},
+                               {"consumer_cpu", &radios[i].consumer_cpu},
+                               {"dispatcher_cpu", &radios[i].dispatcher_cpu},
+                               {"results_cpu", &radios[i].results_cpu}}) {
+        if (config_yaml[setting_name][key]) {
+          *cpu = config_yaml[setting_name][key].as<int>();
+        }
+      }
+      if (config_yaml[setting_name]["worker_cpus"]) {
+        radios[i].worker_cpus = config_yaml[setting_name]["worker_cpus"].as<std::vector<int> >();
+      }
+      if (radios[i].cpu_affinity) {
+        std::cout << "    cpu layout: fetch " << radios[i].fetch_cpu << ", consumer " << radios[i].consumer_cpu
+                  << ", dispatcher " << radios[i].dispatcher_cpu << ", results " << radios[i].results_cpu << ", "
+                  << radios[i].worker_cpus.size() << " worker CPUs" << std::endl;
+      }
 
       if (config_yaml[setting_name]["disable_cfo"]) {
         radios[i].disable_cfo = config_yaml[setting_name]["disable_cfo"].as<bool>();
@@ -174,6 +190,13 @@ int load_config(std::vector<Radio>& radios, std::string file_name)
         radios[i].disable_cfo = false;
       }
       std::cout << "    disable_cfo: " << (radios[i].disable_cfo ? "true" : "false") << std::endl;
+
+      if (config_yaml[setting_name]["agc"]) {
+        radios[i].agc = config_yaml[setting_name]["agc"].as<bool>();
+      } else {
+        radios[i].agc = true;
+      }
+      std::cout << "    agc: " << (radios[i].agc ? "true" : "false") << std::endl;
 
       if (config_yaml[setting_name]["nof_workers"]) {
         radios[i].nof_workers = config_yaml[setting_name]["nof_workers"].as<int>();
@@ -198,24 +221,22 @@ int load_config(std::vector<Radio>& radios, std::string file_name)
     }
   }
 
-  /* Check if the config viable */
-  const auto   nof_cores      = std::thread::hardware_concurrency();
-  unsigned int required_cores = 0;
+  /* Check that every pinned CPU exists. Workers share one pool of CPUs, and the
+    threads each one spawns per slot inherit it, so there is no per-thread core
+    count to satisfy any more. */
+  const int nof_cores = (int)std::thread::hardware_concurrency();
   for (int i = 0; i < nof_usrp; i++) {
-    if (radios[i].cpu_affinity) {
-      /* One for SIB thread, one RACH thread,
-       and nof_bwp * nof_rnti_group for DCI decoding*/
-      required_cores += radios[i].nof_workers * (3 + radios[i].nof_bwps * radios[i].nof_rnti_worker_groups);
+    if (!radios[i].cpu_affinity) {
+      continue;
     }
-  }
-  if (required_cores > nof_cores) {
-    ERROR("CPU affinity set, usrp_i's core requirement is: "
-          "nof_workers * (3 + nof_bwps * nof_rnti_worker_groups)"
-          ", please make sure the total required cores %d smaller than your total"
-          "number of cores: %d.",
-          required_cores,
-          nof_cores);
-    return NR_FAILURE;
+    std::vector<int> all = radios[i].worker_cpus;
+    all.insert(all.end(), {radios[i].fetch_cpu, radios[i].consumer_cpu, radios[i].dispatcher_cpu, radios[i].results_cpu});
+    for (int cpu : all) {
+      if (cpu >= nof_cores) {
+        ERROR("CPU affinity set, but CPU %d is not on this machine (%d CPUs)", cpu, nof_cores);
+        return NR_FAILURE;
+      }
+    }
   }
 
   std::string setting_name = "log_config";

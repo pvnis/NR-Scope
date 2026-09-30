@@ -289,7 +289,11 @@ int RachDecoder::RACHReceptionInit(WorkState* state, cf_t* input[SRSRAN_MAX_PORT
 /* Append one line per RACH-decoder PDSCH that passed its CRC to msg4_bytes.log,
   in the working directory next to the CSV logs, so what the gNB actually sent
   can be decoded offline. Workers decode in parallel, hence the lock; these are
-  rare, so opening the file each time costs nothing that matters. */
+  rare, so opening the file each time costs nothing that matters.
+
+  Only without recording_mode: the recorder's msg4 CSV already carries each
+  Msg4's bytes, and this file exists for scripts/replay_log_to_recordings.py,
+  which rebuilds those CSVs for runs made without it. */
 static void log_msg4_bytes(uint32_t       slot_idx,
                            uint16_t       rnti,
                            const char*    dci_str,
@@ -298,6 +302,9 @@ static void log_msg4_bytes(uint32_t       slot_idx,
                            const uint8_t* payload,
                            uint32_t       nof_bytes)
 {
+  if (RunRecorder::enabled()) {
+    return;
+  }
   static std::mutex           mtx;
   std::lock_guard<std::mutex> lock(mtx);
   FILE*                       f = fopen("msg4_bytes.log", "a");

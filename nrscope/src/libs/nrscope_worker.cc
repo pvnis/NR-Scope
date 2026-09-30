@@ -45,6 +45,7 @@ static bool slot_is_uplink_only(const WorkState& st, uint32_t sfn, uint32_t slot
 
 std::vector<SlotResult> global_slot_results;
 std::mutex              queue_lock;
+std::condition_variable queue_cv;
 std::mutex              task_scheduler_lock;
 std::mutex              slot_data_lock;
 std::mutex              worker_locks[128];
@@ -82,6 +83,7 @@ int NRScopeWorker::InitWorker(WorkState task_scheduler_state, int worker_id_)
   worker_state.slot_sz                = task_scheduler_state.slot_sz;
   worker_state.nof_antennas           = task_scheduler_state.nof_antennas;
   worker_state.cpu_affinity           = task_scheduler_state.cpu_affinity;
+  worker_state.worker_cpus            = task_scheduler_state.worker_cpus;
   worker_state.rrc_recfg_user         = task_scheduler_state.rrc_recfg_user;
 
   /* Size of one subframe, per receive chain */
@@ -103,17 +105,10 @@ int NRScopeWorker::InitWorker(WorkState task_scheduler_state, int worker_id_)
 
 void NRScopeWorker::StartWorker()
 {
-  // std::cout << "Creating the thread. " << std::endl;
-  if (worker_state.cpu_affinity) {
-    cpu_set_t cpu_set_worker;
-    CPU_ZERO(&cpu_set_worker);
-    CPU_SET(worker_id * (3 + worker_state.nof_threads), &cpu_set_worker);
-    worker_thread = std::thread{&NRScopeWorker::Run, this};
-    assert(pthread_setaffinity_np(worker_thread.native_handle(), sizeof(cpu_set_t), &cpu_set_worker) == 0);
-  } else {
-    worker_thread = std::thread{&NRScopeWorker::Run, this};
-  }
-
+  /* Pinning happens at the top of Run(), on the worker's own thread. It used to
+    be done here inside assert(), which -DNDEBUG compiles out together with the
+    call, so Release builds were never pinned. */
+  worker_thread = std::thread{&NRScopeWorker::Run, this};
   worker_thread.detach();
 }
 
@@ -297,6 +292,13 @@ int NRScopeWorker::MergeResults()
 
 void NRScopeWorker::Run()
 {
+  /* The whole pool, not one CPU per worker: the RACH and DCI threads spawned
+    below inherit this mask, so they stay off the capture and scheduler CPUs
+    and can still run side by side. */
+  char name[16];
+  snprintf(name, sizeof(name), "nrs-worker%u", (unsigned)worker_id);
+  nrscope_pin_and_name_self(worker_state.cpu_affinity ? worker_state.worker_cpus : std::vector<int>{}, name);
+
   while (true) {
     /* When there is a job, the semaphore is set and buffer is copied */
     sem_wait(&smph_has_job);
@@ -345,32 +347,14 @@ void NRScopeWorker::Run()
     std::thread sibs_thread;
     /* If sib1 is not found, we run the sibs_thread; if it's found, we skip. */
     if (worker_state.sib1_inited and !worker_state.sib1_found) {
-      if (worker_state.cpu_affinity) {
-        cpu_set_t cpu_set_sib;
-        CPU_ZERO(&cpu_set_sib);
-        CPU_SET(worker_id * (3 + worker_state.nof_threads) + 1, &cpu_set_sib);
-        sibs_thread =
-            std::thread{&SIBsDecoder::DecodeandParseSIB1fromSlot, &sibs_decoder, &slot, &worker_state, &slot_result};
-        assert(pthread_setaffinity_np(sibs_thread.native_handle(), sizeof(cpu_set_t), &cpu_set_sib) == 0);
-      } else {
-        sibs_thread =
-            std::thread{&SIBsDecoder::DecodeandParseSIB1fromSlot, &sibs_decoder, &slot, &worker_state, &slot_result};
-      }
+      sibs_thread =
+          std::thread{&SIBsDecoder::DecodeandParseSIB1fromSlot, &sibs_decoder, &slot, &worker_state, &slot_result};
     }
 
     std::thread rach_thread;
     if (worker_state.rach_inited && !uplink_only) {
-      if (worker_state.cpu_affinity) {
-        cpu_set_t cpu_set_rach;
-        CPU_ZERO(&cpu_set_rach);
-        CPU_SET(worker_id * (3 + worker_state.nof_threads) + 2, &cpu_set_rach);
-        rach_thread =
-            std::thread{&RachDecoder::DecodeandParseMS4fromSlot, &rach_decoder, &slot, &worker_state, &slot_result};
-        assert(pthread_setaffinity_np(rach_thread.native_handle(), sizeof(cpu_set_t), &cpu_set_rach) == 0);
-      } else {
-        rach_thread =
-            std::thread{&RachDecoder::DecodeandParseMS4fromSlot, &rach_decoder, &slot, &worker_state, &slot_result};
-      }
+      rach_thread =
+          std::thread{&RachDecoder::DecodeandParseMS4fromSlot, &rach_decoder, &slot, &worker_state, &slot_result};
     }
 
     std::vector<std::thread> dci_threads;
@@ -383,38 +367,18 @@ void NRScopeWorker::Run()
       ul_prb_bits_rate.resize(worker_state.nof_known_rntis);
 
       gettimeofday(&t0, NULL);
-      if (worker_state.cpu_affinity) {
-        for (uint32_t i = 0; i < worker_state.nof_threads; i++) {
-          cpu_set_t cpu_set_dci;
-          CPU_ZERO(&cpu_set_dci);
-          CPU_SET(worker_id * (3 + worker_state.nof_threads) + i + 3, &cpu_set_dci);
-          dci_threads.emplace_back(&DCIDecoder::DecodeandParseDCIfromSlot,
-                                   dci_decoders[i].get(),
-                                   &slot,
-                                   &worker_state,
-                                   std::ref(sharded_results),
-                                   std::ref(sharded_rntis),
-                                   std::ref(nof_sharded_rntis),
-                                   std::ref(dl_prb_rate),
-                                   std::ref(dl_prb_bits_rate),
-                                   std::ref(ul_prb_rate),
-                                   std::ref(ul_prb_bits_rate));
-          assert(pthread_setaffinity_np(dci_threads[i].native_handle(), sizeof(cpu_set_t), &cpu_set_dci) == 0);
-        }
-      } else {
-        for (uint32_t i = 0; i < worker_state.nof_threads; i++) {
-          dci_threads.emplace_back(&DCIDecoder::DecodeandParseDCIfromSlot,
-                                   dci_decoders[i].get(),
-                                   &slot,
-                                   &worker_state,
-                                   std::ref(sharded_results),
-                                   std::ref(sharded_rntis),
-                                   std::ref(nof_sharded_rntis),
-                                   std::ref(dl_prb_rate),
-                                   std::ref(dl_prb_bits_rate),
-                                   std::ref(ul_prb_rate),
-                                   std::ref(ul_prb_bits_rate));
-        }
+      for (uint32_t i = 0; i < worker_state.nof_threads; i++) {
+        dci_threads.emplace_back(&DCIDecoder::DecodeandParseDCIfromSlot,
+                                 dci_decoders[i].get(),
+                                 &slot,
+                                 &worker_state,
+                                 std::ref(sharded_results),
+                                 std::ref(sharded_rntis),
+                                 std::ref(nof_sharded_rntis),
+                                 std::ref(dl_prb_rate),
+                                 std::ref(dl_prb_bits_rate),
+                                 std::ref(ul_prb_rate),
+                                 std::ref(ul_prb_bits_rate));
       }
 
       for (uint32_t i = 0; i < worker_state.nof_threads; i++) {
@@ -448,6 +412,7 @@ void NRScopeWorker::Run()
     queue_lock.lock();
     global_slot_results.push_back(slot_result);
     queue_lock.unlock();
+    queue_cv.notify_one();
     // worker_locks[worker_id].lock();
     busy.store(false, std::memory_order_release);
     sem_post(&smph_idle);
