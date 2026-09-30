@@ -56,7 +56,8 @@ const char* DCI_HEADER =
     "k,mapping,time_start,time_length,prbs,nof_prb,nof_layers,"
     "dmrs_type,dmrs_add_pos,dmrs_len,dmrs_typeA_pos,nof_dmrs_cdm_groups,n_scid,beta_dmrs,"
     "modulation,mcs,tbs,code_rate,rv,ndi,nof_re,nof_bits,mcs_table,xoverhead,ca_variant,dci_bits,dci,"
-    "dmrs_symbols,dmrs_scrambling_id\n";
+    "dmrs_symbols,dmrs_scrambling_id,"
+    "dmrs_coherence,dmrs_coherence_data_symbols,dmrs_coherence_wrong_nid,dmrs_snr_db,dmrs_pilot_epre_db,dmrs_nof_pilots\n";
 
 double now_s()
 {
@@ -382,7 +383,8 @@ void record_dci(uint32_t                   pci,
                 const srsran_sch_cfg_nr_t* sch_cfg,
                 bool                       ca_variant,
                 const char*                dci_bits,
-                const char*                dci_str)
+                const char*                dci_str,
+                const DmrsCheckResult*     dmrs_check)
 {
   if (!is_enabled) {
     return;
@@ -475,6 +477,23 @@ void record_dci(uint32_t                   pci,
     row += ',' + std::to_string(n_id);
   } else {
     row += ',';
+  }
+  /* The DM-RS check on the received grid (dmrs_check.h): coherence of the
+    claimed pilots, then the two controls that must stay low. */
+  if (dmrs_check != nullptr && dmrs_check->valid) {
+    char chk[160];
+    snprintf(chk,
+             sizeof(chk),
+             ",%.4f,%.4f,%.4f,%.2f,%.2f,%u",
+             dmrs_check->coherence,
+             dmrs_check->coherence_data_symbol,
+             dmrs_check->coherence_wrong_nid,
+             dmrs_check->snr_db,
+             dmrs_check->pilot_epre_db,
+             dmrs_check->nof_pilots);
+    row += chk;
+  } else {
+    row += ",,,,,,";
   }
   row += '\n';
 

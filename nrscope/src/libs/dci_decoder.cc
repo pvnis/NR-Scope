@@ -1,4 +1,5 @@
 #include "nrscope/hdr/dci_decoder.h"
+#include "nrscope/hdr/dmrs_check.h"
 #include "nrscope/hdr/run_recorder.h"
 
 DCIDecoder::DCIDecoder(uint32_t max_nof_rntis)
@@ -1018,6 +1019,37 @@ int DCIDecoder::DCIDecoderandReceptionInit(WorkState* state, int bwp_id, cf_t* i
     return SRSRAN_ERROR;
   }
   if (!RunRecorder::enabled()) std::cout << "ending.." << std::endl;
+
+  /* Full-carrier grid for the PDSCH DM-RS check (recording mode only). The
+    carrier and the initial BWP (the only one this cell uses, bwp-Id 0) are
+    placed from SIB1: offsetToCarrier, carrierBandwidth, locationAndBandwidth. */
+  if (RunRecorder::enabled()) {
+    const auto& freq_dl = sib1.serving_cell_cfg_common.dl_cfg_common.freq_info_dl;
+    const auto& carrier = freq_dl.scs_specific_carrier_list[0];
+    crb_offset          = carrier.offset_to_carrier;
+    // locationAndBandwidth: RIV over 275 RBs (TS 38.214 5.1.2.2.2, TS 38.331)
+    const uint32_t riv = sib1.serving_cell_cfg_common.dl_cfg_common.init_dl_bwp.generic_params.location_and_bw;
+    const uint32_t n = 275, a = riv / n, b = riv % n;
+    bwp_start_crb    = (a + b < n) ? b : n - 1 - b;
+
+    grid_carrier         = base_carrier;
+    grid_carrier.nof_prb = carrier.carrier_bw;
+    const double grid_center_hz =
+        pointA + (crb_offset + grid_carrier.nof_prb / 2.0) * NRSCOPE_NSC_PER_RB_NR * cell.abs_pdcch_scs;
+    arg_scs_grid                    = arg_scs;
+    arg_scs_grid.coreset_offset_scs =
+        (int)std::lround((base_carrier.dl_center_frequency_hz - grid_center_hz) / cell.abs_pdcch_scs);
+    nrscope_check_grid_in_capture(
+        "carrier (DM-RS check)", arg_scs_grid.coreset_offset_scs, grid_carrier.nof_prb, arg_scs.srate, cell.abs_pdcch_scs);
+
+    SRSRAN_MEM_ZERO(&ue_dl_grid, srsran_ue_dl_nr_t, 1); // no CORESET: estimate_fft only demodulates
+    if (srsran_ue_dl_nr_init_nrscope(&ue_dl_grid, input, &ue_dl_args, arg_scs_grid) < SRSRAN_SUCCESS ||
+        srsran_ue_dl_nr_set_carrier_nrscope(&ue_dl_grid, &grid_carrier, arg_scs_grid) < SRSRAN_SUCCESS) {
+      ERROR("DM-RS check: could not set up the carrier grid; grants will not be checked");
+    } else {
+      dmrs_check_ready = true;
+    }
+  }
   return SRSRAN_SUCCESS;
 }
 
@@ -1321,10 +1353,37 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
             // return result;
           }
           const srsran_dci_dl_nr_t& d = dci_dl[dci_idx_dl];
+
+          /* Check the grant's PDSCH DM-RS on the received grid: the pilots NR-Scope
+            would regenerate must be there (dmrs_check.h). Same-slot PDSCH only
+            (k0 = 0), which is what the buffer holds. */
+          DmrsCheckResult dmrs_res;
+          if (dmrs_check_ready && pdsch_cfg.grant.k == 0) {
+            const int64_t slot_key = (int64_t)state->sfn * 1000 + slot->idx;
+            if (dmrs_grid_slot != slot_key) {
+              srsran_ue_dl_nr_estimate_fft_nrscope(&ue_dl_grid, slot, arg_scs_grid);
+              dmrs_grid_slot = slot_key;
+            }
+            uint32_t  dmrs_symbols[SRSRAN_DMRS_SCH_MAX_SYMBOLS] = {};
+            const int nof_dmrs = srsran_dmrs_sch_get_symbols_idx(&pdsch_cfg.dmrs, &pdsch_cfg.grant, dmrs_symbols);
+            uint32_t  n_id     = state->cs_ret.ssb_res.N_id;
+            if (!pdsch_cfg.grant.n_scid && pdsch_cfg.dmrs.scrambling_id0_present) {
+              n_id = pdsch_cfg.dmrs.scrambling_id0;
+            } else if (pdsch_cfg.grant.n_scid && pdsch_cfg.dmrs.scrambling_id1_present) {
+              n_id = pdsch_cfg.dmrs.scrambling_id1;
+            }
+            if (nof_dmrs > 0 && pdsch_cfg.dmrs.type == srsran_dmrs_sch_type_1) {
+              dmrs_res = dmrs_check_pdsch(ue_dl_grid.sf_symbols[0], grid_carrier.nof_prb, crb_offset, bwp_start_crb,
+                                          pdsch_cfg.grant, dmrs_symbols, (uint32_t)nof_dmrs, n_id,
+                                          SRSRAN_SLOT_NR_MOD(carrier_dl.scs, slot->idx));
+            }
+          }
+
           RunRecorder::record_dci(state->cs_ret.ssb_res.N_id, state->sfn, slot->idx, true, d.ctx,
                                   d.freq_domain_assigment, d.time_domain_assigment, d.mcs, d.ndi, d.rv, d.pid,
                                   d.tpc, d.ports, d.dmrs_id, d.srs_request, &pdsch_cfg,
-                                  dci_dl_ca[dci_idx_dl], dci_dl_bits[dci_idx_dl].c_str(), str);
+                                  dci_dl_ca[dci_idx_dl], dci_dl_bits[dci_idx_dl].c_str(), str,
+                                  dmrs_res.valid ? &dmrs_res : nullptr);
           if (!RunRecorder::enabled()) {
             srsran_sch_cfg_nr_info(&pdsch_cfg, str, (uint32_t)sizeof(str));
             printf("DCIDecoder -- PDSCH_cfg:\n%s", str);

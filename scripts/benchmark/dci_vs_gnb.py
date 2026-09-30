@@ -162,6 +162,10 @@ def parse_nrscope(path):
                     dmrs["dmrs_symb"] = dmrs_symbols_type_a(int(r["dmrs_typeA_pos"]), int(r["dmrs_add_pos"]),
                                                             r["dmrs_len"], ts, tl)
                     dmrs["dmrs_symb_derived"] = True
+            if r.get("dmrs_coherence"):
+                dmrs["chk"] = dict(coh=float(r["dmrs_coherence"]), data=float(r["dmrs_coherence_data_symbols"]),
+                                   nid=float(r["dmrs_coherence_wrong_nid"]), snr=float(r["dmrs_snr_db"]),
+                                   pilots=int(r["dmrs_nof_pilots"]))
             rows.append(dict(**dmrs, t=float(r["timestamp"]), sfn=int(r["sfn"]), slot=int(r["slot"]), rnti=int(r["rnti"]),
                              format=r["dci_format"], ss=r["ss_type"], al=int(r["aggregation_level"]),
                              cce=int(r["cce"]), h_id=int(r["harq_id"]), rv=int(r["dci_rv"]), k0=int(r["k"] or 0),
@@ -484,6 +488,36 @@ def main():
             for ex in examples.get(f, []):
                 print(f"      +{ex[0]:7.3f} s SFN {ex[1]}.{ex[2]}: NR-Scope {ex[3]}  gNB {ex[4]}")
 
+        # --- DM-RS check on the received grid (dmrs_check.h) ------------------
+        # Coherence of the pilots NR-Scope regenerates, against two wrong
+        # hypotheses that must stay low. A grant passes when its coherence
+        # clearly beats both controls.
+        chk = [n["chk"] for n in n_dl if "chk" in n]
+        if chk:
+            def pct(xs, p):
+                xs = sorted(xs)
+                return xs[min(len(xs) - 1, int(p / 100 * len(xs)))]
+            coh = [c["coh"] for c in chk]
+            ctl = [max(c["data"], c["nid"]) for c in chk]
+            ok = [c for c in chk if c["coh"] >= 0.5 and c["coh"] >= 2 * max(c["data"], c["nid"])]
+            print(f"DM-RS check  : {len(ok)} / {len(chk)} grants pass = {fmt_pct(len(ok), len(chk))}"
+                  f"  (coherence >= 0.5 and >= 2x both controls)")
+            print(f"  coherence of the claimed pilots: median {statistics.median(coh):.3f},"
+                  f" 5th pct {pct(coh, 5):.3f}, min {min(coh):.3f}")
+            print(f"  controls (data symbols, wrong N_ID), worse of the two: median {statistics.median(ctl):.3f},"
+                  f" 95th pct {pct(ctl, 95):.3f}, max {max(ctl):.3f}")
+            print(f"  pilot SNR (lower bound): median {statistics.median(c['snr'] for c in chk):+.1f} dB;"
+                  f" pilots per grant: median {statistics.median(c['pilots'] for c in chk):.0f}")
+            bad = [n for n in n_dl if "chk" in n and n["chk"] not in ok]
+            for n in bad[:5]:
+                c = n["chk"]
+                print(f"    failing: SFN {n['sfn']}.{n['slot']} prb {n['prb']} symb {n['symb']}: coherence {c['coh']:.3f},"
+                      f" data {c['data']:.3f}, wrong N_ID {c['nid']:.3f}, {c['pilots']} pilots")
+            summary_dmrs = dict(checked=len(chk), passed=len(ok), coherence_median=statistics.median(coh),
+                                control_p95=pct(ctl, 95))
+        else:
+            summary_dmrs = None
+
         # --- timeline: RRC events next to detection, per second ------------
         print("gNB RRC events (moved onto NR-Scope's clock; ~ms accuracy, they carry no SFN):")
         for e in sorted((e for e in rrc if e["rnti"] == rnti), key=lambda e: e["t"]):
@@ -507,6 +541,7 @@ def main():
             gnb_dl_dcis_searched=len(searched), detected=len(matched), missed=len(missed),
             after_expiry=len(after_expiry), false_positives=len(false_pos),
             miss_classes=dict(miss_classes),
+            dmrs_check=summary_dmrs,
             recall=len(matched) / len(searched) if searched else None,
             by_format={f"{k[0]}/ss{k[1]}": v for k, v in by_kind.items()},
             by_al_cce={f"al{k[0]}/cce{k[1]}": v for k, v in by_loc.items()},

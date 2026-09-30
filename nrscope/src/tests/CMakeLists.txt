@@ -61,3 +61,12 @@ if(PUSH_TO_GOOGLE)
   # target_link_libraries(google_client_cc ${GOOGLE_CLOUD_CPP_STRORAGE_LIBRARIES})
 endif()
 
+
+# NR-Scope's own PDSCH DM-RS regeneration against srsRAN's mapper; see the file.
+# Sensing divides received DM-RS by these pilots, so this must keep passing.
+add_executable(dmrs_check_test dmrs_check_test.cc)
+target_link_libraries(dmrs_check_test nrscope_libs
+                                      srsran_phy
+                                      srsran_common
+                                      ${CMAKE_THREAD_LIBS_INIT})
+add_test(nrscope_dmrs_check dmrs_check_test)

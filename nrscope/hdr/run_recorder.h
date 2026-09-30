@@ -7,6 +7,8 @@
 #include "srsran/phy/phch/dci_nr.h"
 #include "srsran/phy/phch/phch_cfg_nr.h"
 
+#include "nrscope/hdr/dmrs_check.h"
+
 /* Per-run CSV recordings for offline statistics, switched on by
   log_config.recording_mode in the yaml. Each run writes, under the project
   root rather than the build tree:
@@ -114,7 +116,8 @@ void record_dci(uint32_t                   pci,
                 const srsran_sch_cfg_nr_t* sch_cfg,
                 bool                       ca_variant,
                 const char*                dci_bits,
-                const char*                dci_str);
+                const char*                dci_str,
+                const DmrsCheckResult*     dmrs_check = nullptr);
 
 /* Debug: every PDCCH candidate the DCI decoder evaluated for a known RNTI, one
   row per candidate and per DCI size set tried, to PDCCH/pdcch_<run>_pci<N>.csv.

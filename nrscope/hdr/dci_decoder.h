@@ -51,6 +51,19 @@ public:
   srsran_ue_dl_nr_t* ue_dl_tmp;
   srsran_slot_cfg_t* slot_tmp;
 
+  /* Recording mode only: a full-carrier resource grid of the slot, demodulated
+  when a downlink grant is decoded, on which each grant's PDSCH DM-RS is checked
+  (see dmrs_check.h). bwp_start_crb and crb_offset place the grant's BWP-relative
+  PRBs on it; dmrs_grid_slot avoids a second FFT for another grant in the same
+  slot. */
+  bool                          dmrs_check_ready = false;
+  srsran_ue_dl_nr_t             ue_dl_grid;
+  srsran_carrier_nr_t           grid_carrier;
+  srsran_ue_dl_nr_sratescs_info arg_scs_grid;
+  uint32_t                      bwp_start_crb  = 0;
+  uint32_t                      crb_offset     = 0;
+  int64_t                       dmrs_grid_slot = -1;
+
   srsran_dci_dl_nr_t* dci_dl;
   /* Which PDCCH DM-RS scrambling ID the CORESET channel estimates currently hold,
   per CORESET. ue_dl_tmp is a shallow copy of ue_dl_dci, so re-estimating
