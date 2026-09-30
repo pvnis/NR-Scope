@@ -54,7 +54,21 @@ struct CellSummary {
   uint32_t offset_to_point_a_rb      = 0;   // SIB1, in 15 kHz RBs
   uint32_t carrier_bw_rb             = 0;   // SIB1 scs-SpecificCarrier, common-scs RBs
   uint32_t carrier_offset_to_carrier = 0;   // SIB1 scs-SpecificCarrier
-  uint32_t init_dl_bwp_riv          = 0;    // SIB1 initialDownlinkBWP locationAndBandwidth
+  /* Where SIB1's own PDSCH landed, from the SI-RNTI DCI in CORESET#0. RBs are
+    on the CORESET#0 grid (RB 0 = CORESET#0's lowest RB); 0 if not captured. */
+  uint32_t sib1_prb_start           = 0;
+  uint32_t sib1_nof_prb             = 0;
+  uint32_t sib1_symbol_start        = 0;
+  uint32_t sib1_nof_symbols         = 0;
+  uint32_t sib1_slot_idx            = 0;
+  /* SIB1's PDCCH within CORESET#0, and the CORESET#0 CCE-to-REG mapping needed
+    to place those CCEs on the grid (TS 38.211 7.3.2.2). */
+  uint32_t sib1_pdcch_agg_level     = 0;    // number of CCEs (1<<L)
+  uint32_t sib1_pdcch_ncce          = 0;    // first CCE index
+  uint32_t coreset0_reg_bundle_size = 0;    // L, in REGs (2/3/6)
+  uint32_t coreset0_interleaver_size = 0;   // R (2/3/6); 0 if non-interleaved
+  uint32_t coreset0_shift_index     = 0;
+  uint32_t coreset0_interleaved     = 0;    // 1 if interleaved CCE-to-REG mapping
 };
 
 /* Written once, the first time SIB1 is decoded for a cell, to

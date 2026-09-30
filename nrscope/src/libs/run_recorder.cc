@@ -423,7 +423,17 @@ void record_cell_summary(const CellSummary& c)
           "  \"offset_to_point_a_rb\": %u,\n"
           "  \"carrier_bw_rb\": %u,\n"
           "  \"carrier_offset_to_carrier\": %u,\n"
-          "  \"init_dl_bwp_riv\": %u\n"
+          "  \"sib1_prb_start\": %u,\n"
+          "  \"sib1_nof_prb\": %u,\n"
+          "  \"sib1_symbol_start\": %u,\n"
+          "  \"sib1_nof_symbols\": %u,\n"
+          "  \"sib1_slot_idx\": %u,\n"
+          "  \"sib1_pdcch_agg_level\": %u,\n"
+          "  \"sib1_pdcch_ncce\": %u,\n"
+          "  \"coreset0_reg_bundle_size\": %u,\n"
+          "  \"coreset0_interleaver_size\": %u,\n"
+          "  \"coreset0_shift_index\": %u,\n"
+          "  \"coreset0_interleaved\": %u\n"
           "}\n",
           c.pci,
           c.dl_center_freq_hz,
@@ -446,7 +456,17 @@ void record_cell_summary(const CellSummary& c)
           c.offset_to_point_a_rb,
           c.carrier_bw_rb,
           c.carrier_offset_to_carrier,
-          c.init_dl_bwp_riv);
+          c.sib1_prb_start,
+          c.sib1_nof_prb,
+          c.sib1_symbol_start,
+          c.sib1_nof_symbols,
+          c.sib1_slot_idx,
+          c.sib1_pdcch_agg_level,
+          c.sib1_pdcch_ncce,
+          c.coreset0_reg_bundle_size,
+          c.coreset0_interleaver_size,
+          c.coreset0_shift_index,
+          c.coreset0_interleaved);
 
   fclose(f);
   give_to_invoking_user(path);

@@ -19,3 +19,4 @@ gnb.log
 # Per-run recordings written by recording_mode (log_config in the yaml)
 /msg4/
 /DCIs/
+/cell/

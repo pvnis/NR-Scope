@@ -250,6 +250,22 @@ int SIBsDecoder::DecodeandParseSIB1fromSlot(srsran_slot_cfg_t* slot,
     result->sib1 = dlsch_msg.msg.c1().sib_type1();
     std::cout << "SIB 1 Decoded." << std::endl;
 
+    /* Record where this SIB1 PDSCH landed, so the cell map can draw it. The
+      grant's prb_idx is relative to the CORESET#0 grid used for SI decoding. */
+    uint32_t first_prb = SRSRAN_MAX_PRB_NR;
+    for (uint32_t i = 0; i < SRSRAN_MAX_PRB_NR && first_prb == SRSRAN_MAX_PRB_NR; i++) {
+      if (pdsch_cfg.grant.prb_idx[i]) {
+        first_prb = i;
+      }
+    }
+    result->sib1_prb_start    = (first_prb == SRSRAN_MAX_PRB_NR) ? 0 : first_prb;
+    result->sib1_nof_prb      = pdsch_cfg.grant.nof_prb;
+    result->sib1_symbol_start = pdsch_cfg.grant.S;
+    result->sib1_nof_symbols  = pdsch_cfg.grant.L;
+    result->sib1_slot_idx     = slot->idx;
+    result->sib1_pdcch_L      = dci_sibs.ctx.location.L;
+    result->sib1_pdcch_ncce   = dci_sibs.ctx.location.ncce;
+
     /* Uncomment to print the decode SIB1. */
     asn1::json_writer js_sib1;
     (result->sib1).to_json(js_sib1);

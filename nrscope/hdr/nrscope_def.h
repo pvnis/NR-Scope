@@ -345,6 +345,18 @@ struct SlotResult_ {
     /* If the sfn is the same */
     return slot.idx < other.slot.idx;
   }
+  /* SIB1's PDSCH allocation, as scheduled by the SI-RNTI DCI in CORESET#0.
+    prb_start / nof_prb are in RBs of the CORESET#0 grid (RB 0 = CORESET#0's
+    lowest RB); symbol_start / nof_symbols and slot_idx locate it in time. */
+  uint32_t                              sib1_prb_start    = 0;
+  uint32_t                              sib1_nof_prb      = 0;
+  uint32_t                              sib1_symbol_start = 0;
+  uint32_t                              sib1_nof_symbols  = 0;
+  uint32_t                              sib1_slot_idx     = 0;
+  /* Where SIB1's PDCCH sat inside CORESET#0: aggregation level (logarithmic,
+    so 1<<L CCEs) and the index of its first CCE. */
+  uint32_t                              sib1_pdcch_L      = 0;
+  uint32_t                              sib1_pdcch_ncce   = 0;
 
   bool operator==(const SlotResult& other) const
   {

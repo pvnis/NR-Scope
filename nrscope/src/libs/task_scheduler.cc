@@ -168,7 +168,10 @@ int TaskSchedulerNRScope::DecodeMIB(cell_searcher_args_t*          args_t_,
       srsran_coreset_get_bw(&task_scheduler_state.coreset0_t) / 2 * task_scheduler_state.cell.abs_pdcch_scs *
           NRSCOPE_NSC_PER_RB_NR;
 
-  coreset_zero_t_f_entry_nrscope coreset_zero_cfg;
+  /* Zero-init: coreset_zero_t_f_nrscope only writes first_symbol_idx in the
+    odd entry_idx / odd ssb_idx case, so without this it can read back stack
+    garbage. Per TS 38.213 table 13-11 the first symbol is 0 otherwise. */
+  coreset_zero_t_f_entry_nrscope coreset_zero_cfg = {};
   /* Get coreset_zero's position in time domain, check table 38.213, 13-11,
     because USRP can only support FR1. */
   if (coreset_zero_t_f_nrscope(task_scheduler_state.cell.mib.ss0_idx,
@@ -257,9 +260,23 @@ int TaskSchedulerNRScope::UpdatewithResult(SlotResult now_result)
             cs.carrier_bw_rb             = freq_dl.scs_specific_carrier_list[0].carrier_bw;
             cs.carrier_offset_to_carrier = freq_dl.scs_specific_carrier_list[0].offset_to_carrier;
           }
-          cs.init_dl_bwp_riv = task_scheduler_state.sib1.serving_cell_cfg_common.dl_cfg_common.init_dl_bwp
-                                   .generic_params.location_and_bw;
         }
+
+        cs.sib1_prb_start    = now_result.sib1_prb_start;
+        cs.sib1_nof_prb      = now_result.sib1_nof_prb;
+        cs.sib1_symbol_start = now_result.sib1_symbol_start;
+        cs.sib1_nof_symbols  = now_result.sib1_nof_symbols;
+        cs.sib1_slot_idx     = now_result.sib1_slot_idx;
+
+        cs.sib1_pdcch_agg_level = 1u << now_result.sib1_pdcch_L;
+        cs.sib1_pdcch_ncce      = now_result.sib1_pdcch_ncce;
+        const srsran_coreset_t& cs0 = task_scheduler_state.coreset0_t;
+        cs.coreset0_reg_bundle_size  = pdcch_nr_bundle_size(cs0.reg_bundle_size);
+        cs.coreset0_interleaved =
+            (cs0.mapping_type == srsran_coreset_mapping_type_interleaved) ? 1 : 0;
+        cs.coreset0_interleaver_size =
+            cs.coreset0_interleaved ? pdcch_nr_bundle_size(cs0.interleaver_size) : 0;
+        cs.coreset0_shift_index = cs0.shift_index;
 
         RunRecorder::record_cell_summary(cs);
       }
