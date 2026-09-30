@@ -48,6 +48,8 @@ std::mutex              queue_lock;
 std::condition_variable queue_cv;
 std::atomic<float>      rx_peak_dbfs{-INFINITY};
 std::atomic<float>      rx_mean_dbfs{-INFINITY};
+std::atomic<float>      rx_gain_db{NAN};
+std::atomic<uint32_t>   rx_gain_changes{0};
 std::mutex              task_scheduler_lock;
 std::mutex              slot_data_lock;
 std::mutex              worker_locks[128];

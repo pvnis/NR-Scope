@@ -464,6 +464,9 @@ extern std::condition_variable queue_cv;
   line. A peak near 0 dBFS means the front end clips: raise no gain past that. */
 extern std::atomic<float> rx_peak_dbfs;
 extern std::atomic<float> rx_mean_dbfs;
+/* The Rx gain in use, and how many times the AGC has changed it since start */
+extern std::atomic<float>    rx_gain_db;
+extern std::atomic<uint32_t> rx_gain_changes;
 extern std::mutex              slot_data_lock;
 extern std::mutex              task_scheduler_lock;
 extern std::mutex              worker_locks[128];

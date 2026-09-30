@@ -13,6 +13,8 @@ static SRSRAN_AGC_CALLBACK(radio_set_rx_gain_wrapper)
 {
   //printf("[AGC gain adj] new rx gain: %f\n", gain_db);
   ((srsran::radio_interface_phy*)h)->set_rx_gain(gain_db);
+  NRScopeTask::rx_gain_db.store(gain_db, std::memory_order_relaxed);
+  NRScopeTask::rx_gain_changes.fetch_add(1, std::memory_order_relaxed);
 }
 
 Radio::Radio() :
@@ -852,6 +854,7 @@ int Radio::SyncandDownlinkInit()
   /* AGC sets the gain from inside the capture loop, a blocking control call on
     the real-time fetch thread, and every step shifts the level the PDCCH DM-RS
     thresholds and the sensing path see from one slot to the next. */
+  NRScopeTask::rx_gain_db.store(rf_args.rx_gain, std::memory_order_relaxed);
   if (agc) {
     srsran_ue_sync_nr_start_agc(&ue_sync_nr, radio_set_rx_gain_wrapper, rf_args.rx_gain, min_rx_gain, max_rx_gain);
   } else {
