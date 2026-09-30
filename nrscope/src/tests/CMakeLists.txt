@@ -88,3 +88,14 @@ target_link_libraries(dmrs_check_test nrscope_libs
                                       srsran_common
                                       ${CMAKE_THREAD_LIBS_INIT})
 add_test(nrscope_dmrs_check dmrs_check_test)
+
+# Target detection under the TDD sampling pattern (nr_ue_tdd_detect): the replica
+# the pattern paints is stronger than the target on the map, and must not win.
+add_executable(tdd_detect_test tdd_detect_test.c)
+target_link_libraries(tdd_detect_test nrscope_libs
+                                      srsran_phy
+                                      srsran_common
+                                      ${CMAKE_THREAD_LIBS_INIT}
+                                      m)
+add_test(nrscope_tdd_detect tdd_detect_test)
+add_test(nrscope_sensing_selftest sensing_selftest)
