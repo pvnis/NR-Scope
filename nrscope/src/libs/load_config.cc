@@ -130,9 +130,21 @@ int load_config(std::vector<Radio>& radios, std::string file_name)
       }
       std::cout << "    scs: " << radios[i].ssb_scs << std::endl;
 
+      /* ssb_freq is where the SS/PBCH block is; rx_center_freq is where the radio
+        tunes. They default to the same value, which only captures the whole
+        carrier when the SSB sits near its centre. dl_center_frequency_hz holds
+        the tuning frequency from here on: every offset into the FFT grid, and
+        the per-symbol phase compensation, is relative to it. */
       if (config_yaml[setting_name]["ssb_freq"]) {
-        radios[i].args_t.base_carrier.dl_center_frequency_hz = config_yaml[setting_name]["ssb_freq"].as<double>();
+        radios[i].args_t.base_carrier.ssb_center_freq_hz     = config_yaml[setting_name]["ssb_freq"].as<double>();
+        radios[i].args_t.base_carrier.dl_center_frequency_hz = radios[i].args_t.base_carrier.ssb_center_freq_hz;
       }
+      if (config_yaml[setting_name]["rx_center_freq"]) {
+        radios[i].args_t.base_carrier.dl_center_frequency_hz = config_yaml[setting_name]["rx_center_freq"].as<double>();
+      }
+      std::cout << "    ssb_freq: " << radios[i].args_t.base_carrier.ssb_center_freq_hz / 1e6
+                << " MHz, rx_center_freq: " << radios[i].args_t.base_carrier.dl_center_frequency_hz / 1e6 << " MHz"
+                << std::endl;
 
       if (config_yaml[setting_name]["rf_log_level"]) {
         radios[i].rf_args.log_level = config_yaml[setting_name]["rf_log_level"].as<string>();

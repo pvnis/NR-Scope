@@ -262,8 +262,11 @@ int RachDecoder::RACHReceptionInit(WorkState* state, cf_t* input[SRSRAN_MAX_PORT
   // std::cout << "dl_center_frequency: " << dl_center_frequency << std::endl;
   // std::cout << "pointA: " << pointA << std::endl;
 
+  // Offset from where the radio is tuned, not from the SSB
   arg_scs_pdsch.coreset_offset_scs =
-      (state->srsran_searcher_cfg_t.ssb_freq_hz - dl_center_frequency) / cell.abs_pdcch_scs;
+      (int)std::lround((state->args_t.base_carrier.dl_center_frequency_hz - dl_center_frequency) / cell.abs_pdcch_scs);
+  nrscope_check_grid_in_capture(
+      "carrier (Msg4 PDSCH)", arg_scs_pdsch.coreset_offset_scs, pdsch_carrier.nof_prb, arg_scs.srate, cell.abs_pdcch_scs);
 
   // The lower boundary of PDSCH can be not aligned with the lower boundary of PDCCH
   if (srsran_ue_dl_nr_init_nrscope(&ue_dl_pdsch, input, &ue_dl_args, arg_scs_pdsch)) {

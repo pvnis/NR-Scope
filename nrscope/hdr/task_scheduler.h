@@ -40,6 +40,7 @@ public:
   uint32_t status_nof_dl_dci = 0;
   uint32_t status_nof_ul_dci = 0;
   void     PrintStatus(const SlotResult& now_result, double now);
+  void     ReportCarrierCoverage();
 
   bool local_log;
   bool to_google;

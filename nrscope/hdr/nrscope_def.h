@@ -131,6 +131,36 @@ inline void nrscope_pin_and_name_self(const std::vector<int>& cpus, const char* 
   }
 }
 
+/* Share of the sampling rate the radio passes flat. Past it the X410's
+ * decimation filter rolls off, and past srate/2 the FFT wraps. */
+#define NRSCOPE_USABLE_BW_FRACTION 0.8
+
+/* Warns when a grid the decoders cut out of the FFT is not fully captured.
+ * offset_scs is (tuning frequency - grid centre) / scs, as the nrscope OFDM
+ * demodulator takes it. Past srate/2 the demodulator silently reads wrapped FFT
+ * bins, which hold aliases at best: a CORESET or PDSCH there decodes badly or not
+ * at all, and its DM-RS channel estimates are wrong. */
+inline void nrscope_check_grid_in_capture(const char* what, int offset_scs, uint32_t nof_prb, double srate_hz,
+                                          uint32_t scs_hz)
+{
+  const double half_sc  = srate_hz / scs_hz / 2.0;
+  const double lo_sc    = -offset_scs - 6.0 * nof_prb; // lowest subcarrier, relative to the tuning frequency
+  const double hi_sc    = -offset_scs + 6.0 * nof_prb;
+  const double edge_sc  = std::max(std::fabs(lo_sc), std::fabs(hi_sc));
+  if (edge_sc > half_sc) {
+    const double first_bad_prb = (lo_sc < -half_sc) ? 0 : (half_sc - lo_sc) / 12.0;
+    fprintf(stderr,
+            "WARNING: %s (%u PRBs) reaches %.1f MHz from the tuning frequency, past the captured +-%.1f MHz; from PRB "
+            "%.0f on it is read from wrapped FFT bins. Set rx_center_freq to the carrier centre.\n",
+            what, nof_prb, edge_sc * scs_hz / 1e6, half_sc * scs_hz / 1e6, first_bad_prb);
+  } else if (edge_sc > half_sc * NRSCOPE_USABLE_BW_FRACTION) {
+    fprintf(stderr,
+            "WARNING: %s (%u PRBs) reaches %.1f MHz from the tuning frequency, into the radio's filter roll-off "
+            "(flat to +-%.1f MHz)\n",
+            what, nof_prb, edge_sc * scs_hz / 1e6, half_sc * NRSCOPE_USABLE_BW_FRACTION * scs_hz / 1e6);
+  }
+}
+
 /* One CPU as a pin list, or no pinning when affinity is off or cpu < 0. */
 inline std::vector<int> nrscope_cpu_list(bool affinity, int cpu)
 {

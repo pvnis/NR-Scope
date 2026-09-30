@@ -464,18 +464,39 @@ int Radio::RadioInitandStart()
   srsran_vec_zero(pre_resampling_rx_buffer,
                   SRSRAN_NOF_SLOTS_PER_SF_NR(args_t.ssb_scs) * pre_resampling_slot_sz * sizeof(cf_t));
 
-  cs_args.center_freq_hz = args_t.base_carrier.dl_center_frequency_hz;
-  cs_args.ssb_freq_hz    = args_t.base_carrier.dl_center_frequency_hz;
-  cs_args.ssb_scs        = args_t.ssb_scs;
-  cs_args.ssb_pattern    = args_t.ssb_pattern;
-  cs_args.duplex_mode    = args_t.duplex_mode;
+  /* The radio tunes to rx_center_freq; the SSB may sit anywhere inside the
+    captured band, at a whole number of subcarriers from its centre. */
+  const double rx_center_hz  = args_t.base_carrier.dl_center_frequency_hz;
+  const double ssb_target_hz = args_t.base_carrier.ssb_center_freq_hz;
+  cs_args.center_freq_hz     = rx_center_hz;
+  cs_args.ssb_freq_hz        = ssb_target_hz;
+  cs_args.ssb_scs            = args_t.ssb_scs;
+  cs_args.ssb_pattern        = args_t.ssb_pattern;
+  cs_args.duplex_mode        = args_t.duplex_mode;
 
   uint32_t ssb_scs_hz = SRSRAN_SUBC_SPACING_NR(cs_args.ssb_scs);
   double   ssb_bw_hz  = SRSRAN_SSB_BW_SUBC * ssb_scs_hz;
-  double   ssb_center_freq_min_hz =
-      args_t.base_carrier.dl_center_frequency_hz - (args_t.srate_hz * 0.7 - ssb_bw_hz) / 2.0;
-  double ssb_center_freq_max_hz =
-      args_t.base_carrier.dl_center_frequency_hz + (args_t.srate_hz * 0.7 - ssb_bw_hz) / 2.0;
+  double   ssb_center_freq_min_hz = rx_center_hz - (args_t.srate_hz * NRSCOPE_USABLE_BW_FRACTION - ssb_bw_hz) / 2.0;
+  double   ssb_center_freq_max_hz = rx_center_hz + (args_t.srate_hz * NRSCOPE_USABLE_BW_FRACTION - ssb_bw_hz) / 2.0;
+  std::cout << "Capturing " << (rx_center_hz - args_t.srate_hz / 2) / 1e6 << " - "
+            << (rx_center_hz + args_t.srate_hz / 2) / 1e6 << " MHz around " << rx_center_hz / 1e6 << " MHz; SSB at "
+            << ssb_target_hz / 1e6 << " MHz (" << (ssb_target_hz - rx_center_hz) / 1e6 << " MHz off centre)"
+            << std::endl;
+  if (ssb_target_hz < ssb_center_freq_min_hz || ssb_target_hz > ssb_center_freq_max_hz) {
+    ERROR("SSB at %.3f MHz is outside the usable part of the capture (%.3f - %.3f MHz); move rx_center_freq closer to "
+          "ssb_freq",
+          ssb_target_hz / 1e6,
+          ssb_center_freq_min_hz / 1e6,
+          ssb_center_freq_max_hz / 1e6);
+    return NR_FAILURE;
+  }
+  {
+    const double off = std::round(ssb_target_hz - rx_center_hz);
+    if (std::fmod(std::fabs(off), (double)ssb_scs_hz) != 0) {
+      ERROR("ssb_freq - rx_center_freq = %.0f Hz is not a multiple of the %u Hz SSB subcarrier spacing", off, ssb_scs_hz);
+      return NR_FAILURE;
+    }
+  }
 
   uint32_t band = bands.get_band_from_dl_freq_Hz_and_scs(args_t.base_carrier.dl_center_frequency_hz, cs_args.ssb_scs);
   srsran::srsran_band_helper::sync_raster_t ss = bands.get_sync_raster(band, cs_args.ssb_scs);
@@ -560,15 +581,15 @@ int Radio::RadioInitandStart()
       continue;
     }
 
-    /* xuyang debug: skip all other nearby measure and
-      just focus on the wanted SSB freq */
-    if (offset_hz > 1) {
+    /* Only the configured SSB: the raster walk is kept for its validity checks,
+      not to search other SSB positions. */
+    if (std::fabs(cs_args.ssb_freq_hz - ssb_target_hz) > 1) {
       continue;
     }
 
     /* which is indeed the srsran srate */
     srsran_searcher_cfg_t.srate_hz       = args_t.srate_hz;
-    srsran_searcher_cfg_t.center_freq_hz = cs_args.ssb_freq_hz;
+    srsran_searcher_cfg_t.center_freq_hz = rx_center_hz;
     srsran_searcher_cfg_t.ssb_freq_hz    = cs_args.ssb_freq_hz;
     srsran_searcher_cfg_t.ssb_scs        = args_t.ssb_scs;
     srsran_searcher_cfg_t.ssb_pattern    = args_t.ssb_pattern;
@@ -582,14 +603,13 @@ int Radio::RadioInitandStart()
       std::cout << "Searcher: failed to start cell search" << std::endl;
       return NR_FAILURE;
     }
-    /* Set the searching frequency to ssb_freq */
-    /* Because the srsRAN implementation use the center_freq_hz for cell search */
-    cs_args.center_freq_hz = cs_args.ssb_freq_hz;
-    // std::cout << cs_args.ssb_freq_hz << std::endl;
+    /* The SSB search runs at an offset of ssb_freq - center_freq subcarriers
+      (srsran_ssb f_offset), so the radio stays on rx_center_freq. */
+    cs_args.center_freq_hz                 = rx_center_hz;
     args_t.base_carrier.ssb_center_freq_hz = cs_args.ssb_freq_hz;
 
     radio->release_freq(0);
-    radio->set_rx_freq(0, srsran_searcher_cfg_t.ssb_freq_hz);
+    radio->set_rx_freq(0, rx_center_hz);
 
     srsran::rf_buffer_t rf_buffer = {};
     rf_buffer.set_nof_samples(pre_resampling_slot_sz);
@@ -778,8 +798,13 @@ int Radio::SyncandDownlinkInit()
   arg_scs.scs   = task_scheduler_nrscope.task_scheduler_state.cell.mib.scs_common;
 
   arg_scs.coreset_offset_scs =
-      (cs_args.ssb_freq_hz - task_scheduler_nrscope.task_scheduler_state.coreset0_args_t.coreset0_center_freq_hz) /
+      (cs_args.center_freq_hz - task_scheduler_nrscope.task_scheduler_state.coreset0_args_t.coreset0_center_freq_hz) /
       task_scheduler_nrscope.task_scheduler_state.cell.abs_pdcch_scs; // + 12;
+  nrscope_check_grid_in_capture("CORESET#0",
+                                arg_scs.coreset_offset_scs,
+                                srsran_coreset_get_bw(&task_scheduler_nrscope.task_scheduler_state.coreset0_t),
+                                arg_scs.srate,
+                                task_scheduler_nrscope.task_scheduler_state.cell.abs_pdcch_scs);
   arg_scs.coreset_slot = (uint32_t)task_scheduler_nrscope.task_scheduler_state.coreset0_args_t.n_0;
   task_scheduler_nrscope.task_scheduler_state.arg_scs = arg_scs;
   // arg_scs.phase_diff_first_second_half = 0;
@@ -807,7 +832,7 @@ int Radio::SyncandDownlinkInit()
   }
   // Be careful of all the frequency setting (SSB/center downlink and etc.)!
   ssb_cfg.srate_hz       = task_scheduler_nrscope.task_scheduler_state.args_t.srate_hz;
-  ssb_cfg.center_freq_hz = cs_args.ssb_freq_hz;
+  ssb_cfg.center_freq_hz = cs_args.center_freq_hz; // where the radio is tuned
   ssb_cfg.ssb_freq_hz    = cs_args.ssb_freq_hz;
   ssb_cfg.scs            = cs_args.ssb_scs;
   ssb_cfg.pattern        = cs_args.ssb_pattern;

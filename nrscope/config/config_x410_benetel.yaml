@@ -1,7 +1,12 @@
 nof_usrp_dev: 1
 usrp_setting_0:
   device_name: UHD
-  ssb_freq: 3408960000 
+  ssb_freq: 3408960000 # SS/PBCH block, 41.04 MHz below the carrier centre on this cell
+  # Where the radio tunes. The 273-PRB carrier spans 3400.86 - 3499.14 MHz, so at
+  # 122.88 Msps only its centre captures all of it; tuned to the SSB, PRBs 193 and
+  # up were never captured. Must be a whole number of 30 kHz from ssb_freq. NR-Scope
+  # prints the carrier's centre once SIB1 is decoded.
+  rx_center_freq: 3450000000
   band_list: [78]
   pci: 1
   rf_args: "type=x4xx,master_clock_rate=245760000,recv_buff_size=1004857600,addr=192.168.20.2,mgmt_addr=192.168.118.190,use_dpdk=1234,num_send_frames=512"  

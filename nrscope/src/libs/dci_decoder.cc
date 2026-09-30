@@ -354,7 +354,11 @@ int DCIDecoder::DCIDecoderandReceptionInit(WorkState* state, int bwp_id, cf_t* i
   double coreset1_center_freq_hz =
       pointA + srsran_coreset_get_bw(&coreset1_t) / 2 * cell.abs_pdcch_scs * NRSCOPE_NSC_PER_RB_NR;
   // std::cout << "previous offset: " << arg_scs.coreset_offset_scs << std::endl;
-  arg_scs.coreset_offset_scs = (base_carrier.ssb_center_freq_hz - coreset1_center_freq_hz) / cell.abs_pdcch_scs;
+  // Offset from where the radio is tuned (dl_center_frequency_hz), not from the SSB
+  arg_scs.coreset_offset_scs =
+      (int)std::lround((base_carrier.dl_center_frequency_hz - coreset1_center_freq_hz) / cell.abs_pdcch_scs);
+  nrscope_check_grid_in_capture(
+      "CORESET 1", arg_scs.coreset_offset_scs, srsran_coreset_get_bw(&coreset1_t), arg_scs.srate, cell.abs_pdcch_scs);
   // std::cout << "current offset: " << arg_scs.coreset_offset_scs << std::endl;
   // std::cout << "bwp_id: " << bwp_id << std::endl;
 

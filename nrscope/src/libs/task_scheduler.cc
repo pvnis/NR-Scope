@@ -226,6 +226,8 @@ int TaskSchedulerNRScope::UpdatewithResult(SlotResult now_result)
       /* Since we got the SIB1, we can now init the RACH decoder*/
       task_scheduler_state.rach_inited = true;
 
+      ReportCarrierCoverage();
+
       /* Snapshot the cell configuration for the static cell map, purely from
         what we decoded off the air (MIB + this SIB1 + CORESET#0 zero tables). */
       if (RunRecorder::enabled()) {
@@ -436,6 +438,39 @@ int TaskSchedulerNRScope::UpdatewithResult(SlotResult now_result)
 
   PrintStatus(now_result, now);
   return SRSRAN_SUCCESS;
+}
+
+/* SIB1 gives the carrier's position (offsetToPointA) and width. Say where it
+  is against the capture, and which rx_center_freq would centre it: a carrier
+  that runs past the captured band loses its top or bottom PRBs, PDCCH and
+  PDSCH alike, without any other error. Caller holds task_scheduler_lock. */
+void TaskSchedulerNRScope::ReportCarrierCoverage()
+{
+  const auto& freq_dl = task_scheduler_state.sib1.serving_cell_cfg_common.dl_cfg_common.freq_info_dl;
+  if (!task_scheduler_state.sib1.serving_cell_cfg_common_present || freq_dl.scs_specific_carrier_list.size() == 0) {
+    return;
+  }
+  const double scs_hz   = task_scheduler_state.cell.abs_pdcch_scs;
+  const double ssb_hz   = task_scheduler_state.srsran_searcher_cfg_t.ssb_freq_hz;
+  const double rx_hz    = task_scheduler_state.args_t.base_carrier.dl_center_frequency_hz;
+  const double pointA   = ssb_hz - (SRSRAN_SSB_BW_SUBC / 2) * task_scheduler_state.cell.abs_ssb_scs -
+                        task_scheduler_state.cell.k_ssb * SRSRAN_SUBC_SPACING_NR(srsran_subcarrier_spacing_15kHz) -
+                        freq_dl.offset_to_point_a * SRSRAN_SUBC_SPACING_NR(srsran_subcarrier_spacing_15kHz) *
+                            NRSCOPE_NSC_PER_RB_NR;
+  const uint32_t nof_prb = freq_dl.scs_specific_carrier_list[0].carrier_bw;
+  const double   top     = pointA + (double)nof_prb * NRSCOPE_NSC_PER_RB_NR * scs_hz;
+  const double   center  = (pointA + top) / 2;
+  const double   half    = task_scheduler_state.args_t.srate_hz / 2;
+  /* A tuning frequency the SSB search accepts: a whole number of SSB
+    subcarriers from the SSB. */
+  const double ssb_scs   = task_scheduler_state.cell.abs_ssb_scs;
+  const double suggested = ssb_hz + std::round((center - ssb_hz) / ssb_scs) * ssb_scs;
+  printf("Carrier: %u PRBs, %.3f - %.3f MHz (centre %.3f MHz); captured %.3f - %.3f MHz around rx_center_freq %.3f MHz\n",
+         nof_prb, pointA / 1e6, top / 1e6, center / 1e6, (rx_hz - half) / 1e6, (rx_hz + half) / 1e6, rx_hz / 1e6);
+  if (pointA < rx_hz - half * NRSCOPE_USABLE_BW_FRACTION || top > rx_hz + half * NRSCOPE_USABLE_BW_FRACTION) {
+    printf("WARNING: part of the carrier is outside the flat part of the capture; set rx_center_freq: %.0f\n",
+           suggested);
+  }
 }
 
 /* One line a second, so a quiet terminal in recording mode still shows the
