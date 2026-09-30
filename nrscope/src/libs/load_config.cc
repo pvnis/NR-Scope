@@ -203,6 +203,11 @@ int load_config(std::vector<Radio>& radios, std::string file_name)
       }
       std::cout << "    disable_cfo: " << (radios[i].disable_cfo ? "true" : "false") << std::endl;
 
+      if (config_yaml[setting_name]["rnti_expiry_s"]) {
+        radios[i].rnti_expiry_s = config_yaml[setting_name]["rnti_expiry_s"].as<double>();
+      }
+      std::cout << "    rnti_expiry_s: " << radios[i].rnti_expiry_s << std::endl;
+
       if (config_yaml[setting_name]["agc"]) {
         radios[i].agc = config_yaml[setting_name]["agc"].as<bool>();
       } else {
@@ -272,6 +277,8 @@ int load_config(std::vector<Radio>& radios, std::string file_name)
     the terminal to the "Found DCI" and "hooray" lines. See run_recorder.h. */
   RunRecorder::init(config_yaml[setting_name]["recording_mode"] &&
                     config_yaml[setting_name]["recording_mode"].as<bool>());
+  RunRecorder::enable_pdcch_candidates(config_yaml[setting_name]["record_pdcch_candidates"] &&
+                                       config_yaml[setting_name]["record_pdcch_candidates"].as<bool>());
 
   if (config_yaml[setting_name]["push_to_google"]) {
     for (int i = 0; i < nof_usrp; i++) {

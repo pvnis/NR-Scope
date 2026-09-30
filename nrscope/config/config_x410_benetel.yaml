@@ -41,6 +41,10 @@ usrp_setting_0:
   results_cpu: 0
   worker_cpus: [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
   disable_cfo: true # skip CFO compensation in sync; keep false on the bladeRF, its clock drifts too much
+  # Seconds without a decoded DCI before a known RNTI stops being searched. At 5
+  # a few missed DCIs of a 1 Hz ping were enough to drop a UE that was still
+  # active; a released UE is simply searched in vain until this runs out.
+  rnti_expiry_s: 30
   agc: false # fixed rx_gain; AGC changes the gain from the real-time capture thread and breaks slot-to-slot amplitude for sensing
 
   log_name: "logs_nrscope_x410_benetel.csv"
@@ -48,6 +52,10 @@ usrp_setting_0:
 
 log_config:
   recording_mode: true
+  # Debug: every PDCCH candidate tried for a known RNTI, with its DM-RS EPRE and
+  # correlation and the gate it stopped at, to PDCCH/. Tens of thousands of rows
+  # a second: for short diagnostic runs only.
+  record_pdcch_candidates: true
   local_log: true
   push_to_google: false
   google_service_account_credential: "/home/wanhr/Downloads/nsf-2223556-222187-02b924918c95.json"

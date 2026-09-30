@@ -550,6 +550,7 @@ int Radio::RadioInitandStart()
   task_scheduler_nrscope.task_scheduler_state.worker_cpus    = cpu_affinity ? worker_cpus : std::vector<int>{};
   task_scheduler_nrscope.task_scheduler_state.dispatcher_cpu = dispatcher_cpu;
   task_scheduler_nrscope.task_scheduler_state.results_cpu    = results_cpu;
+  task_scheduler_nrscope.task_scheduler_state.rnti_expiry_s  = rnti_expiry_s;
   task_scheduler_nrscope.InitandStart(local_log,
                                       to_google,
                                       rf_index,

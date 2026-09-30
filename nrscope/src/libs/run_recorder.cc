@@ -35,6 +35,15 @@ FILE*      dci_file       = nullptr;
 bool       dci_failed     = false;
 double     dci_last_flush = 0;
 
+bool       pdcch_enabled    = false;
+std::mutex pdcch_mtx;
+FILE*      pdcch_file       = nullptr;
+bool       pdcch_failed     = false;
+double     pdcch_last_flush = 0;
+
+const char* PDCCH_HEADER = "timestamp,pci,sfn,slot,rnti,ca_variant,ss_type,coreset_id,aggregation_level,cce,nof_bits,"
+                           "epre_dBfs,rsrp_dBfs,norm_corr,sync_error_us,stage\n";
+
 const char* MSG4_HEADER = "timestamp,pci,sfn,slot,tc_rnti,c_rnti,rrc_transaction_id,rrc_offset,nof_bytes,dci,"
                           "msg4_bytes,master_cell_group\n";
 
@@ -219,6 +228,81 @@ void close()
     if (dci_file != nullptr) {
       fclose(dci_file);
       dci_file = nullptr;
+    }
+  }
+  {
+    std::lock_guard<std::mutex> lock(pdcch_mtx);
+    if (pdcch_file != nullptr) {
+      fclose(pdcch_file);
+      pdcch_file = nullptr;
+    }
+  }
+}
+
+void enable_pdcch_candidates(bool enable)
+{
+  pdcch_enabled = enable && is_enabled;
+  if (enable && !is_enabled) {
+    fprintf(stderr, "record_pdcch_candidates needs recording_mode; not recording candidates\n");
+  }
+}
+
+bool pdcch_candidates_enabled()
+{
+  return pdcch_enabled;
+}
+
+void record_pdcch_candidate(uint32_t    pci,
+                            uint32_t    sfn,
+                            uint32_t    slot_idx,
+                            uint16_t    rnti,
+                            bool        ca_variant,
+                            const char* ss_type,
+                            uint32_t    coreset_id,
+                            uint32_t    al,
+                            uint32_t    cce,
+                            uint32_t    nof_bits,
+                            float       epre_dBfs,
+                            float       rsrp_dBfs,
+                            float       norm_corr,
+                            float       sync_error_us,
+                            const char* stage)
+{
+  if (!pdcch_enabled) {
+    return;
+  }
+  const double t = now_s();
+  char         row[256];
+  snprintf(row,
+           sizeof(row),
+           "%.6f,%u,%u,%u,%u,%d,%s,%u,%u,%u,%u,%.2f,%.2f,%.4f,%.3f,%s\n",
+           t,
+           pci,
+           sfn,
+           slot_idx,
+           (unsigned)rnti,
+           ca_variant ? 1 : 0,
+           ss_type,
+           coreset_id,
+           al,
+           cce,
+           nof_bits,
+           epre_dBfs,
+           rsrp_dBfs,
+           norm_corr,
+           sync_error_us,
+           stage);
+
+  std::lock_guard<std::mutex> lock(pdcch_mtx);
+  if (pdcch_file == nullptr && !pdcch_failed) {
+    pdcch_file   = open_run_file("PDCCH", "pdcch", pci, PDCCH_HEADER, 4 << 20);
+    pdcch_failed = pdcch_file == nullptr;
+  }
+  if (pdcch_file != nullptr) {
+    fputs(row, pdcch_file);
+    if (t - pdcch_last_flush >= DCI_FLUSH_PERIOD_S) {
+      fflush(pdcch_file);
+      pdcch_last_flush = t;
     }
   }
 }

@@ -424,7 +424,7 @@ int TaskSchedulerNRScope::UpdatewithResult(SlotResult now_result)
 
   while (last_seen_iter != task_scheduler_state.last_seen.end() &&
          ue_list_iter != task_scheduler_state.known_rntis.end()) {
-    if (now - *last_seen_iter > 5) {
+    if (now - *last_seen_iter > task_scheduler_state.rnti_expiry_s) {
       printf("C-RNTI 0x%04x expired: no DCI for %.1f s, no longer searched\n", *ue_list_iter, now - *last_seen_iter);
       task_scheduler_state.pdcch_dmrs_ids_by_rnti.erase(*ue_list_iter);
       last_seen_iter = task_scheduler_state.last_seen.erase(last_seen_iter);

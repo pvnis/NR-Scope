@@ -99,6 +99,9 @@ public:
   int              dispatcher_cpu = -1;
   int              results_cpu    = -1;
   std::vector<int> worker_cpus;
+
+  /* Seconds without a decoded DCI before a known RNTI stops being searched */
+  double rnti_expiry_s = 5.0;
   bool disable_cfo = false; // skip CFO compensation in ue_sync, for radios with a disciplined clock (e.g. X410)
   bool agc = true; // let ue_sync adjust the Rx gain; off keeps rx_gain fixed for the whole run
 

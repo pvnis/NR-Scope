@@ -1021,6 +1021,46 @@ int DCIDecoder::DCIDecoderandReceptionInit(WorkState* state, int bwp_id, cf_t* i
   return SRSRAN_SUCCESS;
 }
 
+/* Debug rows for RunRecorder::record_pdcch_candidate: every candidate the last
+  blind search evaluated, and the gate it stopped at, mirroring the checks in
+  ue_dl_nr_find_dci_ncce_nrscope_dciloop. */
+static void record_pdcch_candidates(const srsran_ue_dl_nr_t* q,
+                                    const WorkState*         state,
+                                    const srsran_slot_cfg_t* slot,
+                                    uint16_t                 rnti,
+                                    bool                     ca_variant)
+{
+  for (uint32_t i = 0; i < q->pdcch_info_count; i++) {
+    const srsran_ue_dl_nr_pdcch_info_t& info = q->pdcch_info[i];
+    const srsran_dmrs_pdcch_measure_t&  m    = info.measure;
+    const char*                         stage;
+    if (!isnormal(m.norm_corr)) {
+      stage = "no_measure";
+    } else if (m.epre_dBfs < q->pdcch_dmrs_epre_thr) {
+      stage = "epre";
+    } else if (m.norm_corr < q->pdcch_dmrs_corr_thr) {
+      stage = "corr";
+    } else {
+      stage = info.result.crc ? "crc_ok" : "crc_fail";
+    }
+    RunRecorder::record_pdcch_candidate(state->cs_ret.ssb_res.N_id,
+                                        state->sfn,
+                                        slot->idx,
+                                        rnti,
+                                        ca_variant,
+                                        srsran_ss_type_str(info.dci_ctx.ss_type),
+                                        info.dci_ctx.coreset_id,
+                                        1u << info.dci_ctx.location.L,
+                                        info.dci_ctx.location.ncce,
+                                        info.nof_bits,
+                                        m.epre_dBfs,
+                                        m.rsrp_dBfs,
+                                        m.norm_corr,
+                                        m.sync_error_us,
+                                        stage);
+  }
+}
+
 int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   slot,
                                           WorkState*                           state,
                                           std::vector<DCIFeedback>&            sharded_results,
@@ -1102,6 +1142,9 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
 
     int nof_dl_dci = srsran_ue_dl_nr_find_dl_dci_nrscope_dciloop(
         ue_dl_tmp, slot_tmp, sharded_rntis[dci_decoder_id][rnti_idx], srsran_rnti_type_c, dci_dl_tmp, 4);
+    if (RunRecorder::pdcch_candidates_enabled()) {
+      record_pdcch_candidates(ue_dl_tmp, state, slot, sharded_rntis[dci_decoder_id][rnti_idx], true);
+    }
 
     if (nof_dl_dci < SRSRAN_SUCCESS) {
       ERROR("Error in blind search");
@@ -1196,6 +1239,9 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
 
     int nof_dl_dci_nca = srsran_ue_dl_nr_find_dl_dci_nrscope_dciloop(
         ue_dl_tmp, slot_tmp, sharded_rntis[dci_decoder_id][rnti_idx], srsran_rnti_type_c, dci_dl_tmp, 4);
+    if (RunRecorder::pdcch_candidates_enabled()) {
+      record_pdcch_candidates(ue_dl_tmp, state, slot, sharded_rntis[dci_decoder_id][rnti_idx], false);
+    }
 
     if (nof_dl_dci_nca < SRSRAN_SUCCESS) {
       ERROR("Error in blind search");

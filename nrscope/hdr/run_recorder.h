@@ -116,6 +116,36 @@ void record_dci(uint32_t                   pci,
                 const char*                dci_bits,
                 const char*                dci_str);
 
+/* Debug: every PDCCH candidate the DCI decoder evaluated for a known RNTI, one
+  row per candidate and per DCI size set tried, to PDCCH/pdcch_<run>_pci<N>.csv.
+  Switched on by log_config.record_pdcch_candidates, and only with
+  recording_mode. At 2000 slots/s this is tens of thousands of rows a second, so
+  it is meant for short diagnostic runs.
+
+  stage says how far the candidate got: "no_measure" (the DM-RS measure was not
+  a number), "epre" or "corr" (dropped by that DM-RS threshold before
+  decoding), "crc_fail" or "crc_ok" (decoded; CRC against the RNTI). The PDCCH
+  DM-RS does not depend on the RNTI, so epre / norm_corr say whether a PDCCH was
+  physically where NR-Scope looked; the CRC says whether it was this UE's.
+  al is the aggregation level in CCEs. */
+void enable_pdcch_candidates(bool enable);
+bool pdcch_candidates_enabled();
+void record_pdcch_candidate(uint32_t    pci,
+                            uint32_t    sfn,
+                            uint32_t    slot_idx,
+                            uint16_t    rnti,
+                            bool        ca_variant,
+                            const char* ss_type,
+                            uint32_t    coreset_id,
+                            uint32_t    al,
+                            uint32_t    cce,
+                            uint32_t    nof_bits,
+                            float       epre_dBfs,
+                            float       rsrp_dBfs,
+                            float       norm_corr,
+                            float       sync_error_us,
+                            const char* stage);
+
 } // namespace RunRecorder
 
 #endif

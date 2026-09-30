@@ -37,7 +37,26 @@ pairs agree to within milliseconds while chance pairs scatter in steps of
 
 usage:
   dci_vs_gnb.py GNB_LOG NRSCOPE_DCI_CSV [--msg4 NRSCOPE_MSG4_CSV] [--rnti 0x4602]
-                [--expiry 5] [--out-csv joined.csv] [--json summary.json]
+                [--expiry 5] [--pdcch NRSCOPE_PDCCH_CSV] [--out-csv joined.csv] [--json summary.json]
+
+Why a DCI was missed
+--------------------
+With --pdcch, the PDCCH candidate CSV that NR-Scope writes when
+log_config.record_pdcch_candidates is on is looked up at the exact position
+(slot, aggregation level, CCE) where the gNB sent each DCI. Each miss then falls
+in one class:
+
+  slot not searched  NR-Scope evaluated no candidate for this RNTI in that slot
+                     (slot dropped, skipped as uplink, or RNTI not yet known)
+  not a candidate    the slot was searched, but not at the gNB's position:
+                     NR-Scope's search space or candidate hashing differs
+  DM-RS below thr.   searched there, but the PDCCH DM-RS energy or correlation
+                     was under the threshold: the PDCCH was not where or as
+                     NR-Scope expected it (timing, frequency, fade)
+  CRC failed         the DM-RS matched but the decoded bits failed the CRC:
+                     wrong DCI size, scrambling, or a poor channel estimate
+
+The same measurements for the detected DCIs are printed as the baseline.
 """
 import argparse
 import csv
@@ -125,6 +144,35 @@ def parse_prbs(s):
     return s
 
 
+STAGE_RANK = {"no_measure": 0, "epre": 1, "corr": 2, "crc_fail": 3, "crc_ok": 4}
+
+
+def parse_pdcch(path, keep):
+    """Candidate rows whose (rnti, sfn, slot) is in keep; the file can be millions of rows."""
+    rows = []
+    with open(path) as f:
+        for r in csv.DictReader(f):
+            key = (int(r["rnti"]), int(r["sfn"]), int(r["slot"]))
+            if key not in keep:
+                continue
+            rows.append(dict(t=float(r["timestamp"]), rnti=key[0], sfn=key[1], slot=key[2], ca=r["ca_variant"] == "1",
+                             al=int(r["aggregation_level"]), cce=int(r["cce"]), epre=float(r["epre_dBfs"]),
+                             corr=float(r["norm_corr"]), sync_us=float(r["sync_error_us"]), stage=r["stage"]))
+    return rows
+
+
+def diagnose(pd_at_slot, pd_at_pos, rnti, g):
+    """Best candidate measurement at the gNB's position, and the class of the outcome."""
+    here = pd_at_pos.get((rnti, g["abs"], g["al"], g["cce"]))
+    if here:
+        best = max(here, key=lambda c: (STAGE_RANK[c["stage"]], c["corr"]))
+        cls = {"crc_ok": "decoded", "crc_fail": "CRC failed"}.get(best["stage"], "DM-RS below thr.")
+        return cls, best
+    if pd_at_slot.get((rnti, g["abs"])):
+        return "not a candidate", None
+    return "slot not searched", None
+
+
 def parse_msg4(path):
     with open(path) as f:
         return [dict(t=float(r["timestamp"]), sfn=int(r["sfn"]), slot=int(r["slot"]), rnti=int(r["c_rnti"] or r["tc_rnti"]))
@@ -184,10 +232,13 @@ def main():
     ap.add_argument("--msg4", help="NR-Scope msg4 CSV of the same run; marks when each RNTI became known")
     ap.add_argument("--rnti", action="append", help="only these C-RNTIs (hex or decimal); default: every RNTI NR-Scope decoded")
     ap.add_argument("--expiry", type=float, default=5.0,
-                    help="NR-Scope stops searching an RNTI this many seconds after its last DCI (default 5)")
+                    help="the run's rnti_expiry_s: NR-Scope stops searching an RNTI this many seconds after "
+                         "its last DCI (default 5)")
     ap.add_argument("--scs-khz", type=int, default=30)
     ap.add_argument("--clock-offset", type=float, help="t_nrscope - t_gnb in seconds, instead of estimating it")
     ap.add_argument("--examples", type=int, default=5, help="mismatch examples printed per field")
+    ap.add_argument("--pdcch", help="NR-Scope PDCCH candidate CSV of the same run (record_pdcch_candidates): "
+                                    "says why each missed DCI was missed")
     ap.add_argument("--out-csv", help="write one row per gNB DL DCI with its NR-Scope match")
     ap.add_argument("--json", help="write the summary as JSON, for comparing runs")
     a = ap.parse_args()
@@ -235,6 +286,15 @@ def main():
         print(f"clock offset : {offset:+.3f} s (t_nrscope - t_gnb), supported by {support} of {nvotes} candidate pairs")
         if support < 0.5 * len(nr):
             print("  WARNING: weak support; check both logs are from the same session")
+
+    pd_at_slot, pd_at_pos = defaultdict(list), defaultdict(list)
+    if a.pdcch:
+        keep = {(p["rnti"], p["sfn"], p["slot"]) for p in pdcch if p["format"] in DL_FORMATS}
+        for c in parse_pdcch(a.pdcch, keep):
+            c["abs"] = clk.abs_slot(c["t"], c["sfn"], c["slot"])
+            pd_at_slot[(c["rnti"], c["abs"])].append(c)
+            pd_at_pos[(c["rnti"], c["abs"], c["al"], c["cce"])].append(c)
+        print(f"PDCCH cands. : {a.pdcch} ({sum(len(v) for v in pd_at_slot.values())} rows in slots the gNB used)")
 
     pdsch_at = {(p["rnti"], p["abs"]): p for p in pdsch}
     ri_at = {(s["rnti"], s["abs"], s["h_id"]): s["ri"] for s in sched}
@@ -309,11 +369,35 @@ def main():
         print("  by AL/CCE (detected/sent): " + "  ".join(
             f"{al}/{cce}:{hit}/{tot}" + ("!" if hit == 0 else "") for (al, cce), (hit, tot) in sorted(by_loc.items())))
 
-        if missed:
+        if missed and not a.pdcch:
             print(f"missed ({len(missed)}), first {min(len(missed), 10)}:")
             for g in missed[:10]:
                 print(f"  +{rel(g['abs'], origin):7.3f} s  SFN {g['sfn']:4d}.{g['slot']:<2d} format {g['format']} "
                       f"ss_id {g['ss_id']} al {g['al']} cce {g['cce']}")
+
+        miss_classes = Counter()
+        if a.pdcch:
+            # Baseline: the winning candidate of every detected DCI
+            base = [diagnose(pd_at_slot, pd_at_pos, rnti, g)[1] for g, _ in matched]
+            base = [b for b in base if b]
+            if base:
+                q = lambda xs, f: statistics.quantiles(xs, n=20)[0 if f == 5 else 18] if len(xs) >= 2 else xs[0]
+                corr, epre, sync = [b["corr"] for b in base], [b["epre"] for b in base], [b["sync_us"] for b in base]
+                print(f"detected DCIs at the gNB's position ({len(base)}): norm_corr median {statistics.median(corr):.3f}"
+                      f" (5th pct {q(corr, 5):.3f}), EPRE median {statistics.median(epre):+.1f} dBfs"
+                      f" (5th pct {q(epre, 5):+.1f}), sync error median {statistics.median(sync):+.3f} us")
+            if missed:
+                print(f"missed ({len(missed)}), with what NR-Scope measured at the gNB's position:")
+            for g in missed:
+                cls, best = diagnose(pd_at_slot, pd_at_pos, rnti, g)
+                miss_classes[cls] += 1
+                meas = (f"stage {best['stage']:8s} norm_corr {best['corr']:.3f} EPRE {best['epre']:+6.1f} dBfs "
+                        f"sync {best['sync_us']:+.3f} us" if best else
+                        f"{len(pd_at_slot.get((rnti, g['abs']), []))} other candidates evaluated in that slot")
+                print(f"  +{rel(g['abs'], origin):7.3f} s  SFN {g['sfn']:4d}.{g['slot']:<2d} {g['format']} ss_id {g['ss_id']}"
+                      f" al {g['al']} cce {g['cce']:2d}: {cls:17s} {meas}")
+            if miss_classes:
+                print("  misses by class: " + ", ".join(f"{k} {v}" for k, v in miss_classes.most_common()))
 
         # --- accuracy ------------------------------------------------------
         fields = ["format", "al", "cce", "h_id", "rv", "prb", "symb", "mod", "tbs_bits", "layers"]
@@ -378,6 +462,7 @@ def main():
         summary["rntis"][f"0x{rnti:04x}"] = dict(
             gnb_dl_dcis_searched=len(searched), detected=len(matched), missed=len(missed),
             after_expiry=len(after_expiry), false_positives=len(false_pos),
+            miss_classes=dict(miss_classes),
             recall=len(matched) / len(searched) if searched else None,
             by_format={f"{k[0]}/ss{k[1]}": v for k, v in by_kind.items()},
             by_al_cce={f"al{k[0]}/cce{k[1]}": v for k, v in by_loc.items()},

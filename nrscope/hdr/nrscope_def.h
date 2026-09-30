@@ -309,6 +309,8 @@ struct WorkState_ {
   std::vector<int> worker_cpus;
   int              dispatcher_cpu = -1;
   int              results_cpu    = -1;
+  /* A known RNTI is dropped after this long without a decoded DCI */
+  double rnti_expiry_s = 5.0;
 
   uint32_t slot_sz;
   /* Receive chains actually captured, after clamping args_t.nof_antennas to
