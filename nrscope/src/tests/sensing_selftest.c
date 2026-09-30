@@ -39,6 +39,7 @@
 #include "nrscope/hdr/sensing/nr_ue_map.h"
 #include "nrscope/hdr/sensing/nr_ue_sensing.h"
 #include "nrscope/hdr/sensing/sensing_defs.h"
+#include "srsran/phy/ch_estimation/dmrs_sch.h"
 #include "srsran/phy/common/sequence.h"
 #include "srsran/phy/phch/phch_cfg_nr.h"
 
@@ -360,15 +361,16 @@ static void test_dmrs_roundtrip(void)
     }
   }
 
-  // Receiver: the streaming walk under test
+  /* Receiver: the estimator under test, on the shared generator (dmrs_pilots.h).
+  The transmitter above uses srsRAN's sequence module instead, so this also
+  checks the two generators agree. */
   static cf_t H_est[51 * SRSRAN_NRE];
   static bool H_valid[51 * SRSRAN_NRE];
   memset(H_est, 0, sizeof(H_est));
   memset(H_valid, 0, sizeof(H_valid));
 
-  const int n_written =
-      nr_ue_dmrs_estimate_symbol(&lay, 0, cinit, &grant, nof_prb, dmrs_cfg.reference_point_k_rb, rxF, n_sc, H_est,
-                                 H_valid);
+  const nr_dmrs_placement_t place = {.grid_crb0 = 0, .bwp_start_crb = 0, .reference_crb = dmrs_cfg.reference_point_k_rb};
+  const int n_written = nr_ue_dmrs_estimate_symbol(&lay, 0, cinit, &grant, &place, rxF, n_sc, H_est, H_valid);
 
   check(n_written == n_placed, "REs estimated vs placed", n_written, n_placed, 0);
 
@@ -405,6 +407,136 @@ static void test_dmrs_roundtrip(void)
     }
   }
   check(n_outside == 0, "REs written outside the grant", n_outside, 0, 0);
+}
+
+/* Two-layer despreading against srsRAN's own DM-RS mapper.
+ *
+ * srsran_dmrs_sch_put_sf() writes the port-1000 pilots of a 273-PRB carrier; port
+ * 1001 is the same pilots with the frequency cover w_f = [+1 -1] on alternate
+ * pilots, as in 38.211 table 7.4.1.1.2-1. Each layer goes through its own
+ * channel, a slow delay ramp with its own gain, and the grid holds their sum,
+ * which is what a two-layer PDSCH puts on each DM-RS RE. Despreading layer j must
+ * return layer j's channel with the other one cancelled.
+ *
+ * The receiver takes its pilots from the shared generator (dmrs_pilots.h) and
+ * looks them up by absolute position, the transmitter here is srsRAN's walk over
+ * the allocation, so a gapped grant checks the two agree across the gaps. The
+ * shifted case hands the despreader a grid and a BWP starting shift CRBs above
+ * point A, with the grant renumbered from the BWP, and must find the same pilots:
+ * that checks the placement arithmetic the live grid will depend on. */
+static void test_despread_two_layers(const char* name, const uint32_t runs[][2], int nof_runs, uint32_t shift)
+{
+  printf("\nDM-RS despread, 2 layers on srsRAN's mapper: %s\n", name);
+  const uint32_t nof_prb = 273, n_sc = nof_prb * SRSRAN_NRE, slot_idx = 11;
+
+  srsran_carrier_nr_t carrier = SRSRAN_DEFAULT_CARRIER_NR;
+  carrier.pci                 = 1;
+  carrier.nof_prb             = nof_prb;
+  carrier.scs                 = srsran_subcarrier_spacing_30kHz;
+
+  srsran_sch_cfg_nr_t cfg                 = {};
+  cfg.dmrs.type                           = srsran_dmrs_sch_type_1;
+  cfg.dmrs.typeA_pos                      = srsran_dmrs_sch_typeA_pos_2;
+  cfg.dmrs.additional_pos                 = srsran_dmrs_sch_add_pos_2;
+  cfg.dmrs.length                         = srsran_dmrs_sch_len_1;
+  srsran_sch_grant_nr_t* g                = &cfg.grant;
+  g->mapping                              = srsran_sch_mapping_type_A;
+  g->S                                    = 1;
+  g->L                                    = 13;
+  g->nof_layers                           = 1; // srsRAN writes port 1000; port 1001 is built below
+  g->nof_dmrs_cdm_groups_without_data     = 1;
+  g->beta_dmrs                            = 1.0f;
+  uint32_t n_alloc                        = 0;
+  for (int r = 0; r < nof_runs; r++) {
+    for (uint32_t p = runs[r][0]; p < runs[r][1]; p++) {
+      g->prb_idx[p] = true;
+      n_alloc++;
+    }
+  }
+  g->nof_prb = n_alloc;
+
+  static cf_t tx[273 * SRSRAN_NRE * SRSRAN_NSYMB_PER_SLOT_NR];
+  memset(tx, 0, sizeof(tx));
+  srsran_dmrs_sch_t dmrs = {};
+  srsran_slot_cfg_t slot = {.idx = slot_idx};
+  if (srsran_dmrs_sch_init(&dmrs, false) < SRSRAN_SUCCESS || srsran_dmrs_sch_set_carrier(&dmrs, &carrier) < SRSRAN_SUCCESS ||
+      srsran_dmrs_sch_put_sf(&dmrs, &slot, &cfg, g, tx) < SRSRAN_SUCCESS) {
+    printf("  srsRAN could not place the DM-RS\n");
+    failures++;
+    return;
+  }
+  srsran_dmrs_sch_free(&dmrs);
+  uint32_t  symbols[SRSRAN_DMRS_SCH_MAX_SYMBOLS];
+  const int nof_symbols = srsran_dmrs_sch_get_symbols_idx(&cfg.dmrs, g, symbols);
+
+  // Two layers, each with its own gain and delay ramp, summed on every DM-RS RE
+  const cf_t   a[2]   = {1.0f + 0.3f * I, -0.5f + 0.7f * I};
+  const double tau[2] = {0.0015, 0.0025}; // cycles per subcarrier: under a degree across a pilot pair
+  static cf_t  rx[273 * SRSRAN_NRE * SRSRAN_NSYMB_PER_SLOT_NR];
+  memset(rx, 0, sizeof(rx));
+  for (int s = 0; s < nof_symbols; s++) {
+    for (uint32_t k = 0; k < n_sc; k++) {
+      const cf_t x = tx[symbols[s] * n_sc + k];
+      if (x == 0) {
+        continue;
+      }
+      const float w1 = ((k / 2) % 2 == 1) ? -1.0f : 1.0f; // port 1001 cover, k' = (k/2) % 2 on comb 0
+      cf_t        y  = 0;
+      for (int j = 0; j < 2; j++) {
+        const cf_t h = a[j] * cexpf(-I * (float)(2.0 * M_PI * tau[j] * k));
+        y += h * x * (j == 1 ? w1 : 1.0f);
+      }
+      rx[symbols[s] * n_sc + k] = y;
+    }
+  }
+
+  nr_dmrs_layout_t lay;
+  if (!nr_ue_dmrs_layout(0x3, srsran_dmrs_sch_type_1, &lay)) { // ports 1000 and 1001
+    printf("  layout rejected\n");
+    failures++;
+    return;
+  }
+  check(lay.despread && lay.k_step == 4, "layout: despread, k_step 4", lay.k_step, 4, 0);
+
+  // The receiver's view: grid and BWP start `shift` CRBs above point A
+  srsran_sch_grant_nr_t rx_grant = *g;
+  memset(rx_grant.prb_idx, 0, sizeof(rx_grant.prb_idx));
+  for (uint32_t p = shift; p < nof_prb; p++) {
+    rx_grant.prb_idx[p - shift] = g->prb_idx[p];
+  }
+  const nr_dmrs_placement_t place = {.grid_crb0 = shift, .bwp_start_crb = shift, .reference_crb = 0};
+  const int                 n_grid = (int)((nof_prb - shift) * SRSRAN_NRE);
+
+  static cf_t H[273 * SRSRAN_NRE];
+  static bool V[273 * SRSRAN_NRE];
+  double      worst[2] = {0, 0};
+  int         written[2] = {0, 0};
+  for (int s = 0; s < nof_symbols; s++) {
+    const uint32_t cinit = nr_ue_dmrs_seed(&carrier, &cfg.dmrs, g, slot_idx, symbols[s]);
+    for (int j = 0; j < 2; j++) {
+      memset(V, 0, sizeof(V));
+      const int n = nr_ue_dmrs_estimate_symbol(&lay, j, cinit, &rx_grant, &place,
+                                               rx + symbols[s] * n_sc + shift * SRSRAN_NRE, n_grid, H, V);
+      written[j] += n;
+      for (int kg = 0; kg < n_grid; kg++) {
+        if (!V[kg]) {
+          continue;
+        }
+        // Despread output sits at the k' = 0 RE of its pair; compare with the pair's mean channel
+        const uint32_t k   = (uint32_t)kg + shift * SRSRAN_NRE;
+        const cf_t     h0  = a[j] * cexpf(-I * (float)(2.0 * M_PI * tau[j] * k));
+        const cf_t     h1  = a[j] * cexpf(-I * (float)(2.0 * M_PI * tau[j] * (k + 2)));
+        const double   err = cabsf(H[kg] - 0.5f * (h0 + h1)) / cabsf(a[j]);
+        worst[j]           = fmax(worst[j], err);
+      }
+    }
+  }
+  const int want = (int)n_alloc * 3 * nof_symbols; // one estimate per pilot pair, 3 pairs per PRB
+  check(written[0] == want, "layer 0: estimates written", written[0], want, 0);
+  check(written[1] == want, "layer 1: estimates written", written[1], want, 0);
+  // A wrong pilot leaves an error of order 1; the cross-layer leak of a slowly varying channel is ~1e-2
+  check(worst[0] < 0.02, "layer 0: worst |H - h0| / |a0|", worst[0], 0, 0.02);
+  check(worst[1] < 0.02, "layer 1: worst |H - h1| / |a1|", worst[1], 0, 0.02);
 }
 
 int main(void)
@@ -454,6 +586,15 @@ int main(void)
                  -12.0);
 
   test_dmrs_roundtrip();
+
+  {
+    const uint32_t full[][2]   = {{0, 273}};
+    const uint32_t gapped[][2] = {{3, 40}, {60, 120}, {200, 273}};
+    const uint32_t upper[][2]  = {{33, 273}}; // the allocation above the SSB, seen live at 600 Mb/s
+    test_despread_two_layers("full carrier", full, 1, 0);
+    test_despread_two_layers("gapped allocation", gapped, 3, 0);
+    test_despread_two_layers("PRBs 33-272, grid and BWP from CRB 5", upper, 1, 5);
+  }
 
   nr_ue_sensing_idft_free();
 

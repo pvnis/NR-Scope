@@ -119,6 +119,21 @@ uint32_t nr_ue_dmrs_seed(const srsran_carrier_nr_t*   carrier,
                          uint32_t                     slot_idx,
                          uint32_t                     symbol_idx);
 
+/* Where the grid, the grant and the pilot sequence sit on the common resource
+   block (CRB) axis. Everything is placed explicitly rather than assumed to start
+   at PRB 0: the carrier starts offsetToCarrier CRBs above point A, the BWP
+   locationAndBandwidth further in, and the grant's prb_idx[] counts from the
+   BWP. The DM-RS sequence counts from reference_crb: point A (0) for a C-RNTI
+   PDSCH, the lowest CRB of CORESET#0 for one scheduled by DCI 1_0 in it. */
+typedef struct {
+  /// CRB of the grid's first subcarrier (offsetToCarrier)
+  uint32_t grid_crb0;
+  /// CRB of the BWP's first PRB, which prb_idx[0] means
+  uint32_t bwp_start_crb;
+  /// CRB where the DM-RS sequence starts (0 = point A)
+  uint32_t reference_crb;
+} nr_dmrs_placement_t;
+
 /* Fill one OFDM symbol's row of the sensing channel grid with the least-squares
    estimate of one layer.
 
@@ -126,6 +141,11 @@ uint32_t nr_ue_dmrs_seed(const srsran_carrier_nr_t*   carrier,
    conjugate pilot: no interpolation, no smoothing and no delay
    pre-compensation. What the demodulation path produces is tuned for equalising
    data and biases any delay estimate built on it.
+
+   The pilots come from dmrs_pilots.h, the generator the on-air DM-RS check uses
+   on every decoded grant. They are generated for the whole carrier from the
+   reference CRB and looked up by absolute position, so a gap in the allocation
+   cannot shift them.
 
    Where despreading applies, the two REs of a pair produce one value, written at
    the k' = 0 RE of that pair. Labelling it there rather than at the pair
@@ -137,11 +157,10 @@ uint32_t nr_ue_dmrs_seed(const srsran_carrier_nr_t*   carrier,
    lay        : from nr_ue_dmrs_layout()
    layer      : which layer to estimate, 0 .. lay->n_ports - 1
    cinit      : from nr_ue_dmrs_seed(), for this symbol
-   grant      : read for prb_idx[] and beta_dmrs
-   nof_prb    : PRBs of the carrier grid, i.e. how far prb_idx[] is walked
-   reference_point_k_rb : DM-RS reference point offset, from srsran_dmrs_sch_cfg_t
-   rxF        : the received grid row for this symbol, indexed by subcarrier
-   n_sc_grid  : subcarriers of the carrier grid, 12 * nof_prb
+   grant      : read for prb_idx[] (BWP-relative) and beta_dmrs
+   place      : where grid, BWP and sequence sit on the CRB axis
+   rxF        : the received grid row for this symbol, indexed by grid subcarrier
+   n_sc_grid  : subcarriers of the grid, 12 * its PRBs
    H_row      : receives the estimates, indexed by grid subcarrier
    valid_row  : marks the REs written; may be NULL to leave it untouched, which
                 the caller wants when several antennas fill the same mask
@@ -152,8 +171,7 @@ int nr_ue_dmrs_estimate_symbol(const nr_dmrs_layout_t*      lay,
                                int                          layer,
                                uint32_t                     cinit,
                                const srsran_sch_grant_nr_t* grant,
-                               uint32_t                     nof_prb,
-                               uint32_t                     reference_point_k_rb,
+                               const nr_dmrs_placement_t*   place,
                                const cf_t*                  rxF,
                                int                          n_sc_grid,
                                cf_t*                        H_row,

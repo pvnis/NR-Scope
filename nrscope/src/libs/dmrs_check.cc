@@ -1,4 +1,5 @@
 #include "nrscope/hdr/dmrs_check.h"
+#include "nrscope/hdr/dmrs_pilots.h"
 
 #include <cmath>
 #include <complex>
@@ -7,35 +8,10 @@
 namespace {
 
 const uint32_t NSYMB_PER_SLOT = 14;
-const uint32_t NC             = 1600; // TS 38.211 5.2.1
 
-/* TS 38.211 5.2.1 pseudo-random sequence, len bits from c_init. */
-std::vector<uint8_t> gold_sequence(uint32_t c_init, uint32_t len)
-{
-  const uint32_t       total = NC + len;
-  std::vector<uint8_t> x1(total + 31, 0), x2(total + 31, 0);
-  x1[0] = 1;
-  for (uint32_t i = 0; i < 31; i++) {
-    x2[i] = (c_init >> i) & 1;
-  }
-  for (uint32_t n = 0; n < total; n++) {
-    x1[n + 31] = (x1[n + 3] + x1[n]) & 1;
-    x2[n + 31] = (x2[n + 3] + x2[n + 2] + x2[n + 1] + x2[n]) & 1;
-  }
-  std::vector<uint8_t> c(len);
-  for (uint32_t n = 0; n < len; n++) {
-    c[n] = (x1[n + NC] + x2[n + NC]) & 1;
-  }
-  return c;
-}
-
-/* TS 38.211 7.4.1.1.1, n_SCID = 0 (CDM group 0, lambda-bar = 0). */
-uint32_t dmrs_c_init(uint32_t slot, uint32_t symbol, uint32_t n_id, uint32_t n_scid)
-{
-  uint64_t v = ((uint64_t)(NSYMB_PER_SLOT * slot + symbol + 1) * (2ULL * n_id + 1ULL)) << 17;
-  v += 2ULL * n_id + n_scid;
-  return (uint32_t)(v & 0x7fffffffULL);
-}
+/* Pilots come from dmrs_pilots.h, the one generator in NR-Scope, which the
+  sensing estimator shares: what this check passes on air is exactly what sensing
+  divides by. */
 
 struct Pilot {
   uint32_t            k_abs; // subcarrier index from subcarrier 0 of CRB 0 (point A)
@@ -81,16 +57,15 @@ void accumulate(Coherence& acc, const std::vector<Pilot>& pilots, uint32_t c_ini
   if (pilots.size() < 3) {
     return;
   }
-  // r(m) uses bits 2m and 2m+1, with m = k_abs / 2 for CDM group 0
-  const uint32_t             m_max = pilots.back().k_abs / 2;
-  const std::vector<uint8_t> c     = gold_sequence(c_init, 2 * m_max + 2);
-  const float                a     = (float)M_SQRT1_2;
+  // The whole carrier's pilots from point A, indexed by m = k_abs / 2 (type 1, CDM group 0)
+  const uint32_t    m_max = pilots.back().k_abs / 2;
+  std::vector<cf_t> r(m_max + 1);
+  nrscope_dmrs_sequence(c_init, m_max + 1, (float)M_SQRT1_2, r.data());
 
   std::vector<std::complex<float> > z(pilots.size());
   for (size_t i = 0; i < pilots.size(); i++) {
-    const uint32_t            m = pilots[i].k_abs / 2;
-    const std::complex<float> r(a * (1 - 2 * (int)c[2 * m]), a * (1 - 2 * (int)c[2 * m + 1]));
-    z[i] = pilots[i].y * std::conj(r); // |r| = 1
+    const int m = nrscope_dmrs_index_of_k(pilots[i].k_abs, srsran_dmrs_sch_type_1, 0);
+    z[i]        = pilots[i].y * std::conj(std::complex<float>(r[m])); // |r| = 1
   }
 
   std::complex<double> s = 0;
@@ -134,8 +109,8 @@ DmrsCheckResult dmrs_check_pdsch(const cf_t*                  grid,
   for (uint32_t i = 0; i < nof_dmrs_symbols; i++) {
     const uint32_t     l      = dmrs_symbols[i];
     std::vector<Pilot> pilots = grant_pilots(grid, nof_carrier_prb, crb_offset, bwp_start_crb, grant, l);
-    accumulate(claimed, pilots, dmrs_c_init(slot_idx_in_frame, l, n_id, n_scid));
-    accumulate(wrong_nid, pilots, dmrs_c_init(slot_idx_in_frame, l, n_id + 1, n_scid));
+    accumulate(claimed, pilots, nrscope_dmrs_c_init(slot_idx_in_frame, l, n_id, n_scid));
+    accumulate(wrong_nid, pilots, nrscope_dmrs_c_init(slot_idx_in_frame, l, n_id + 1, n_scid));
     for (const Pilot& p : pilots) {
       energy += std::norm(p.y);
       nof_re++;
@@ -153,7 +128,7 @@ DmrsCheckResult dmrs_check_pdsch(const cf_t*                  grid,
     }
     if (!is_dmrs) {
       std::vector<Pilot> pilots = grant_pilots(grid, nof_carrier_prb, crb_offset, bwp_start_crb, grant, l);
-      accumulate(data_sym, pilots, dmrs_c_init(slot_idx_in_frame, l, n_id, n_scid));
+      accumulate(data_sym, pilots, nrscope_dmrs_c_init(slot_idx_in_frame, l, n_id, n_scid));
     }
   }
 

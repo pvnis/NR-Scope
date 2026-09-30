@@ -6,7 +6,7 @@
 #include <string.h>
 
 #include "nrscope/hdr/sensing/nr_ue_dmrs_despread.h"
-#include "srsran/phy/common/sequence.h"
+#include "nrscope/hdr/dmrs_pilots.h"
 #include "srsran/phy/utils/vector.h"
 
 /* Every rejection below describes a configuration the estimator does not model,
@@ -121,132 +121,23 @@ uint32_t nr_ue_dmrs_seed(const srsran_carrier_nr_t*   carrier,
                          uint32_t                     slot_idx,
                          uint32_t                     symbol_idx)
 {
-  /* N_ID defaults to the physical cell identity. scrambling_id0/1 override it
-  when DMRS-DownlinkConfig set them, which a passive listener usually cannot
-  read: that IE travels over encrypted RRC. The default is therefore the case
-  that matters here, and it is also what most deployments leave in place. */
-  uint32_t n_id   = carrier->pci;
-  uint32_t n_scid = (grant->n_scid) ? 1 : 0;
-  if (!grant->n_scid && dmrs_cfg->scrambling_id0_present) {
-    n_id = dmrs_cfg->scrambling_id0;
-  } else if (grant->n_scid && dmrs_cfg->scrambling_id1_present) {
-    n_id = dmrs_cfg->scrambling_id1;
-  }
-
-  /* 38.211 7.4.1.1.1. The floor(lambda/2) term of the specification is omitted,
-  matching srsran_dmrs_sch_seed(): it is zero for CDM groups 0 and 1, and only
-  group 2 of type 2 -- ports 4,5,10,11, which need a rank this path already
-  refuses -- would see it. */
-  return SRSRAN_SEQUENCE_MOD(
-      (((uint64_t)(SRSRAN_NSYMB_PER_SLOT_NR * slot_idx + symbol_idx + 1UL) * (2UL * n_id + 1UL)) << 17UL)
-      + (2UL * n_id + n_scid));
-}
-
-/* One contiguous run of allocated PRBs, estimated in one pass.
- *
- * The pilots of the run are generated in a single call, because the generator is
- * a stream and the caller has already advanced it over whatever was skipped.
- * Within a PRB the sequence order is (n', k') with k' fastest, which is the
- * order srsran_dmrs_get_pilots_type{1,2}() walk, so the two orders stay in step
- * without either having to know about the other. */
-static int estimate_run(const nr_dmrs_layout_t*  lay,
-                        int                      layer,
-                        srsran_sequence_state_t* state,
-                        uint32_t                 prb_start,
-                        uint32_t                 prb_count,
-                        float                    amplitude,
-                        const cf_t*              rxF,
-                        int                      n_sc_grid,
-                        cf_t*                    H_row,
-                        bool*                    valid_row)
-{
-  const int delta      = lay->delta[layer];
-  const int n_pilot_rb = lay->n_pilot_rb;
-  /* Pairs of one CDM group per PRB: the range of n' in k = 4n' + 2k' + delta
-  (type 1) or 6n' + k' + delta (type 2). */
-  const int n_pairs  = n_pilot_rb / 2;
-  const int n_pilots = (int)prb_count * n_pilot_rb;
-
-  /* Worst case is the whole carrier in one run: 275 PRB x 6 pilots. Stack rather
-  than a scratch buffer on the layout, because several antennas estimate the same
-  symbol concurrently. */
-  cf_t pilots[275 * 6];
-  if (n_pilots > (int)(sizeof(pilots) / sizeof(pilots[0]))) {
-    ERROR("sensing: %d pilots in one run exceeds the scratch buffer", n_pilots);
-    return -1;
-  }
-
-  /* gen_f writes one float per bit and a QPSK pilot is two bits, so the length
-  is twice the pilot count. The amplitude is applied here, which is what makes
-  the correlation below an estimate of H rather than of H scaled by beta. */
-  srsran_sequence_state_gen_f(state, amplitude, (float*)pilots, (uint32_t)n_pilots * 2);
-
-  int n_written = 0;
-
-  for (uint32_t prb = prb_start; prb < prb_start + prb_count; prb++) {
-    const int rb_sc   = (int)prb * SRSRAN_NRE;
-    const int seq_prb = (int)(prb - prb_start) * n_pilot_rb;
-
-    for (int np = 0; np < n_pairs; np++) {
-      /* RE of each element of the pair, and where its pilot sits in the run. */
-      const int k0 = rb_sc + (lay->config_type == srsran_dmrs_sch_type_1 ? 4 * np + 0 : 6 * np + 0) + delta;
-      const int k1 = rb_sc + (lay->config_type == srsran_dmrs_sch_type_1 ? 4 * np + 2 : 6 * np + 1) + delta;
-      const int i0 = seq_prb + 2 * np;
-      const int i1 = i0 + 1;
-
-      if (k0 >= n_sc_grid || k1 >= n_sc_grid) {
-        continue;
-      }
-
-      /* Least squares: the received RE against the conjugate of the known
-      pilot. The pilot has unit modulus once the amplitude above is folded in,
-      so this is a division without the divide. */
-      const cf_t z0 = rxF[k0] * conjf(pilots[i0]);
-
-      if (!lay->despread) {
-        /* One port on this comb, so each RE is an estimate on its own and both
-        REs of the pair are kept. */
-        const cf_t z1 = rxF[k1] * conjf(pilots[i1]);
-        H_row[k0]     = z0;
-        H_row[k1]     = z1;
-        if (valid_row) {
-          valid_row[k0] = true;
-          valid_row[k1] = true;
-        }
-        n_written += 2;
-        continue;
-      }
-
-      /* Two ports on this comb. With the bare sequence, z0 = h0 + h1 and
-      z1 = h0 - h1, so the matched filter of the cover is (z0 + w_f(1) z1) / 2.
-      The 2x2 mixing it inverts is exactly unitary, which is why the residual
-      taper and the cross-layer leak it leaves behind cancel identically once the
-      layers are combined as a power sum, and only bite when a layer is used on
-      its own. */
-      const cf_t z1 = rxF[k1] * conjf(pilots[i1]);
-      H_row[k0]     = (z0 + (float)lay->wf1[layer] * z1) * 0.5f;
-      if (valid_row) {
-        valid_row[k0] = true;
-      }
-      n_written++;
-    }
-  }
-
-  return n_written;
+  /* The shared generator's N_ID and c_init (dmrs_pilots.h), the same ones the
+  on-air DM-RS check uses: scramblingID0/1 when configured, the PCI otherwise. */
+  const uint32_t n_id = nrscope_dmrs_n_id(carrier->pci, dmrs_cfg, grant->n_scid);
+  return nrscope_dmrs_c_init(slot_idx, symbol_idx, n_id, grant->n_scid);
 }
 
 int nr_ue_dmrs_estimate_symbol(const nr_dmrs_layout_t*      lay,
                                int                          layer,
                                uint32_t                     cinit,
                                const srsran_sch_grant_nr_t* grant,
-                               uint32_t                     nof_prb,
-                               uint32_t                     reference_point_k_rb,
+                               const nr_dmrs_placement_t*   place,
                                const cf_t*                  rxF,
                                int                          n_sc_grid,
                                cf_t*                        H_row,
                                bool*                        valid_row)
 {
-  if (lay == NULL || grant == NULL || rxF == NULL || H_row == NULL) {
+  if (lay == NULL || grant == NULL || place == NULL || rxF == NULL || H_row == NULL) {
     return -1;
   }
   if (layer < 0 || layer >= lay->n_ports) {
@@ -262,54 +153,84 @@ int nr_ue_dmrs_estimate_symbol(const nr_dmrs_layout_t*      lay,
     amplitude /= grant->beta_dmrs;
   }
 
-  srsran_sequence_state_t state = {};
-  srsran_sequence_state_init(&state, cinit);
+  /* The allocation's last CRB sets how much of the sequence is needed. The
+  sequence starts at the reference CRB (point A for a C-RNTI PDSCH) and is
+  indexed by absolute position below, never walked: every allocated pilot is
+  looked up at its own index, so a gap in the allocation cannot shift anything. */
+  const uint32_t grid_prb = (uint32_t)n_sc_grid / SRSRAN_NRE;
+  int            crb_last = -1;
+  for (uint32_t p = 0; p < SRSRAN_MAX_PRB_NR; p++) {
+    if (grant->prb_idx[p]) {
+      crb_last = (int)(place->bwp_start_crb + p);
+    }
+  }
+  if (crb_last < 0 || (uint32_t)crb_last < place->reference_crb) {
+    return 0;
+  }
+  const uint32_t n_seq = ((uint32_t)crb_last + 1 - place->reference_crb) * (uint32_t)lay->n_pilot_rb;
+  if (n_seq > NRSCOPE_DMRS_MAX_PILOTS) {
+    ERROR("sensing: DM-RS sequence of %u pilots exceeds the generator's %d", n_seq, NRSCOPE_DMRS_MAX_PILOTS);
+    return -1;
+  }
+  cf_t pilots[NRSCOPE_DMRS_MAX_PILOTS];
+  nrscope_dmrs_sequence(cinit, n_seq, amplitude, pilots);
 
-  /* Walk the carrier, estimating each contiguous run of allocated PRBs and
-  advancing the generator across the gaps. The generator has no random access, so
-  a PRB that is skipped must still be stepped over: its pilots exist in the
-  sequence whether or not this grant uses them.
+  const int delta   = lay->delta[layer];
+  const int n_pairs = lay->n_pilot_rb / 2; // pairs (k' = 0, 1) of one CDM group per PRB
+  int       n_written = 0;
 
-  reference_point_k_rb shifts where the sequence is taken to start, which a PDSCH
-  carrying SIB1 needs; it is subtracted from the first skip and then spent. */
-  uint32_t prb_count = 0;
-  uint32_t prb_start = 0;
-  uint32_t prb_skip  = 0;
-  int      n_written = 0;
-
-  for (uint32_t prb_idx = 0; prb_idx < nof_prb; prb_idx++) {
-    if (grant->prb_idx[prb_idx]) {
-      if (prb_count == 0) {
-        prb_start = prb_idx;
-
-        const uint32_t skip = (prb_skip > reference_point_k_rb) ? prb_skip - reference_point_k_rb : 0;
-        srsran_sequence_state_advance(&state, skip * (uint32_t)lay->n_pilot_rb * 2);
-        prb_skip = 0;
+  for (uint32_t p = 0; p < SRSRAN_MAX_PRB_NR; p++) {
+    if (!grant->prb_idx[p]) {
+      continue;
+    }
+    const uint32_t crb = place->bwp_start_crb + p;
+    if (crb < place->reference_crb || crb < place->grid_crb0 || crb - place->grid_crb0 >= grid_prb) {
+      continue; // before the sequence reference or outside the grid
+    }
+    const uint32_t k_seq  = (crb - place->reference_crb) * SRSRAN_NRE; // PRB start, sequence frame
+    const int      k_grid = (int)(crb - place->grid_crb0) * SRSRAN_NRE; // PRB start, grid frame
+    for (int np = 0; np < n_pairs; np++) {
+      /* The two REs of pair np, k = 4n' + 2k' + delta (type 1) or 6n' + k' + delta (type 2). */
+      const int kin0 = (lay->config_type == srsran_dmrs_sch_type_1 ? 4 * np : 6 * np) + delta;
+      const int kin1 = kin0 + (lay->config_type == srsran_dmrs_sch_type_1 ? 2 : 1);
+      const int m0   = nrscope_dmrs_index_of_k(k_seq + (uint32_t)kin0, lay->config_type, (uint32_t)delta);
+      const int m1   = nrscope_dmrs_index_of_k(k_seq + (uint32_t)kin1, lay->config_type, (uint32_t)delta);
+      const int k0   = k_grid + kin0;
+      const int k1   = k_grid + kin1;
+      if (m0 < 0 || m1 < 0 || k1 >= n_sc_grid) {
+        continue;
       }
-      prb_count++;
-      continue;
-    }
 
-    prb_skip++;
-    if (prb_count == 0) {
-      continue;
-    }
+      /* Least squares: the received RE against the conjugate of the known
+      pilot. The pilot has unit modulus once the amplitude above is folded in,
+      so this is a division without the divide. */
+      const cf_t z0 = rxF[k0] * conjf(pilots[m0]);
+      const cf_t z1 = rxF[k1] * conjf(pilots[m1]);
+      if (!lay->despread) {
+        /* One port on this comb, so each RE is an estimate on its own and both
+        REs of the pair are kept. */
+        H_row[k0] = z0;
+        H_row[k1] = z1;
+        if (valid_row) {
+          valid_row[k0] = true;
+          valid_row[k1] = true;
+        }
+        n_written += 2;
+        continue;
+      }
 
-    const int n = estimate_run(lay, layer, &state, prb_start, prb_count, amplitude, rxF, n_sc_grid, H_row, valid_row);
-    if (n < 0) {
-      return -1;
+      /* Two ports on this comb. With the bare sequence, z0 = h0 + h1 and
+      z1 = h0 - h1, so the matched filter of the cover is (z0 + w_f(1) z1) / 2.
+      The 2x2 mixing it inverts is exactly unitary, which is why the residual
+      taper and the cross-layer leak it leaves behind cancel identically once the
+      layers are combined as a power sum, and only bite when a layer is used on
+      its own. */
+      H_row[k0] = (z0 + (float)lay->wf1[layer] * z1) * 0.5f;
+      if (valid_row) {
+        valid_row[k0] = true;
+      }
+      n_written++;
     }
-    n_written += n;
-    prb_count = 0;
   }
-
-  if (prb_count > 0) {
-    const int n = estimate_run(lay, layer, &state, prb_start, prb_count, amplitude, rxF, n_sc_grid, H_row, valid_row);
-    if (n < 0) {
-      return -1;
-    }
-    n_written += n;
-  }
-
   return n_written;
 }
