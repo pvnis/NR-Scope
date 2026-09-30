@@ -58,6 +58,19 @@ def main():
     print(f"  layers: " + ", ".join(f"{k} ({100 * n / len(busy):.0f}%)" for k, n in Counter(r["nof_layers"] for r in busy).most_common()) +
           f"; MCS median {statistics.median(int(r['dci_mcs']) for r in busy):.0f}; PDSCH symbols: " +
           ", ".join(f"{k} ({100 * n / len(busy):.0f}%)" for k, n in Counter(r["time_length"] for r in busy).most_common(2)))
+    # DM-RS pattern: configuration type (comb), CDM groups without data, symbols
+    def pct(counter, fmt):
+        return ", ".join(f"{fmt(k)} ({100 * v / len(busy):.1f}%)" for k, v in counter.most_common())
+    comb = {"1": "type 1 = comb-2 (every other subcarrier, 6 RE/PRB)",
+            "2": "type 2 = 2 adjacent subcarriers per CDM group (4 RE/PRB)"}
+    print("  DM-RS type: " + pct(Counter(r["dmrs_type"] for r in busy), lambda k: comb.get(k, f"type {k}")))
+    cdm = {"1": "1 (other comb carries data)", "2": "2 (other comb left empty)", "3": "3 (type 2 only)"}
+    print("  CDM groups without data: " + pct(Counter(r["nof_dmrs_cdm_groups"] for r in busy), lambda k: cdm.get(k, k)))
+    if busy[0].get("dmrs_symbols") is not None:
+        print("  DM-RS symbols: " + pct(Counter(r["dmrs_symbols"] for r in busy if r["dmrs_symbols"]), lambda k: "{" + k + "}"))
+    print("  DM-RS additional positions: " + pct(Counter(r["dmrs_add_pos"] for r in busy), lambda k: f"pos{k}") +
+          "; length: " + pct(Counter(r["dmrs_len"] for r in busy), str))
+
     # What that means for sensing: the DM-RS of a grant only sees the grant's bandwidth
     scs_hz = 30e3
     bw = statistics.median(prb) * 12 * scs_hz
