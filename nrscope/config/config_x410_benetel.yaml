@@ -66,7 +66,7 @@ log_config:
   # Debug: every PDCCH candidate tried for a known RNTI, with its DM-RS EPRE and
   # correlation and the gate it stopped at, to PDCCH/. Tens of thousands of rows
   # a second: for short diagnostic runs only.
-  record_pdcch_candidates: true
+  record_pdcch_candidates: false
 
   # gargage
   local_log: true

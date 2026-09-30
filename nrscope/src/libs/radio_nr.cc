@@ -1042,6 +1042,23 @@ int Radio::DecodeAndProcess()
       for (uint32_t a = 0; a < nof_antennas; a++) {
         srsran_vec_cf_copy(rx_buffer[a], rx_buffer[a] + consume_off, slot_sz);
       }
+      /* Receive level of chain 0, published once a second (2000 slots) */
+      {
+        static float    level_peak  = 0;
+        static double   level_power = 0;
+        static uint32_t level_slots = 0;
+        const uint32_t  i_max       = srsran_vec_max_abs_ci(rx_buffer[0], slot_sz);
+        level_peak                  = std::max(level_peak, std::abs(std::complex<float>(rx_buffer[0][i_max])));
+        level_power += srsran_vec_avg_power_cf(rx_buffer[0], slot_sz);
+        if (++level_slots == 2000) {
+          NRScopeTask::rx_peak_dbfs.store(20.0f * log10f(level_peak + 1e-12f), std::memory_order_relaxed);
+          NRScopeTask::rx_mean_dbfs.store(10.0f * log10f((float)(level_power / level_slots) + 1e-12f),
+                                          std::memory_order_relaxed);
+          level_peak  = 0;
+          level_power = 0;
+          level_slots = 0;
+        }
+      }
 
       // std::cout << "decode slot: " << (int) slot.idx << "; current_consume_ptr: "
       //   << rx_buffer + (first_time ? 0 :

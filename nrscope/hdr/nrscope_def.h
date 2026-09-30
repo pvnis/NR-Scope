@@ -9,6 +9,7 @@
 #include <assert.h>
 #include <cmath>
 #include <complex>
+#include <atomic>
 #include <condition_variable>
 #include <vector>
 #include <iostream>
@@ -457,6 +458,12 @@ extern std::mutex              queue_lock;
 /* Signalled by a worker after it pushes into global_slot_results, so the
   scheduler's result loop can sleep instead of spinning on queue_lock. */
 extern std::condition_variable queue_cv;
+
+/* Receive level of chain 0 over the last second, in dB relative to the ADC's
+  full scale (UHD fc32: 1.0), published by the consumer thread for the status
+  line. A peak near 0 dBFS means the front end clips: raise no gain past that. */
+extern std::atomic<float> rx_peak_dbfs;
+extern std::atomic<float> rx_mean_dbfs;
 extern std::mutex              slot_data_lock;
 extern std::mutex              task_scheduler_lock;
 extern std::mutex              worker_locks[128];

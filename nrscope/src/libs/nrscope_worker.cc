@@ -46,6 +46,8 @@ static bool slot_is_uplink_only(const WorkState& st, uint32_t sfn, uint32_t slot
 std::vector<SlotResult> global_slot_results;
 std::mutex              queue_lock;
 std::condition_variable queue_cv;
+std::atomic<float>      rx_peak_dbfs{-INFINITY};
+std::atomic<float>      rx_mean_dbfs{-INFINITY};
 std::mutex              task_scheduler_lock;
 std::mutex              slot_data_lock;
 std::mutex              worker_locks[128];
