@@ -490,8 +490,11 @@ def main():
 
         # --- DM-RS check on the received grid (dmrs_check.h) ------------------
         # Coherence of the pilots NR-Scope regenerates, against two wrong
-        # hypotheses that must stay low. A grant passes when its coherence
-        # clearly beats both controls.
+        # hypotheses that must stay low. A grant passes when its coherence is
+        # high and clearly above both controls. The margin is absolute, not a
+        # ratio: on a 2-PRB grant a control is a random sum of ~10 pilot pairs,
+        # about 0.28 on average and now and then 0.5-0.6, so a ratio would fail
+        # grants whose pilots are perfect.
         chk = [n["chk"] for n in n_dl if "chk" in n]
         if chk:
             def pct(xs, p):
@@ -499,9 +502,9 @@ def main():
                 return xs[min(len(xs) - 1, int(p / 100 * len(xs)))]
             coh = [c["coh"] for c in chk]
             ctl = [max(c["data"], c["nid"]) for c in chk]
-            ok = [c for c in chk if c["coh"] >= 0.5 and c["coh"] >= 2 * max(c["data"], c["nid"])]
+            ok = [c for c in chk if c["coh"] >= 0.5 and c["coh"] - max(c["data"], c["nid"]) >= 0.25]
             print(f"DM-RS check  : {len(ok)} / {len(chk)} grants pass = {fmt_pct(len(ok), len(chk))}"
-                  f"  (coherence >= 0.5 and >= 2x both controls)")
+                  f"  (coherence >= 0.5 and >= 0.25 above both controls)")
             print(f"  coherence of the claimed pilots: median {statistics.median(coh):.3f},"
                   f" 5th pct {pct(coh, 5):.3f}, min {min(coh):.3f}")
             print(f"  controls (data symbols, wrong N_ID), worse of the two: median {statistics.median(ctl):.3f},"
