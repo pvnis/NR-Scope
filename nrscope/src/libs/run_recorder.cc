@@ -8,6 +8,9 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+extern "C" {
+#include "srsran/phy/ch_estimation/dmrs_sch.h"
+}
 #include "srsran/phy/common/phy_common.h"
 
 #ifndef NRSCOPE_ROOT_DIR
@@ -52,7 +55,8 @@ const char* DCI_HEADER =
     "freq_alloc,time_alloc,dci_mcs,dci_ndi,dci_rv,harq_id,tpc,ports,dmrs_id,srs_request,"
     "k,mapping,time_start,time_length,prbs,nof_prb,nof_layers,"
     "dmrs_type,dmrs_add_pos,dmrs_len,dmrs_typeA_pos,nof_dmrs_cdm_groups,n_scid,beta_dmrs,"
-    "modulation,mcs,tbs,code_rate,rv,ndi,nof_re,nof_bits,mcs_table,xoverhead,ca_variant,dci_bits,dci\n";
+    "modulation,mcs,tbs,code_rate,rv,ndi,nof_re,nof_bits,mcs_table,xoverhead,ca_variant,dci_bits,dci,"
+    "dmrs_symbols,dmrs_scrambling_id\n";
 
 double now_s()
 {
@@ -451,6 +455,27 @@ void record_dci(uint32_t                   pci,
   row += dci_bits;
   row += ',';
   append_quoted(row, trimmed(dci_str).c_str());
+  row += ',';
+  /* What regenerating this grant's PDSCH DM-RS would use, computed with the
+    same srsRAN functions: the DM-RS symbols of the slot (space separated) and
+    N_ID, the scrambling ID seeding the sequence (scramblingID0/1 when RRC
+    configures one for this n_scid, the PCI otherwise; TS 38.211 7.4.1.1.1). */
+  if (sch_cfg != nullptr) {
+    uint32_t  symbols[SRSRAN_DMRS_SCH_MAX_SYMBOLS] = {};
+    const int nof_symbols = srsran_dmrs_sch_get_symbols_idx(&sch_cfg->dmrs, &sch_cfg->grant, symbols);
+    for (int i = 0; i < nof_symbols; i++) {
+      row += (i ? " " : "") + std::to_string(symbols[i]);
+    }
+    uint32_t n_id = pci;
+    if (!sch_cfg->grant.n_scid && sch_cfg->dmrs.scrambling_id0_present) {
+      n_id = sch_cfg->dmrs.scrambling_id0;
+    } else if (sch_cfg->grant.n_scid && sch_cfg->dmrs.scrambling_id1_present) {
+      n_id = sch_cfg->dmrs.scrambling_id1;
+    }
+    row += ',' + std::to_string(n_id);
+  } else {
+    row += ',';
+  }
   row += '\n';
 
   std::lock_guard<std::mutex> lock(dci_mtx);

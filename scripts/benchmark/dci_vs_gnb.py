@@ -77,7 +77,8 @@ RE_PDCCH = re.compile(RE_TS + r" \[PHY\s*\] \[\w\] " + RE_SLOT +
                       r" PDCCH: rnti=0x([0-9a-fA-F]+) ss_id=(\d+) format=(\d_\d) cce=(\d+) al=(\d+)")
 RE_PDSCH = re.compile(RE_TS + r" \[PHY\s*\] \[\w\] " + RE_SLOT +
                       r" PDSCH: rnti=0x([0-9a-fA-F]+) h_id=(\d+) k1=(\d+) prb=\[(\d+), (\d+)\) "
-                      r"symb=\[(\d+), (\d+)\) mod=(\w+) rv=(\d+) bg=\w+ tbs=(\d+)")
+                      r"symb=\[(\d+), (\d+)\) mod=(\w+) rv=(\d+) bg=\w+ "
+                      r"(?:dmrs_type=(\d) dmrs_mask=\{([\d, ]*)\} n_scidid=(\d+) n_scid=(\w+) ncgwd=(\d+) )?tbs=(\d+)")
 RE_SCHED = re.compile(RE_TS + r" \[SCHED\s*\] \[\w\] " + RE_SLOT + r" Slot decisions")
 RE_SCHED_DL = re.compile(r"DL: ue=\d+ c-rnti=0x([0-9a-fA-F]+) h_id=(\d+) ss_id=(\d+) rb=\[(\d+)\.\.(\d+)\) "
                          r"k1=\d+ newtx=(\w+) rv=(\d+) tbs=(\d+) ri=(\d+)")
@@ -101,9 +102,13 @@ def parse_gnb(path):
             elif "] PDSCH: " in line:
                 m = RE_PDSCH.match(line)
                 if m:
-                    pdsch.append(dict(t=gnb_time(m[1]), sfn=int(m[2]), slot=int(m[3]), rnti=int(m[4], 16),
-                                      h_id=int(m[5]), prb=(int(m[7]), int(m[8])), symb=(int(m[9]), int(m[10])),
-                                      mod=m[11], rv=int(m[12]), tbs_bits=8 * int(m[13])))
+                    p = dict(t=gnb_time(m[1]), sfn=int(m[2]), slot=int(m[3]), rnti=int(m[4], 16),
+                             h_id=int(m[5]), prb=(int(m[7]), int(m[8])), symb=(int(m[9]), int(m[10])),
+                             mod=m[11], rv=int(m[12]), tbs_bits=8 * int(m[18]))
+                    if m[13]:  # the gNB logs DM-RS parameters (OCUDU with the dmrs-pdsch logs on)
+                        p.update(dmrs_type=int(m[13]), dmrs_symb=tuple(int(x) for x in m[14].split(",") if x.strip()),
+                                 n_scid=int(m[16] == "true"), dmrs_nid=int(m[15]), cdm_groups=int(m[17]))
+                    pdsch.append(p)
             elif "Slot decisions" in line:
                 m = RE_SCHED.match(line)
                 if m:
@@ -117,6 +122,26 @@ def parse_gnb(path):
     return pdcch, pdsch, sched, rrc
 
 
+def dmrs_symbols_type_a(typea_pos, add_pos, dmrs_len, start, length):
+    """PDSCH mapping type A DM-RS symbols from TS 38.211 table 7.4.1.1.2-3
+    (single-symbol DM-RS), for CSVs recorded before NR-Scope wrote its own."""
+    if dmrs_len != "single":
+        return None
+    ld = start + length  # type A: from symbol 0 of the slot to the end of the PDSCH
+    l0 = typea_pos
+    if ld <= 7 or add_pos == 0:
+        extra = ()
+    elif ld <= 9:
+        extra = (7,)
+    elif ld <= 11:
+        extra = (9,) if add_pos == 1 else (6, 9)
+    elif ld == 12:
+        extra = {1: (9,), 2: (6, 9)}.get(add_pos, (5, 8, 11))
+    else:
+        extra = {1: (11,), 2: (7, 11)}.get(add_pos, (5, 8, 11))
+    return (l0,) + extra
+
+
 def parse_nrscope(path):
     rows = []
     with open(path) as f:
@@ -125,7 +150,19 @@ def parse_nrscope(path):
                 continue
             prbs = parse_prbs(r["prbs"])
             ts, tl = int(r["time_start"] or 0), int(r["time_length"] or 0)
-            rows.append(dict(t=float(r["timestamp"]), sfn=int(r["sfn"]), slot=int(r["slot"]), rnti=int(r["rnti"]),
+            dmrs = {}
+            if r.get("dmrs_type"):
+                dmrs["dmrs_type"] = int(r["dmrs_type"])
+                dmrs["n_scid"] = int(r["n_scid"])
+                dmrs["cdm_groups"] = int(r["nof_dmrs_cdm_groups"])
+                if r.get("dmrs_symbols"):
+                    dmrs["dmrs_symb"] = tuple(int(x) for x in r["dmrs_symbols"].split())
+                    dmrs["dmrs_nid"] = int(r["dmrs_scrambling_id"])
+                elif r["mapping"] == "A":
+                    dmrs["dmrs_symb"] = dmrs_symbols_type_a(int(r["dmrs_typeA_pos"]), int(r["dmrs_add_pos"]),
+                                                            r["dmrs_len"], ts, tl)
+                    dmrs["dmrs_symb_derived"] = True
+            rows.append(dict(**dmrs, t=float(r["timestamp"]), sfn=int(r["sfn"]), slot=int(r["slot"]), rnti=int(r["rnti"]),
                              format=r["dci_format"], ss=r["ss_type"], al=int(r["aggregation_level"]),
                              cce=int(r["cce"]), h_id=int(r["harq_id"]), rv=int(r["dci_rv"]), k0=int(r["k"] or 0),
                              prb=prbs, symb=(ts, ts + tl), mod=r["modulation"], tbs_bits=int(r["tbs"] or 0),
@@ -402,7 +439,8 @@ def main():
                 print("  misses by class: " + ", ".join(f"{k} {v}" for k, v in miss_classes.most_common()))
 
         # --- accuracy ------------------------------------------------------
-        fields = ["format", "al", "cce", "h_id", "rv", "prb", "symb", "mod", "tbs_bits", "layers"]
+        fields = ["format", "al", "cce", "h_id", "rv", "prb", "symb", "mod", "tbs_bits", "layers",
+                  "dmrs_type", "dmrs_symb", "n_scid", "dmrs_nid", "cdm_groups"]
         agree = {f: [0, 0] for f in fields}
         examples = defaultdict(list)
         first_bad = {}
@@ -411,12 +449,13 @@ def main():
             truth = {"format": g["format"], "al": g["al"], "cce": g["cce"]}
             if p:
                 truth.update(h_id=p["h_id"], rv=p["rv"], prb=p["prb"], symb=p["symb"], mod=p["mod"], tbs_bits=p["tbs_bits"])
+                truth.update({k: p[k] for k in ("dmrs_type", "dmrs_symb", "n_scid", "dmrs_nid", "cdm_groups") if k in p})
                 ri = ri_at.get((rnti, p["abs"], p["h_id"]))
                 if ri is not None:
                     truth["layers"] = ri
-            got = {f: n[f] for f in fields}
+            got = {f: n.get(f) for f in fields}
             for f in fields:
-                if f not in truth:
+                if f not in truth or got[f] is None:
                     continue
                 agree[f][1] += 1
                 if got[f] == truth[f]:
@@ -433,6 +472,9 @@ def main():
                                     detected=0, gnb_format=g["format"], gnb_al=g["al"], gnb_cce=g["cce"]))
 
         print("field agreement on detected DCIs (NR-Scope vs gNB):")
+        if any(n.get("dmrs_symb_derived") for _, n in matched):
+            print("  (dmrs_symb on NR-Scope's side derived from its recorded DM-RS config: this CSV predates the"
+                  " dmrs_symbols column; dmrs_nid not recorded)")
         for f in fields:
             ok, tot = agree[f]
             line = f"  {f:9s}: {ok:4d} / {tot:4d} = {fmt_pct(ok, tot)}"
