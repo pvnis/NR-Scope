@@ -252,7 +252,7 @@ static int ue_sync_nr_recv(srsran_ue_sync_nr_t* q, cf_t** buffer, srsran_timesta
 
   if (q->next_rf_sample_offset > 0) {
     // Discard a number of samples from RF
-    printf("discard rf samples (next_rf_sample_offset): %u\n", (uint32_t)q->next_rf_sample_offset);
+    // Not printed: with SSB tracking working this happens several times a second
     if (q->recv_callback(q->recv_obj, buffer, (uint32_t)((float)q->next_rf_sample_offset/(float)q->resample_ratio), timestamp) < SRSRAN_SUCCESS) {
       return SRSRAN_ERROR;
     }
@@ -313,6 +313,17 @@ int srsran_ue_sync_nr_zerocopy(srsran_ue_sync_nr_t* q, cf_t** buffer, srsran_ue_
   if (ue_sync_nr_recv(q, buffer, &outcome->timestamp) < SRSRAN_SUCCESS) {
     ERROR("Error receiving baseband");
     return SRSRAN_ERROR;
+  }
+
+  /* Wrap the subframe counter before the FSM runs. sf_idx++ was moved to the
+    end of this function, but the wrap stayed after the FSM, so from the second
+    frame on the FSM saw subframes 1..10 instead of 0..9. SSB tracking only
+    fires on the SSB's subframe (0 here) and so never ran after the initial
+    search: timing drifted with the radio's clock offset until PDCCH decoding
+    failed, about 45 s in on the X410. */
+  if (q->sf_idx >= SRSRAN_NOF_SF_X_FRAME) {
+    q->sfn    = (q->sfn + 1) % 1024;
+    q->sf_idx = 0;
   }
 
   // Run FSM
@@ -424,6 +435,17 @@ int srsran_ue_sync_nr_zerocopy_twinrx_nrscope(srsran_ue_sync_nr_t* q, cf_t** buf
     free(tids);
     free(actual_sf_szs_splitted);
     free(args_structs);
+  }
+
+  /* Wrap the subframe counter before the FSM runs. sf_idx++ was moved to the
+    end of this function, but the wrap stayed after the FSM, so from the second
+    frame on the FSM saw subframes 1..10 instead of 0..9. SSB tracking only
+    fires on the SSB's subframe (0 here) and so never ran after the initial
+    search: timing drifted with the radio's clock offset until PDCCH decoding
+    failed, about 45 s in on the X410. */
+  if (q->sf_idx >= SRSRAN_NOF_SF_X_FRAME) {
+    q->sfn    = (q->sfn + 1) % 1024;
+    q->sf_idx = 0;
   }
 
   // Run FSM
@@ -561,6 +583,17 @@ int srsran_ue_sync_nr_zerocopy_nrscope(srsran_ue_sync_nr_t* q,
   if (ue_sync_nr_recv_nrscope(q, buffer, &outcome->timestamp, uplink_buffer) < SRSRAN_SUCCESS) {
     ERROR("Error receiving baseband");
     return SRSRAN_ERROR;
+  }
+
+  /* Wrap the subframe counter before the FSM runs. sf_idx++ was moved to the
+    end of this function, but the wrap stayed after the FSM, so from the second
+    frame on the FSM saw subframes 1..10 instead of 0..9. SSB tracking only
+    fires on the SSB's subframe (0 here) and so never ran after the initial
+    search: timing drifted with the radio's clock offset until PDCCH decoding
+    failed, about 45 s in on the X410. */
+  if (q->sf_idx >= SRSRAN_NOF_SF_X_FRAME) {
+    q->sfn    = (q->sfn + 1) % 1024;
+    q->sf_idx = 0;
   }
 
   // Run FSM

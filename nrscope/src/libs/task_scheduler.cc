@@ -502,7 +502,11 @@ void TaskSchedulerNRScope::PrintStatus(const SlotResult& now_result, double now)
   if (NRSCOPE_SEARCH_UL_DCI) {
     printf(", %.0f UL DCI/s", status_nof_ul_dci / elapsed);
   }
-  printf(", %zu RNTI(s)%s, %lu slot(s) dropped so far\n",
+  /* delay_us is the SSB timing error ue_sync last measured and corrected; it
+    should hover around zero. A value stuck at one number means tracking is not
+    running and the capture timing is drifting with the radio's clock. */
+  printf(", SSB timing %+.3f us, %zu RNTI(s)%s, %lu slot(s) dropped so far\n",
+         now_result.outcome.delay_us,
          task_scheduler_state.known_rntis.size(),
          rntis.c_str(),
          (unsigned long)nof_dropped_slots.load(std::memory_order_relaxed));

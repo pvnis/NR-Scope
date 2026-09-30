@@ -152,6 +152,8 @@ def parse_pdcch(path, keep):
     rows = []
     with open(path) as f:
         for r in csv.DictReader(f):
+            if r.get("stage") not in STAGE_RANK:
+                continue  # the last row is usually cut short when the run is killed
             key = (int(r["rnti"]), int(r["sfn"]), int(r["slot"]))
             if key not in keep:
                 continue
