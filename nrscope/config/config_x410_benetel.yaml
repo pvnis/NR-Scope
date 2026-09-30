@@ -2,6 +2,7 @@ nof_usrp_dev: 1
 usrp_setting_0:
   device_name: UHD
   ssb_freq: 3408960000 # SS/PBCH block, 41.04 MHz below the carrier centre on this cell
+  
   # Where the radio tunes. The 273-PRB carrier spans 3400.86 - 3499.14 MHz, so at
   # 122.88 Msps only its centre captures all of it; tuned to the SSB, PRBs 193 and
   # up were never captured. Must be a whole number of 30 kHz from ssb_freq. NR-Scope
@@ -11,7 +12,7 @@ usrp_setting_0:
   pci: 1
   rf_args: "type=x4xx,master_clock_rate=245760000,recv_buff_size=1004857600,addr=192.168.20.2,mgmt_addr=192.168.118.190,use_dpdk=1234,num_send_frames=512"  
   
-  rx_gain: 45 # for x310 CBX, max rx gain is 31.5, for b210, it's around 80, for x310 TwinRX, max rx gain is 90
+  rx_gain: 45 
   min_rx_gain: 0
   max_rx_gain: 45
   srate_hz: 122880000 # the sampling rate of USRP, integer division of 200MHz for TwinRX, and 5G sampling rate for CBX: 11520000 or 23040000
@@ -26,12 +27,14 @@ usrp_setting_0:
   # chains will not be phase coherent and the angle estimate is meaningless.
   # Costs one slot of IQ per chain in every queued slot, see NRSCOPE_SLOT_QUEUE_DEPTH.
   nof_antennas: 1
+
   scs_index: 1 #(0: 15kHz, 1: 30kHz, ..., the u in standard)
   rf_log_level: "info"
   nof_rnti_worker_groups: 1 # number of of threads for DCI decoding, each will divide the UEs into small groups
   nof_bwps: 1 # number of BWP of the cell
   nof_workers: 8 # using worker pool to asynchronously process the slot data
   cpu_affinity: true # pin the threads below; false leaves every thread to the scheduler
+  
   # sens7 (Core Ultra 7 265): P-cores 0-7, E-cores 8-19. CPUs 1-2 are isolated for
   # the DPDK lcores (uhd.conf) and CPU 0 takes the IRQs, so the serial stages get
   # P-cores 3-5 and the workers, with the RACH/DCI threads they spawn, share 6-19.
@@ -39,23 +42,33 @@ usrp_setting_0:
   consumer_cpu: 4
   dispatcher_cpu: 5
   results_cpu: 0
+  
   worker_cpus: [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+  
   disable_cfo: true # skip CFO compensation in sync; keep false on the bladeRF, its clock drifts too much
   # Seconds without a decoded DCI before a known RNTI stops being searched. At 5
   # a few missed DCIs of a 1 Hz ping were enough to drop a UE that was still
   # active; a released UE is simply searched in vain until this runs out.
+  
+  # Time in seconds before removing a RNTI from the list if its idle
   rnti_expiry_s: 30
+  
   agc: false # fixed rx_gain; AGC changes the gain from the real-time capture thread and breaks slot-to-slot amplitude for sensing
 
   log_name: "logs_nrscope_x410_benetel.csv"
   google_dataset_id: "ngscope5g_dci_log_wanhr"
 
-log_config:
+log_config: 
+
+  # Record MSG4, DCIs in csv files
   recording_mode: true
+
   # Debug: every PDCCH candidate tried for a known RNTI, with its DM-RS EPRE and
   # correlation and the gate it stopped at, to PDCCH/. Tens of thousands of rows
   # a second: for short diagnostic runs only.
   record_pdcch_candidates: true
+
+  # gargage
   local_log: true
   push_to_google: false
   google_service_account_credential: "/home/wanhr/Downloads/nsf-2223556-222187-02b924918c95.json"
