@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "nrscope/hdr/sensing/nrscope_sensing.h"
 #include "srsran/common/band_helper.h"
 #include "srsran/common/crash_handler.h"
 #include "srsran/common/string_helpers.h"
@@ -279,6 +280,43 @@ int load_config(std::vector<Radio>& radios, std::string file_name)
                     config_yaml[setting_name]["recording_mode"].as<bool>());
   RunRecorder::enable_pdcch_candidates(config_yaml[setting_name]["record_pdcch_candidates"] &&
                                        config_yaml[setting_name]["record_pdcch_candidates"].as<bool>());
+
+  /* sensing: block, OAI's --sensing-* options under the same names without the
+  prefix (dashes as underscores). Off unless enabled; see nrscope_sensing.h. */
+  nrscope_sensing_default_args(&nrscope_sensing_args);
+  snprintf(nrscope_sensing_args.dump, sizeof(nrscope_sensing_args.dump), "%s/sensing/map2d.csv", NRSCOPE_ROOT_DIR);
+  if (config_yaml["sensing"]) {
+    const YAML::Node sn = config_yaml["sensing"];
+    auto flag = [&sn](const char* key, bool* v) {
+      if (sn[key]) {
+        *v = sn[key].as<bool>();
+      }
+    };
+    flag("enable", &nrscope_sensing_args.enable);
+    if (sn["symbols"]) {
+      nrscope_sensing_args.symbols = sn["symbols"].as<int>();
+      // the upper end, NR_SENSING_HISTORY_DEPTH, is checked where the histories are made
+      if (nrscope_sensing_args.symbols < 32) { // NR_SENSING_MIN_SNAPSHOTS
+        std::cerr << "sensing: symbols must be at least 32, got " << nrscope_sensing_args.symbols << std::endl;
+        exit(EXIT_FAILURE);
+      }
+    }
+    if (sn["max_speed"]) {
+      nrscope_sensing_args.max_speed_ms = sn["max_speed"].as<double>();
+    }
+    if (sn["dump"]) {
+      snprintf(nrscope_sensing_args.dump, sizeof(nrscope_sensing_args.dump), "%s", sn["dump"].as<std::string>().c_str());
+    }
+    flag("clutter_removal", &nrscope_sensing_args.clutter_removal);
+    flag("clutter_kernel", &nrscope_sensing_args.clutter_kernel);
+    flag("clutter_compare", &nrscope_sensing_args.clutter_compare);
+    flag("antenna_avg", &nrscope_sensing_args.antenna_avg);
+    flag("layer_avg", &nrscope_sensing_args.layer_avg);
+    flag("random_drop", &nrscope_sensing_args.random_drop);
+    flag("tdd_detect", &nrscope_sensing_args.tdd_detect);
+    flag("music", &nrscope_sensing_args.music);
+    flag("compensate_window_shifts", &nrscope_sensing_args.compensate_window_shifts);
+  }
 
   if (config_yaml[setting_name]["push_to_google"]) {
     for (int i = 0; i < nof_usrp; i++) {

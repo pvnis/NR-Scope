@@ -38,13 +38,17 @@
 extern "C" {
 #endif
 
-/* srsRAN offers DEBUG, INFO and ERROR but no warning level. The pipeline uses
-warnings for configurations it does not model and skips rather than estimates
-wrongly, which is neither an error nor mere information: the reader needs to see
-it, but it does not mean the run is broken. */
-#ifndef WARNING
-#define WARNING(_fmt, ...) fprintf(stderr, "[WARNING]: " _fmt "\n", ##__VA_ARGS__)
-#endif
+/* OAI's logging, kept so the pipeline prints exactly what it printed in OAI, in
+OAI's default format: "[NR_PHY] " then the message, errors in red and warnings in
+orange. srsRAN's INFO would hide the informational lines unless the whole receiver
+ran verbose, and its format differs. LOG_D is compiled out, as OAI's default level
+(info) drops it. The component argument is kept only so the calls read as in OAI. */
+#define NR_PHY "NR_PHY"
+void nr_sensing_log(const char* colour, const char* comp, const char* fmt, ...) __attribute__((format(printf, 3, 4)));
+#define LOG_E(c, ...) nr_sensing_log("\033[1;31m", c, __VA_ARGS__)
+#define LOG_W(c, ...) nr_sensing_log("\033[93m", c, __VA_ARGS__)
+#define LOG_I(c, ...) nr_sensing_log("", c, __VA_ARGS__)
+#define LOG_D(c, ...) ((void)0)
 
 /* Allocation that cannot fail silently. The pipeline allocates its history
 rings and map buffers once per stream and has no path to recover from running
@@ -53,7 +57,7 @@ out of memory mid-slot, so it stops instead of returning a partial map. */
   ({                                                                                                                   \
     void* ptr_ = malloc(SIZE);                                                                                         \
     if (ptr_ == NULL) {                                                                                                \
-      ERROR("sensing: out of memory allocating %zu bytes", (size_t)(SIZE));                                            \
+      LOG_E(NR_PHY, "sensing: out of memory allocating %zu bytes\n", (size_t)(SIZE));                                            \
       abort();                                                                                                         \
     }                                                                                                                  \
     ptr_;                                                                                                              \
@@ -63,7 +67,7 @@ out of memory mid-slot, so it stops instead of returning a partial map. */
   ({                                                                                                                   \
     void* ptr_ = calloc((N), (SIZE));                                                                                  \
     if (ptr_ == NULL) {                                                                                                \
-      ERROR("sensing: out of memory allocating %zu x %zu bytes", (size_t)(N), (size_t)(SIZE));                         \
+      LOG_E(NR_PHY, "sensing: out of memory allocating %zu x %zu bytes\n", (size_t)(N), (size_t)(SIZE));                         \
       abort();                                                                                                         \
     }                                                                                                                  \
     ptr_;                                                                                                              \
@@ -75,7 +79,7 @@ that does not fit its transform. */
 #define AssertFatal(COND, ...)                                                                                         \
   do {                                                                                                                 \
     if (!(COND)) {                                                                                                     \
-      ERROR(__VA_ARGS__);                                                                                              \
+      LOG_E(NR_PHY, __VA_ARGS__);                                                                                              \
       abort();                                                                                                         \
     }                                                                                                                  \
   } while (0)

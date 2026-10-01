@@ -279,7 +279,7 @@ void nr_tdd_periodogram(const nr_tdd_obs_t *obs, nr_tdd_cmap_t *out)
   if (wr == NULL || wi == NULL) {
     free(wr);
     free(wi);
-    ERROR("tdd detect: cannot allocate the transform kernel\n");
+    LOG_E(NR_PHY, "tdd detect: cannot allocate the transform kernel\n");
     return;
   }
 
@@ -341,7 +341,7 @@ int nr_tdd_cfar(const nr_tdd_cmap_t *map,
   const size_t n_cells = (size_t)map->n_bins * map->n_freq;
   float *power = malloc(n_cells * sizeof(*power));
   if (power == NULL) {
-    ERROR("tdd detect: cannot allocate the CFAR power map\n");
+    LOG_E(NR_PHY, "tdd detect: cannot allocate the CFAR power map\n");
     return 0;
   }
   for (size_t i = 0; i < n_cells; i++)
@@ -531,7 +531,7 @@ void nr_tdd_focus(const nr_tdd_obs_t *obs, const nr_tdd_cfg_t *cfg, int bin0, in
     wre = pr;
     wim = pi;
   } else {
-    ERROR("tdd detect: cannot allocate the filtered tone, amplitude left unfiltered\n");
+    LOG_E(NR_PHY, "tdd detect: cannot allocate the filtered tone, amplitude left unfiltered\n");
   }
   free(d_re);
   free(d_im);
@@ -569,7 +569,7 @@ void nr_tdd_psf_subtract(const nr_tdd_obs_t *obs, const nr_tdd_target_t *target,
     free(di);
     free(tone_re);
     free(tone_im);
-    ERROR("tdd detect: cannot allocate the PSF axes\n");
+    LOG_E(NR_PHY, "tdd detect: cannot allocate the PSF axes\n");
     return;
   }
 
@@ -686,7 +686,7 @@ bool nr_tdd_sidelobe_check(const nr_tdd_cmap_t *before,
   conservative answer, and it is also a configuration error worth seeing, since a
   grid narrower than 1/T_TDD makes this whole method inoperative. */
   if (n_tested == 0) {
-    WARNING(
+    LOG_W(NR_PHY,
           "tdd detect: no replica of the peak at %.1f Hz lies inside the +-%.1f Hz grid, "
           "widen f_max to at least %.1f Hz\n",
           target->f_hz,

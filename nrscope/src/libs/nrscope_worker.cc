@@ -2,6 +2,8 @@
 #include <chrono>
 #include <semaphore>
 
+extern "C" int nr_sensing_tdd_period_slots; // nrscope/hdr/sensing/nr_ue_sensing.h
+
 namespace NRScopeTask {
 
 /* True if every symbol of this slot is uplink in the cell's TDD pattern (SIB1
@@ -34,6 +36,8 @@ static bool slot_is_uplink_only(const WorkState& st, uint32_t sfn, uint32_t slot
   if (p1 == 0 || (tdd.pattern2_present && p2 == 0)) {
     return false;
   }
+  // The sensing's TDD detector needs the same period (NR_SENSING_TDD_PERIOD_SLOTS)
+  nr_sensing_tdd_period_slots = (int)(p1 + p2);
   // Uplink-only slots close each pattern; patterns repeat from the start of the frame
   uint32_t n = (sfn * SRSRAN_NSLOTS_PER_FRAME_NR(st.args_t.ssb_scs) + slot_idx) % (p1 + p2);
   if (n < p1) {
@@ -326,6 +330,7 @@ void NRScopeWorker::Run()
     slot_result.outcome     = outcome;
     slot_result.sf_round    = sf_round;
     worker_state.sfn        = outcome.sfn;
+    worker_state.window_shift_samples = outcome.window_shift_total;
 
     /* Put the initialization delay into the worker's thread */
     if (!worker_state.sib1_inited) {

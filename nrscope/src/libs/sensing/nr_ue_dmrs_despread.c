@@ -17,7 +17,7 @@ What the reader needs is the reason, once. */
     static bool warned_ = false; \
     if (!warned_) {              \
       warned_ = true;            \
-      WARNING(__VA_ARGS__);      \
+      LOG_W(NR_PHY, __VA_ARGS__);      \
     }                            \
   } while (0)
 
@@ -66,7 +66,7 @@ bool nr_ue_dmrs_layout(uint16_t dmrs_ports, srsran_dmrs_sch_type_t config_type, 
         continue;
       }
       if (out->n_ports == NR_DMRS_SENSING_MAX_PORTS) {
-        WARN_ONCE("sensing: DM-RS port bitmap 0x%x holds more than %d ports, not modelled",
+        WARN_ONCE("sensing: DM-RS port bitmap 0x%x holds more than %d ports, not modelled\n",
                   dmrs_ports,
                   NR_DMRS_SENSING_MAX_PORTS);
         return false;
@@ -88,7 +88,7 @@ bool nr_ue_dmrs_layout(uint16_t dmrs_ports, srsran_dmrs_sch_type_t config_type, 
     estimated here. */
     if ((out->port[0] & 1) != 0 || out->port[1] != out->port[0] + 1) {
       WARN_ONCE("sensing: DM-RS ports %d and %d share comb %d but are not a w_f pair, "
-                "double-symbol DM-RS is not handled",
+                "double-symbol DM-RS is not handled\n",
                 out->port[0],
                 out->port[1],
                 out->delta[0]);
@@ -108,7 +108,7 @@ bool nr_ue_dmrs_layout(uint16_t dmrs_ports, srsran_dmrs_sch_type_t config_type, 
     out->k_step = 2;
   } else {
     WARN_ONCE("sensing: a single type 2 DM-RS port gives REs at 0,1,6,7 of the PRB, "
-              "which is not a uniform lattice; allocation skipped");
+              "which is not a uniform lattice; allocation skipped\n");
     return false;
   }
 
@@ -169,7 +169,7 @@ int nr_ue_dmrs_estimate_symbol(const nr_dmrs_layout_t*      lay,
   }
   const uint32_t n_seq = ((uint32_t)crb_last + 1 - place->reference_crb) * (uint32_t)lay->n_pilot_rb;
   if (n_seq > NRSCOPE_DMRS_MAX_PILOTS) {
-    ERROR("sensing: DM-RS sequence of %u pilots exceeds the generator's %d", n_seq, NRSCOPE_DMRS_MAX_PILOTS);
+    LOG_E(NR_PHY, "sensing: DM-RS sequence of %u pilots exceeds the generator's %d\n", n_seq, NRSCOPE_DMRS_MAX_PILOTS);
     return -1;
   }
   cf_t pilots[NRSCOPE_DMRS_MAX_PILOTS];

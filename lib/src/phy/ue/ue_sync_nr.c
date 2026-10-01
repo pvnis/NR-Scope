@@ -52,6 +52,7 @@ int srsran_ue_sync_nr_init(srsran_ue_sync_nr_t* q, const srsran_ue_sync_nr_args_
   q->nof_rx_channels = args->nof_rx_channels == 0 ? 1 : args->nof_rx_channels;
   q->disable_cfo     = args->disable_cfo;
   q->cfo_alpha       = isnormal(args->cfo_alpha) ? args->cfo_alpha : UE_SYNC_NR_DEFAULT_CFO_ALPHA;
+  q->window_shift_total = 0;
 
   // Initialise SSB
   srsran_ssb_args_t ssb_args = {};
@@ -261,6 +262,10 @@ static int ue_sync_nr_recv(srsran_ue_sync_nr_t* q, cf_t** buffer, srsran_timesta
     buffer_offset = (uint32_t)(-q->next_rf_sample_offset);
     nof_samples   = (uint32_t)(q->sf_sz + q->next_rf_sample_offset);
   }
+  /* Every sample dropped moves the window one sample later on the air, every
+    zero inserted one earlier. Paths in a delay profile move the other way by the
+    same count, which the sensing path undoes exactly rather than estimating. */
+  q->window_shift_total += q->next_rf_sample_offset;
   q->next_rf_sample_offset = 0;
 
   // Select buffer offsets
@@ -361,6 +366,7 @@ int srsran_ue_sync_nr_zerocopy(srsran_ue_sync_nr_t* q, cf_t** buffer, srsran_ue_
   outcome->sfn      = q->sfn;
   outcome->cfo_hz   = q->cfo_hz;
   outcome->delay_us = q->avg_delay_us;
+  outcome->window_shift_total = q->window_shift_total;
 
   // Increment subframe counter
   q->sf_idx++;
@@ -493,6 +499,7 @@ int srsran_ue_sync_nr_zerocopy_twinrx_nrscope(srsran_ue_sync_nr_t* q, cf_t** buf
   outcome->sfn      = q->sfn;
   outcome->cfo_hz   = q->cfo_hz;
   outcome->delay_us = q->avg_delay_us;
+  outcome->window_shift_total = q->window_shift_total;
 
   // Increment subframe counter
   q->sf_idx++;
@@ -524,6 +531,10 @@ static int ue_sync_nr_recv_nrscope(srsran_ue_sync_nr_t* q,
     buffer_offset = (uint32_t)(-q->next_rf_sample_offset);
     nof_samples   = (uint32_t)(q->sf_sz + q->next_rf_sample_offset);
   }
+  /* Every sample dropped moves the window one sample later on the air, every
+    zero inserted one earlier. Paths in a delay profile move the other way by the
+    same count, which the sensing path undoes exactly rather than estimating. */
+  q->window_shift_total += q->next_rf_sample_offset;
   q->next_rf_sample_offset = 0;
 
   // Select buffer offsets
@@ -631,6 +642,7 @@ int srsran_ue_sync_nr_zerocopy_nrscope(srsran_ue_sync_nr_t* q,
   outcome->sfn      = q->sfn;
   outcome->cfo_hz   = q->cfo_hz;
   outcome->delay_us = q->avg_delay_us;
+  outcome->window_shift_total = q->window_shift_total;
 
   // Increment subframe counter
   q->sf_idx++;

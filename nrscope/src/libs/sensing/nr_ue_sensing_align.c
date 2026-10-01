@@ -271,7 +271,7 @@ bool nr_ue_sensing_align_symbol(uint64_t t_sample,
       s->delay = res.delay_bins;
       s->n_bad = 0;
     } else if (++s->n_bad >= NR_SENSING_ALIGN_RESET_AFTER) {
-      WARNING(
+      LOG_W(NR_PHY,
             "sensing: static scene no longer matches its reference (corr %.2f) for %d symbols, "
             "reference restarted (ports 0x%x layer %d)\n",
             res.corr,
@@ -324,6 +324,6 @@ int nr_ue_sensing_group_by_grant(const nr_sensing_history_t *hist, int idx[], in
     if (s->n_pilots == n_keep && s->k_first == k_keep)
       idx[kept++] = idx[i];
   }
-  DEBUG("sensing: grouped by grant, %d of %d snapshots kept (%d pilots from k=%d)\n", kept, n, n_keep, k_keep);
+  LOG_D(NR_PHY, "sensing: grouped by grant, %d of %d snapshots kept (%d pilots from k=%d)\n", kept, n, n_keep, k_keep);
   return kept;
 }

@@ -58,7 +58,7 @@ usrp_setting_0:
   # Time in seconds before removing a RNTI from the list if its idle
   rnti_expiry_s: 30
   
-  agc: false # fixed rx_gain; AGC changes the gain from the real-time capture thread and breaks slot-to-slot amplitude for sensing
+  agc: false # fixed rx_gain. AGC changes the gain from the real-time capture thread and breaks slot-to-slot amplitude for sensing
 
   log_name: "logs_nrscope_x410_benetel.csv"
   google_dataset_id: "ngscope5g_dci_log_wanhr"
@@ -66,7 +66,7 @@ usrp_setting_0:
 log_config: 
 
   # Record MSG4, DCIs in csv files
-  recording_mode: true
+  recording_mode: false
 
   # Debug: every PDCCH candidate tried for a known RNTI, with its DM-RS EPRE and
   # correlation and the gate it stopped at, to PDCCH/. Tens of thousands of rows
@@ -79,3 +79,20 @@ log_config:
   google_service_account_credential: "/home/wanhr/Downloads/nsf-2223556-222187-02b924918c95.json"
   enable_gui: false
 
+sensing:
+  enable: true
+  dump: "/tmp/map2d.csv"
+  symbols: 2048            # cost cap only, not the trigger: a map is built once its
+                           # observation window is complete (NR_SENSING_TARGET_DV_MS
+                           # sets it: 0.145 s at 0.30 m/s, about 640 symbols here).
+                           # At most NR_SENSING_HISTORY_DEPTH.
+  max_speed: 20
+  clutter_removal: true
+  clutter_kernel: true
+  clutter_compare: false
+  antenna_avg: true 
+  layer_avg: true
+  random_drop: false
+  tdd_detect: true
+  music: false
+  compensate_window_shifts: false  # NR-Scope only; off is OAI's behaviour

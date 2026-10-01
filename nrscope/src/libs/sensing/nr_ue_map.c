@@ -21,7 +21,7 @@ bool nr_ue_sensing_history_init(nr_sensing_history_t *hist,
   pthread_mutex_init(&hist->lock, NULL);
   hist->ring = calloc(depth, sizeof(*hist->ring));
   if (hist->ring == NULL) {
-    ERROR("sensing: cannot allocate history of %d snapshots\n", depth);
+    LOG_E(NR_PHY, "sensing: cannot allocate history of %d snapshots\n", depth);
     return false;
   }
   hist->depth = depth;
@@ -62,7 +62,7 @@ static int *nr_ue_sensing_counter(nr_sensing_history_t *hist, const nr_sensing_s
 
   if (!claim || free_slot < 0) {
     if (claim)
-      WARNING(
+      LOG_W(NR_PHY,
             "sensing: more than %d streams seen, ports 0x%x layer %d k_step %d will not trigger a map\n",
             NR_SENSING_MAX_STREAMS,
             stream->ports,
@@ -120,9 +120,6 @@ void nr_ue_sensing_history_push(nr_sensing_history_t *hist,
   pthread_mutex_unlock(&hist->lock);
 }
 
-/* Half width of the Doppler axis in Hz: the fastest target asked for, plus one
-replica period so the TDD detector can look for a candidate's copies on both sides.
-Depends on the history and the caller's max_speed_ms only, never on the snapshots. */
 /* One TDD period in seconds. The slow-time sampling pattern repeats over this, which
 is what makes the Doppler spectrum repeat every 1/T and sets both the replica spacing
 the detector looks for and the comb the removal below takes out. */
@@ -132,6 +129,8 @@ static double nr_ue_sensing_tdd_period_s(const nr_sensing_history_t *hist)
   return NR_SENSING_TDD_PERIOD_SLOTS * slot_dur_s;
 }
 
+// Compute maximum doppler frequency for a given maximum speed and carrier frequency
+// Recall f_d = 2*v/lambda = 2*v*f_c/c (and we add + 1/tdd)
 static double nr_ue_sensing_axis_f_max(const nr_sensing_history_t *hist, double max_speed_ms)
 {
   const double t_period_s = nr_ue_sensing_tdd_period_s(hist);
@@ -143,14 +142,21 @@ static double nr_ue_sensing_axis_f_max(const nr_sensing_history_t *hist, double 
                              ? 2.0 * max_speed_ms * (double)hist->carrier_hz / C_M_PER_S
                              : 0.0;
 
+  /* Plus one period so the TDD detector can look for a candidate's copies on both sides */
   return f_speed + 1.0 / t_period_s;
 }
 
-/* Criterion 1, the point budget. n_freq = (int)(4 * f_max * t_span) | 1 must stay at
+/* Criterion 1. Computationally, we want 2 doppler points per cell. But we
+do not want to exceed the map's maximum number of bins, NR_SENSING_MAP_MAX_BINS_FREQ,
+which is a hard limit on the size of the power map.
+
+n_freq = (int)(4 * f_max * t_span) | 1 must stay at
 or below the last odd index the map can hold; the | 1 can only round an even count up
 by one, so requiring the product itself to fit is enough and the bound does not depend
-on how the count is rounded. A degenerate axis has no useful bound to give, so it
-falls back to the only other criterion that does not need one. */
+on how the count is rounded. 
+
+Recall the formula in .h file
+*/
 double nr_ue_sensing_span_grid(double f_max_hz)
 {
   if (!(f_max_hz > 0.0))
@@ -158,8 +164,8 @@ double nr_ue_sensing_span_grid(double f_max_hz)
   return (double)(NR_SENSING_MAP_MAX_BINS_FREQ - 1) / (4.0 * f_max_hz);
 }
 
-/* Criterion 2, range migration. The cell is the width of a peak,
-c / (n_pilots * k_step * scs), not m_per_bin: m_per_bin is c / (idft_size * k_step *
+/* Criterion 2, Range migration. The cell is the width of a peak,
+c / (n_pilots * k_step * scs), not m_per_bin. m_per_bin is c / (idft_size * k_step *
 scs) and the IDFT zero pads the grant out to idft_size, so the axis is oversampled and
 a bin is finer than a peak. Drifting by one bin costs nothing when the peak is over a
 bin wide; drifting by one cell is what breaks coherent integration. */
@@ -168,18 +174,18 @@ double nr_ue_sensing_span_migration(int n_pilots, int k_step, int scs_hz, double
   if (n_pilots <= 0 || k_step <= 0 || scs_hz <= 0 || !(max_speed_ms > 0.0))
     return HUGE_VAL;
   const double cell_m = C_M_PER_S / ((double)n_pilots * k_step * scs_hz);
-  return cell_m / max_speed_ms;
+  return cell_m / (2.0 * max_speed_ms);
 }
 
-/* Criterion 3, Doppler migration. An acceleration a moves the target by 2*a*t/lambda
+/* Criterion 3, Doppler migration. An acceleration "a" moves the target by 2*a*t/lambda
 Hz over the window, and that has to stay inside one Doppler cell, 1/t:
-2*a*t/lambda < 1/t, so t < (lambda / 2a)^(1/3). */
+2*a*t/lambda < 1/t, so t^2 < lambda / 2a and t < sqrt(lambda / 2a) */
 double nr_ue_sensing_span_accel(double carrier_hz)
 {
   if (!(carrier_hz > 0.0) || !(NR_SENSING_TARGET_MAX_ACCEL_MS2 > 0.0))
     return HUGE_VAL;
   const double lambda = C_M_PER_S / carrier_hz;
-  return cbrt(lambda / (2.0 * NR_SENSING_TARGET_MAX_ACCEL_MS2));
+  return sqrt(lambda / (2.0 * NR_SENSING_TARGET_MAX_ACCEL_MS2));
 }
 
 /* Criterion 4, the lower bound. dv = lambda / (2 * t_span), so reaching a target dv
@@ -196,24 +202,16 @@ nr_sensing_span_t nr_ue_sensing_span_bounds(const nr_sensing_history_t *hist,
                                             int n_pilots,
                                             int k_step)
 {
-  const double grid = nr_ue_sensing_span_grid(nr_ue_sensing_axis_f_max(hist, max_speed_ms));
-  const double accel = nr_ue_sensing_span_accel((double)hist->carrier_hz);
-  /* n_pilots 0 means the grant is not known yet, which is the case before the
-  snapshots are gathered. Criterion 2 then returns HUGE_VAL and drops out of the min
-  on its own, so the first pass is bounded by 1 and 3 and the caller tightens later. */
-  const double mig = nr_ue_sensing_span_migration(n_pilots, k_step, hist->scs_hz, max_speed_ms);
-
+  /* Criteria 2 (range migration) and 3 (acceleration) are left out of the window:
+  they only cost a target actually moving that fast a few dB, smeared over two cells,
+  while bounding the window by them coarsens every map for every target. They remain
+  callable on their own, to report what a window means for fast targets. So the
+  window has one upper bound, the grid budget, which is computational. */
+  (void)n_pilots;
+  (void)k_step;
   nr_sensing_span_t s;
-  s.t_max_s = grid;
+  s.t_max_s = nr_ue_sensing_span_grid(nr_ue_sensing_axis_f_max(hist, max_speed_ms));
   s.t_max_by = NR_SENSING_SPAN_GRID;
-  if (mig < s.t_max_s) {
-    s.t_max_s = mig;
-    s.t_max_by = NR_SENSING_SPAN_MIGRATION;
-  }
-  if (accel < s.t_max_s) {
-    s.t_max_s = accel;
-    s.t_max_by = NR_SENSING_SPAN_ACCEL;
-  }
   s.t_min_s = nr_ue_sensing_span_min((double)hist->carrier_hz);
   s.feasible = s.t_min_s <= s.t_max_s;
   return s;
@@ -224,7 +222,7 @@ the clutter residue grows with t_span faster than the lines it feeds concentrate
 the OBSERVATION WINDOW block. When the requirements contradict each other the upper
 bound wins, since undersampling the Doppler peaks or smearing the target across range
 cells corrupts the map, while missing the resolution target only makes it coarser. */
-static double nr_ue_sensing_window_s(const nr_sensing_history_t *hist,
+double nr_ue_sensing_window_s(const nr_sensing_history_t *hist,
                                      double max_speed_ms,
                                      int n_pilots,
                                      int k_step)
@@ -334,7 +332,7 @@ void nr_ue_sensing_dump_map(const char *path,
   FILE *f = fopen(path, map_started ? "a" : "w");
   if (f == NULL) {
     pthread_mutex_unlock(&map_lock);
-    ERROR("sensing: cannot open map file %s\n", path);
+    LOG_E(NR_PHY, "sensing: cannot open map file %s\n", path);
     return;
   }
 
@@ -447,9 +445,13 @@ bool nr_ue_sensing_history_take(nr_sensing_history_t *src,
       return false;
     }
   }
+  /* Clear the counters of the layers this map is built from: all of them for a
+  layer-averaged map, else the stream's own. OAI cleared layers 0..n_layers-1 in
+  both cases, so a layer 1 map cleared layer 0's counter and never its own: layer 1
+  then mapped on every slot and layer 0 never again after its first map. */
   for (int j = 0; j < n_layers; j++) {
     nr_sensing_stream_t c = *stream;
-    c.layer = (uint8_t)j;
+    c.layer = n_layers > 1 ? (uint8_t)j : stream->layer;
     int *count = nr_ue_sensing_counter(src, &c, false);
     if (count)
       *count = 0;
@@ -644,7 +646,7 @@ static void nr_ue_sensing_remove_path(const nr_sensing_history_t *hist,
       if (pool_n == NR_CLUTTER_MAX_KERNELS) {
         char grants[512];
         nr_ue_sensing_format_grants(hist, idx, n, grants, sizeof(grants));
-        WARNING(
+        LOG_W(NR_PHY,
               "sensing: more than %d distinct grants over %d snapshots, clutter kernel skipped from snapshot %d on. "
               "Grants: %s\n",
               NR_CLUTTER_MAX_KERNELS,
@@ -656,7 +658,7 @@ static void nr_ue_sensing_remove_path(const nr_sensing_history_t *hist,
       pool[j][0] = malloc((size_t)span * sizeof(float));
       pool[j][1] = malloc((size_t)span * sizeof(float));
       if (pool[j][0] == NULL || pool[j][1] == NULL) {
-        ERROR("sensing: cannot allocate a clutter kernel, path at bin %.2f left in\n", u);
+        LOG_E(NR_PHY, "sensing: cannot allocate a clutter kernel, path at bin %.2f left in\n", u);
         break;
       }
       nr_ue_sensing_clutter_kernel(s->n_pilots, a_m, u - b_lo, s->idft_size, span, pool[j][0], pool[j][1]);
@@ -863,9 +865,8 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
   an input to the gather rather than something discovered afterwards. */
   const double f_max = nr_ue_sensing_axis_f_max(hist, max_speed_ms);
 
-  /* First pass, bounded by criteria 1 and 3. Criterion 2 needs the grant, which only
-  the gathered snapshots reveal, so it is left out here and applied below. */
-  double max_span_s = nr_ue_sensing_window_s(hist, max_speed_ms, 0, 0);
+  // The window, bounded above by the grid budget
+  const double max_span_s = nr_ue_sensing_window_s(hist, max_speed_ms, 0, 0);
 
   int idx[NR_SENSING_HISTORY_DEPTH];
   int n = nr_ue_sensing_gather(hist, stream, n_snap_max, max_span_s, idx);
@@ -877,62 +878,18 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
   // We require a mininum of symbols
   if (n < NR_SENSING_MIN_SNAPSHOTS) return 0;
 
-  /* Second pass, criterion 2. The widest grant now known gives the narrowest peak and
-  so the tightest migration bound; if it is shorter than what the first pass allowed,
-  the oldest snapshots are dropped. Trimming the front is enough because idx[] is in
-  time order and the window is measured back from the newest.
-
-  Taken over the snapshots before the trim, which is deliberate and is why this is not
-  the same number as n_pilots_max further down. The trim can only remove snapshots, so
-  the widest grant left afterwards is at most this one and the migration bound it would
-  give is at least the one applied here: the pass over-trims at worst, never under, and
-  so never has to iterate. n_pilots_max is recomputed on what survives because gain[]
-  has to normalise to a grant that is actually in the window.
-
-  Kept in function scope so the log below reports the bound that was really applied
-  rather than recomputing it from a different snapshot. */
+  // widest grant gathered, for the log below
   int n_pilots_widest = hist->ring[idx[0]].n_pilots;
   for (int i = 1; i < n; i++)
     if (hist->ring[idx[i]].n_pilots > n_pilots_widest)
       n_pilots_widest = hist->ring[idx[i]].n_pilots;
-  {
-    const double span2 =
-        nr_ue_sensing_window_s(hist, max_speed_ms, n_pilots_widest, hist->ring[idx[0]].stream.k_step);
-    if (span2 < max_span_s) {
-      const double fs_clk = (double)hist->ofdm_symbol_size * hist->scs_hz;
-      const uint64_t keep = (uint64_t)(span2 * fs_clk);
-      const uint64_t t_newest = hist->ring[idx[n - 1]].t_sample;
-      int first_kept = 0;
-      while (first_kept < n && t_newest - hist->ring[idx[first_kept]].t_sample > keep)
-        first_kept++;
-      if (n - first_kept < NR_SENSING_MIN_SNAPSHOTS) {
-        /* Honouring criterion 2 would leave too few snapshots to condition. Keeping
-        the wider window is the lesser evil: a target smeared over two range cells is
-        still on the map, while a transform with no degrees of freedom left after the
-        clutter subspace is removed is not. */
-        DEBUG(
-              "sensing: range migration wants %.3f s but that leaves %d snapshots, keeping %.3f s\n",
-              span2,
-              n - first_kept,
-              max_span_s);
-      } else if (first_kept > 0) {
-        memmove(idx, idx + first_kept, (size_t)(n - first_kept) * sizeof(idx[0]));
-        n -= first_kept;
-        max_span_s = span2;
-      }
-    }
-  }
 
   const nr_sensing_snapshot_t *first = &hist->ring[idx[0]];
 
   // bandwidth 
   const double fs = (double)hist->ofdm_symbol_size * hist->scs_hz;
 
-  // computes the range resolution in meters per bin.
-  // Two bins in the delay domain correspond to a distance of this value
-  // because with pilots every p subcarriers, the effective grid spacing feeding the IDFT is Δf_p = p·Δf. 
-  // A length-L IDFT of a grid with spacing Δf_p produces delay samples spaced
-  // Δτ = 1 / (L · p · Δf) => so Δd = c·Δτ = c / (L · p · Δf)
+  // meter per bin, for the range axis
   const double m_per_bin = C_M_PER_S / ((double)first->idft_size * first->stream.k_step * hist->scs_hz);
 
   // Number of bins for the range
@@ -976,13 +933,8 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
   see the OBSERVATION WINDOW block in nr_ue_map.h.
   */
 
-  /* Reported per map, not once per run. Criteria 1, 3 and 4 are fixed for a run, but
-  criterion 2 is cell_m / max_speed_ms and cell_m follows n_pilots, which is whatever
-  PDSCH the scheduler granted: on the outdoor dumps that moves the migration bound over
-  a 2:1 range from one map to the next, so t_max_s, t_max_by and feasible all move with
-  it. What a map achieved is therefore a per map answer, and outdoors it is the useful
-  one. n_pilots_widest is the value the trim above actually used, so the bound reported
-  is the bound applied. */
+  /* The bounds the window was held to (grid budget and resolution target), reported
+  with each map. */
   const nr_sensing_span_t sp = nr_ue_sensing_span_bounds(hist, max_speed_ms, n_pilots_widest, first->stream.k_step);
   static const char *const span_by[] = {"grid budget", "range migration", "target acceleration"};
   const double lambda_m = C_M_PER_S / (double)hist->carrier_hz;
@@ -990,7 +942,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
   const double dv_err_pct = 100.0 * (dv_got / NR_SENSING_TARGET_DV_MS - 1.0);
 
   if (!sp.feasible)
-    WARNING(
+    LOG_W(NR_PHY,
           "sensing: requirements contradict. %.1f m/s of coverage allows at most %.3f s (%s), but %.2f m/s of "
           "resolution needs at least %.3f s. This map %.3f s, %.2f m/s, %+.0f%%. "
           "Lower --sensing-max-speed or raise NR_SENSING_TARGET_DV_MS.\n",
@@ -1008,7 +960,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
     it on every healthy map; see NR_SENSING_TARGET_DV_SLACK. Which cap ran out first is
     the actionable part: the two the code owns, or the scheduler, which no constant
     here can fix. */
-    WARNING(
+    LOG_W(NR_PHY,
           "sensing: window %.3f s short of the %.3f s that %.2f m/s needs, limited by %s. "
           "Resolution %.2f m/s, %+.0f%%. %d snapshots at %.0f/s, %d pilots.\n",
           t_span,
@@ -1023,7 +975,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
           n / t_span,
           n_pilots_widest);
   else
-    INFO(
+    LOG_I(NR_PHY,
           "sensing: window %.3f s in [%.3f, %.3f] (upper: %s), %d snapshots at %.0f/s, %d pilots. "
           "Resolution %.2f m/s (%+.0f%%) over +-%.1f m/s, %d Doppler points at %.2f per cell.\n",
           t_span,
@@ -1047,7 +999,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
     n_freq = 3;
   if (n_freq > NR_SENSING_MAP_MAX_BINS_FREQ) {
     /* Should be unreachable now that the window is bounded */
-    WARNING(
+    LOG_W(NR_PHY,
           "sensing: Doppler grid clamped, %d points wanted for f_max %.0f Hz over %.3f s but only %d available. "
           "The grid is %.2f points per resolution cell instead of 2 and peak heights are understated. "
           "Lower --sensing-max-speed or the window bound (%.3f s), or raise NR_SENSING_MAP_MAX_BINS_FREQ.\n",
@@ -1109,7 +1061,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
   }
 
   if (n_pilots_min <= 0) {
-    ERROR("sensing: snapshot with %d pilots in the history, cannot normalise\n", n_pilots_min);
+    LOG_E(NR_PHY, "sensing: snapshot with %d pilots in the history, cannot normalise\n", n_pilots_min);
     return 0;
   }
 
@@ -1132,7 +1084,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
   map->n_positions = n_positions;
 
   if (n_pilots_max != n_pilots_min)
-    WARNING(
+    LOG_W(NR_PHY,
           "sensing: grant width varies over the map window, %d to %d pilots. "
           "Heights are normalised but the delay resolution still moves: %.2f to %.2f m.\n",
           n_pilots_min,
@@ -1201,7 +1153,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
   integer bin: at 2.44 m/bin the rounding alone is up to 1.2 m of bias, and it lands
   directly on D = L + dR in nr_ue_target_position(). */
   map->bin_los = (double)u0 + nr_ue_sensing_peak_frac(e_prof, u0, n_bins);
-  INFO("LOS bin to check its stability: %.2f (peak bin %d)\n", map->bin_los, u0);
+  LOG_I(NR_PHY, "LOS bin to check its stability: %.2f (peak bin %d)\n", map->bin_los, u0);
 
   /* The residual everything below works on: the raw snapshots, from which the kernel
   mode subtracts the static paths it fits. Kept before the gain, see
@@ -1209,7 +1161,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
   float *res_re = malloc((size_t)n * n_bins * sizeof(float));
   float *res_im = malloc((size_t)n * n_bins * sizeof(float));
   if (res_re == NULL || res_im == NULL) {
-    ERROR("sensing: cannot allocate the residual of %d snapshots\n", n);
+    LOG_E(NR_PHY, "sensing: cannot allocate the residual of %d snapshots\n", n);
     free(res_re);
     free(res_im);
     return 0;
@@ -1325,7 +1277,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
         }
       }
       if (n_clamped > 0)
-        DEBUG(
+        LOG_D(NR_PHY,
               "sensing: direct path normalisation clamped on %d of %d snapshots, the direct path was lost there\n",
               n_clamped,
               n);
@@ -1403,7 +1355,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
       const double u = b_best + nr_ue_sensing_peak_frac(coh, b_best, n_bins);
       nr_ue_sensing_remove_path(hist, idx, n, n_bins, u, res_re, res_im);
       u_fit[n_fit++] = u;
-      DEBUG(
+      LOG_D(NR_PHY,
             "sensing: static path %d removed at bin %.2f, S %.2f, %.1f dB above noise\n",
             n_fit - 1,
             u,
@@ -1485,7 +1437,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
     double *p_im = malloc((size_t)n_bins * n_e_max * sizeof(double));
 
     if (e_re == NULL || e_im == NULL || p_re == NULL || p_im == NULL) {
-      ERROR("sensing: cannot allocate the comb basis, comb left in\n");
+      LOG_E(NR_PHY, "sensing: cannot allocate the comb basis, comb left in\n");
     } else {
       const int n_e = nr_ue_sensing_comb_basis(t, n, f0, (const double(*)[NR_SENSING_HISTORY_DEPTH])q, n_q, e_re, e_im);
 
@@ -1576,7 +1528,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
           /* How much of the tone content was common to every range bin. Near 1 says
           the comb really is one modulation and the rank one model fits; well below it
           says several independent sources and a higher rank would be needed. */
-          DEBUG(
+          LOG_D(NR_PHY,
                 "sensing: comb removed at %.1f Hz and %d harmonics, %d basis vectors, rank-1 share %.2f\n",
                 f0,
                 NR_COMB_MAX_HARMONIC,
@@ -1722,7 +1674,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
     snapshot was identical. Left unscaled and flagged with 1.0 so a reader can tell
     the difference between "not normalised" and "normalised by 1". */
     map->noise_ref = 0.0;
-    WARNING("sensing: map noise floor estimated at %g, left unnormalised\n", ref);
+    LOG_W(NR_PHY, "sensing: map noise floor estimated at %g, left unnormalised\n", ref);
   }
 
   free(res_re);
@@ -1756,7 +1708,7 @@ void nr_ue_sensing_dump_snapshots(const char *path,
 
   FILE *f = fopen(path, "w");
   if (f == NULL) {
-    ERROR("sensing: cannot open snapshot file %s\n", path);
+    LOG_E(NR_PHY, "sensing: cannot open snapshot file %s\n", path);
     return;
   }
 
@@ -1791,7 +1743,7 @@ void nr_ue_sensing_dump_snapshots(const char *path,
   }
 
   fclose(f);
-  INFO(
+  LOG_I(NR_PHY,
         "sensing: dumped %d raw snapshots (ports 0x%x layer %d k_step %d) to %s\n",
         n,
         stream->ports,

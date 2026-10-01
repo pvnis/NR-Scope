@@ -25,25 +25,50 @@
 #define C_M_PER_S 299792458.0
 
 // REQUIREMENTS FOR SENSING PROPERTIES
-// Remember, for now we assume TDD, 30 KHz SCS and 3.41499 GHz
+// Remember we assume TDD, 30 KHz SCS and 3.45 GHz
+
 #define NR_SENSING_MIN_SNAPSHOTS  32 
 #define NR_SENSING_TARGET_DV_MS   0.30  // sets the minimum window t_span^min
+
 /* How far past NR_SENSING_TARGET_DV_MS a map may land before it is worth a warning.
 The window is aimed at t_span^min itself, and snapshots arrive where the scheduler put
 them, so the last one before the bound leaves the achieved span a little short and the
 resolution a little coarse on every healthy map. Without slack the warning would fire
 at a 0% miss, every map, and stop meaning anything. */
 #define NR_SENSING_TARGET_DV_SLACK 0.10 // 10%
-#define NR_SENSING_TARGET_MAX_ACCEL_MS2 2.0 // maximum acceleration of targets
+#define NR_SENSING_TARGET_MAX_ACCEL_MS2 2.0 // maximum acceleration of targets in [m/s^2]
 
-// REQUIREMENTS FOR THE SENSING MAP (COMPILE TIME, FOR COMPUTATIONAL)
-#define NR_SENSING_MAP_MAX_BINS_RANGE 128 // at 30 kHz, 3.4 GHz its 128 x 2.44 m/bin
-#define NR_SENSING_MAP_MAX_BINS_FREQ 1024 // the size of DFT for doppler
+// REQUIREMENTS FOR THE SENSING MAP
+
+/*
+At 30 kHz, 3.45 GHz its NR_SENSING_MAP_MAX_BINS_RANGE x 2.44 m/bin in maps.
+Two bins in the delay domain correspond to a distance
+Because with pilots every p subcarriers, the effective grid spacing feeding the IDFT is Δf_p = p·Δf. 
+A length-L IDFT of a grid with spacing Δf_p produces delay samples spaced
+by Δτ = 1 / (L · p · Δf) => so Δd = c·Δτ = c / (L · p · Δf)
+*/
+#define NR_SENSING_MAP_MAX_BINS_RANGE 50
+
+/*
+Make sure the Doppler axis is fine enough to resolve the targets.
+The maximum doppler f_max is 2v_max/lambda + 1 / TDD. The grid spans [-f_max,f_max]
+so 2f_max. We want 2 grid doppler points per cell, so n_freq = 2 * 2f_max * T_span points.
+So the bin spacing in m/s/bin is (lambda/2) * Delta_f = (lambda/2) 2f_max / (n_freq-1) =~ (lambda/2) 1 / 2T = lambda / 4T = delta_v/2.
+So with delta_v = 0.3m/s it gives 0.15 m/s per bin.
+So the bin spacing for doppler depends on the time window T. 
+
+NR_SENSING_MAP_MAX_BINS_FREQ only serves when 4f_max*T_span exceeds this value. If it exceeds it
+then the spacing is coarser than 2 points per cell.
+It defines the size of the power map for the doppler axis.
+So its a computational cost
+*/
+#define NR_SENSING_MAP_MAX_BINS_FREQ 2048
+
 /* Cells sampled to estimate a map's noise floor, see noise_ref. A median over this
 many is accurate to well under a dB, which is all the estimate has to be, and it keeps
 the sort off the critical path: the whole map can be 128 * 1024 cells. */
 #define NR_SENSING_MAP_NORM_SAMPLES 4096
-#define NR_SENSING_HISTORY_DEPTH 512 // maximum number of symbols in a map
+#define NR_SENSING_HISTORY_DEPTH 2048 // maximum number of symbols in history
 
 
 /* OBSERVATION WINDOW
@@ -58,21 +83,26 @@ Nothing here is a free constant. The window is derived from the three requiremen
 the top of this file and from the axis the caller asked for; see
 nr_ue_sensing_span_bounds().
 
-UPPER, three criteria, smallest wins:
+UPPER: only criterion 1 is applied. Criteria 2 and 3 are physical but soft: they
+cost a target that really moves that fast a few dB, smeared over two cells, while
+bounding the window by them coarsened every map for every target, slow ones
+included. Their functions stay, to report what a window means for fast targets.
 
   1. Grid density, nr_ue_sensing_span_grid(). The Doppler axis needs 4 * f_max *
      t_span points to hold two per resolution cell and NR_SENSING_MAP_MAX_BINS_FREQ
      caps that. Past the cap the grid is coarser than the peaks it samples and a
      target landing between two points loses up to 13 dB, with nothing in the map to
-     show for it. Computational, and the only one of the three that is.
+     show for it. Computational, and the only upper bound applied.
 
   2. Range migration, nr_ue_sensing_span_migration(). The target must stay inside one
-     range cell: t < cell_m / v. cell_m is c / (n_pilots * k_step * scs), the width of
-     a peak, not m_per_bin, which is only how finely that peak is sampled. Above about
-     15 m/s this is tighter than the grid.
+     range cell: t < cell_m / (2 v), as the delay axis is path length and the path of
+     a target at v changes at up to 2 v. cell_m is c / (n_pilots * k_step * scs), the
+     width of a peak, not m_per_bin, which is only how finely that peak is sampled.
+     Above about 1.5 m/s this is tighter than the grid.
 
   3. Doppler migration, nr_ue_sensing_span_accel(). While accelerating, the target
-     must stay inside one Doppler cell: t < (lambda / 2a)^(1/3). Needs an assumption
+     must stay inside one Doppler cell: t < sqrt(lambda / 2a), 0.148 s at 3.41 GHz
+     and 2 m/s^2. Needs an assumption
      about the scene, NR_SENSING_TARGET_MAX_ACCEL_MS2, and is the only bound here that
      is not derived from the radio.
 
@@ -81,10 +111,13 @@ LOWER, one criterion:
   4. Velocity resolution, nr_ue_sensing_span_min(). lambda / (2 * t_span) must reach
      NR_SENSING_TARGET_DV_MS, so t_span >= lambda / (2 * dv).
 
-The two ends can cross: at 3.41 GHz, 0.2 m/s of resolution is impossible above about
-10 m/s of coverage, and 0.3 m/s above about 20 m/s. That is a real limit of the
-waveform, not a tuning problem, and nr_ue_sensing_span_bounds() says so rather than
-silently picking one end.
+The two ends can cross only through criterion 1: 4 * f_max * t_min above the grid's
+1023 points, e.g. 0.1 m/s (0.44 s) with more than about 17 m/s of coverage. Then
+nr_ue_sensing_span_bounds() says so rather than silently picking one end.
+
+For reference, were criteria 2 and 3 applied, at 3.41 GHz on the full carrier 0.3
+m/s of resolution (0.147 s) would be impossible above about 10 m/s of coverage, and
+0.2 m/s (0.22 s) at any coverage.
 
 NOT a bound, deliberately: clutter residue. Measured on the dumps the replica comb
 grows 2.45 dB per dB of t_span, against the 1.0 that concentrating a fixed amount of
@@ -230,19 +263,21 @@ typedef struct {
    it. */
 double nr_ue_sensing_span_grid(double f_max_hz);
 
-/* Criterion 2: cell_m / max_speed_ms, the time a target takes to cross one range
+/* Criterion 2: cell_m / (2 max_speed_ms), the time a target takes to cross one range
    cell. n_pilots is the widest grant in the window, so cell_m is the narrowest peak
    and the bound the tightest; a narrower grant has a wider peak and a looser bound,
    which this deliberately does not exploit. */
 double nr_ue_sensing_span_migration(int n_pilots, int k_step, int scs_hz, double max_speed_ms);
 
-/// Criterion 3: (lambda / 2a)^(1/3), with a = NR_SENSING_TARGET_MAX_ACCEL_MS2.
+/// Criterion 3: sqrt(lambda / 2a), with a = NR_SENSING_TARGET_MAX_ACCEL_MS2.
 double nr_ue_sensing_span_accel(double carrier_hz);
 
 /// Criterion 4, the lower bound: lambda / (2 * NR_SENSING_TARGET_DV_MS).
 double nr_ue_sensing_span_min(double carrier_hz);
 
-/* All four at once, which is what the transform uses.
+/* The bounds the transform uses: criterion 1 above and criterion 4 below.
+   n_pilots and k_step are unused since criterion 2 left the window; kept so callers
+   do not change.
 
    n_pilots is the widest grant expected in the window. It is only known after the
    snapshots are gathered, and the gather needs a bound first, so pass 0 to leave
@@ -255,6 +290,12 @@ nr_sensing_span_t nr_ue_sensing_span_bounds(const nr_sensing_history_t *hist,
                                             double max_speed_ms,
                                             int n_pilots,
                                             int k_step);
+
+/* The window one map is held to: the short end of the feasible range (criterion 4),
+   or the upper bound when the two cross. This is what nr_ue_sensing_range_doppler()
+   gathers over, and what a caller deciding when to build a map has to use, so that
+   the cadence and the window are the same number. */
+double nr_ue_sensing_window_s(const nr_sensing_history_t *hist, double max_speed_ms, int n_pilots, int k_step);
 
 /// Allocate a history able to hold depth snapshots. Returns false on failure.
 bool nr_ue_sensing_history_init(nr_sensing_history_t *hist,
@@ -382,7 +423,7 @@ typedef enum {
 } nr_sensing_clutter_t;
 
 /// Distinct (n_m, a_m) pairs a window is expected to hold; see NR_CLUTTER_KERNEL
-#define NR_CLUTTER_MAX_KERNELS 512 // before 32
+#define NR_CLUTTER_MAX_KERNELS 512
 
 /// Static paths NR_CLUTTER_KERNEL fits at most, the direct path included
 #define NR_CLUTTER_MAX_PATHS 4

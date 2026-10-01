@@ -58,10 +58,10 @@
 extern "C" {
 #endif
 
-/* DM-RS ports of one allocation the sensing path handles. Rank 2 is the ceiling
-because despreading a group of two is the only cover geometry implemented here;
-a CDM group never holds more than two single-symbol ports anyway, so going higher
-means handling several groups at once, not a wider despread. */
+/* 
+DM-RS ports of one allocation the sensing path handles. Rank 2 is the ceiling
+because despreading a group of two is the only cover geometry implemented here
+*/
 #define NR_DMRS_SENSING_MAX_PORTS 2
 
 /* How the DM-RS ports of one PDSCH allocation sit on the resource grid, reduced

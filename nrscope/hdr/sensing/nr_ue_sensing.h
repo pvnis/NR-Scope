@@ -64,8 +64,14 @@ One position of the period is drawn and the slot sitting there is left out. When
 draw lands on an uplink slot nothing is dropped, since no PDSCH is scheduled there,
 so some periods keep all of their slots.
 
-10 slots is 5 ms at 30 kHz subcarrier spacing. Match the gNB configuration */
-#define NR_SENSING_TDD_PERIOD_SLOTS 10
+10 slots is 5 ms at 30 kHz subcarrier spacing. Match the gNB configuration.
+
+NR-Scope: a runtime value rather than OAI's constant 10, set from the cell's SIB1
+(tdd-UL-DL-ConfigurationCommon) once it is decoded, so the TDD detector and the
+random drop use the pattern of whatever cell is sniffed (10 slots on the Benetel
+cell, 7 D, 1 S, 2 U). 10 until then. */
+extern int nr_sensing_tdd_period_slots;
+#define NR_SENSING_TDD_PERIOD_SLOTS nr_sensing_tdd_period_slots
 
 typedef struct nr_sensing_history_s nr_sensing_history_t;
 

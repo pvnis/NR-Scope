@@ -12,6 +12,8 @@
 #include "nrscope/hdr/sensing/nr_ue_map.h"
 #include "nrscope/hdr/sensing/nr_ue_sensing_align.h"
 
+int nr_sensing_tdd_period_slots = 10;
+
 bool nr_ue_sensing_extract_lattice(int n_sc,
                                    const cf_t H_row[n_sc],
                                    const bool valid_row[n_sc],
@@ -37,7 +39,7 @@ bool nr_ue_sensing_extract_lattice(int n_sc,
         k_step = step;
       else if (step != k_step) {
         // an error would happen
-        ERROR("sensing: non-uniform pilot lattice (step %d then %d at k=%d)\n", k_step, step, k);
+        LOG_E(NR_PHY, "sensing: non-uniform pilot lattice (step %d then %d at k=%d)\n", k_step, step, k);
         return false;
       }
     }
@@ -55,7 +57,7 @@ bool nr_ue_sensing_extract_lattice(int n_sc,
   const int offset = k_first % k_step;
   const int n_lattice = (n_sc - offset + k_step - 1) / k_step;
   if (n_lattice > max_out) {
-    ERROR("sensing: lattice of %d positions does not fit %d entries\n", n_lattice, max_out);
+    LOG_E(NR_PHY, "sensing: lattice of %d positions does not fit %d entries\n", n_lattice, max_out);
     return false;
   }
   memset(out, 0, n_lattice * sizeof(*out));
@@ -193,14 +195,14 @@ carries the same PDSCH grant, so only the first row of each slot is kept. */
 static void nr_ue_sensing_emul_init(void)
 {
 #if NR_SENSING_EMULATE_GRANTS == 1
-  WARNING(
+  LOG_W(NR_PHY,
         "sensing: GRANT EMULATION ACTIVE (random, %d %% full band, else >= %d RB). Simulation only.\n",
         NR_SENSING_EMUL_FULL_PERCENT,
         NR_SENSING_EMUL_MIN_RB);
 #else
   FILE *f = fopen(NR_SENSING_EMUL_TRACE, "r");
   if (f == NULL) {
-    ERROR("sensing: grant emulation cannot open %s, emulation stays off\n", NR_SENSING_EMUL_TRACE);
+    LOG_E(NR_PHY, "sensing: grant emulation cannot open %s, emulation stays off\n", NR_SENSING_EMUL_TRACE);
     return;
   }
   emul_trace = malloc_or_fail(NR_SENSING_EMUL_MAX_SLOTS * sizeof(*emul_trace));
@@ -228,9 +230,9 @@ static void nr_ue_sensing_emul_init(void)
   fclose(f);
 
   if (emul_trace_len == 0)
-    ERROR("sensing: grant emulation found no snapshot in %s, emulation stays off\n", NR_SENSING_EMUL_TRACE);
+    LOG_E(NR_PHY, "sensing: grant emulation found no snapshot in %s, emulation stays off\n", NR_SENSING_EMUL_TRACE);
   else
-    WARNING(
+    LOG_W(NR_PHY,
           "sensing: GRANT EMULATION ACTIVE (replay of %d slots from %s). Simulation only.\n",
           emul_trace_len,
           NR_SENSING_EMUL_TRACE);
@@ -337,7 +339,7 @@ int nr_ue_sensing_slot_profile(int n_sym,
 
     // A narrow grant is dropped rather than averaged in, or just taken into account.
     if (lat.n * NR_SENSING_MIN_BAND_DEN < lat.n_lattice * NR_SENSING_MIN_BAND_NUM) {
-      //INFO("sensing: narrow lattice of %d pilots over %d positions is dropped\n", lat.n, lat.n_lattice);
+      //LOG_I(NR_PHY, "sensing: narrow lattice of %d pilots over %d positions is dropped\n", lat.n, lat.n_lattice);
       continue;
     }
 #if NR_SENSING_EMULATE_GRANTS != 0
@@ -360,7 +362,7 @@ int nr_ue_sensing_slot_profile(int n_sym,
 #endif
 
     // if (lat.n < 50) {
-    //   INFO("sensing: %d pilots\n", lat.n);
+    //   LOG_I(NR_PHY, "sensing: %d pilots\n", lat.n);
     //   continue;
     // }
 
@@ -369,7 +371,7 @@ int nr_ue_sensing_slot_profile(int n_sym,
     carrier, so a failure here means a lattice we do not model. */
     const int size = NR_SENSING_IDFT_SIZE(lat.k_step);
     if (size > NR_SENSING_MAX_IDFT || lat.n_lattice > size) {
-      ERROR(
+      LOG_E(NR_PHY,
             "sensing: lattice of %d positions at k_step %d does not fit a %d point IDFT\n",
             lat.n_lattice,
             lat.k_step,

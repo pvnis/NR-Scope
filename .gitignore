@@ -21,3 +21,6 @@ gnb.log
 /DCIs/
 /cell/
 /PDCCH/
+/sensing/
+
+*.png

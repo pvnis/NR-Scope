@@ -3,6 +3,8 @@
  */
 
 #include <pthread.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "nrscope/hdr/sensing/sensing_defs.h"
@@ -49,13 +51,13 @@ static srsran_dft_plan_t* sensing_idft_get_plan(int size)
   }
 
   if (nof_plans >= SENSING_MAX_IDFT_PLANS) {
-    ERROR("sensing: no room for an IDFT plan of size %d, %d already cached", size, nof_plans);
+    LOG_E(NR_PHY, "sensing: no room for an IDFT plan of size %d, %d already cached\n", size, nof_plans);
     return NULL;
   }
 
   sensing_idft_plan_t* slot = &plans[nof_plans];
   if (srsran_dft_plan_c(&slot->plan, size, SRSRAN_DFT_BACKWARD) != SRSRAN_SUCCESS) {
-    ERROR("sensing: failed to create an IDFT plan of size %d", size);
+    LOG_E(NR_PHY, "sensing: failed to create an IDFT plan of size %d\n", size);
     return NULL;
   }
 
@@ -68,7 +70,7 @@ static srsran_dft_plan_t* sensing_idft_get_plan(int size)
   slot->valid = true;
   nof_plans++;
 
-  INFO("sensing: created IDFT plan of size %d (%d cached)", size, nof_plans);
+  LOG_D(NR_PHY, "sensing: created IDFT plan of size %d (%d cached)\n", size, nof_plans);
   return &slot->plan;
 }
 
@@ -78,7 +80,7 @@ int nr_ue_sensing_idft(int size, const cf_t* in, cf_t* out)
     return -1;
   }
   if (!sensing_idft_size_ok(size)) {
-    ERROR("sensing: IDFT size %d is not a power of two, refusing to plan it", size);
+    LOG_E(NR_PHY, "sensing: IDFT size %d is not a power of two, refusing to plan it\n", size);
     return -1;
   }
 
@@ -90,10 +92,28 @@ int nr_ue_sensing_idft(int size, const cf_t* in, cf_t* out)
     return -1;
   }
 
-  /* srsran_dft_run_c() is reentrant over a plan: FFTW's execute is thread safe
-  for a fixed plan as long as the buffers differ, and every caller here passes
-  its own stack buffers. Only plan creation needs the lock. */
-  srsran_dft_run_c(plan, in, out);
+  /* The transform runs on the caller's buffers, through FFTW's new-array execute
+  (srsran_dft_run_c_zerocopy), which is thread safe for a shared plan.
+
+  srsran_dft_run_c() is not: it copies the input into the plan's own buffer,
+  transforms there and reads the plan's output buffer, so two workers
+  transforming at once overwrite each other mid-transform. That was the case
+  here, with the sniffer's workers estimating in parallel, and every snapshot
+  came out as a mix of several: a flat floor about 11 dB under the direct path
+  and peaks scattered over the first 20 bins.
+
+  The zero-copy call skips srsran_dft_run_c's pre/post copies and its
+  normalisation. Both are plain copies for this plan (backward, no mirror, no DC
+  offset) and it is unnormalised, so the result is identical. FFTW requires the
+  new arrays to share the plan's SIMD alignment; a caller whose buffers do not
+  falls back to the plan's buffers under the lock. */
+  if ((((uintptr_t)in | (uintptr_t)out) & 31) == 0) {
+    srsran_dft_run_c_zerocopy(plan, in, out);
+  } else {
+    pthread_mutex_lock(&plans_mutex);
+    srsran_dft_run_c(plan, in, out);
+    pthread_mutex_unlock(&plans_mutex);
+  }
   return 0;
 }
 
@@ -108,4 +128,18 @@ void nr_ue_sensing_idft_free(void)
   }
   nof_plans = 0;
   pthread_mutex_unlock(&plans_mutex);
+}
+
+void nr_sensing_log(const char* colour, const char* comp, const char* fmt, ...)
+{
+  /* Formatted whole, then written in one call, so lines from workers logging at
+  the same time do not interleave. */
+  char    msg[1024];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(msg, sizeof(msg), fmt, ap);
+  va_end(ap);
+  char head[16];
+  snprintf(head, sizeof(head), "[%s]", comp);
+  printf("%s%-8s %s%s", colour, head, msg, colour[0] ? "\033[0m" : "");
 }

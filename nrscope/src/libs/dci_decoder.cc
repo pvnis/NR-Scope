@@ -1,5 +1,6 @@
 #include "nrscope/hdr/dci_decoder.h"
 #include "nrscope/hdr/dmrs_check.h"
+#include "nrscope/hdr/sensing/nrscope_sensing.h"
 #include "nrscope/hdr/run_recorder.h"
 
 DCIDecoder::DCIDecoder(uint32_t max_nof_rntis)
@@ -206,6 +207,7 @@ int DCIDecoder::DCIDecoderandReceptionInit(WorkState* state, int bwp_id, cf_t* i
           == asn1::rrc_nr::search_space_s::search_space_type_c_::types_opts::ue_specific) {
         pdcch_cfg.search_space[ss_id].type = srsran_search_space_type_ue;
         if (ss_cfg.search_space_type.ue_specific().dci_formats.formats0_minus1_and_minus1_minus1) {
+        
         /* Formats the blind search will try. Each one is a separate decode pass
         over every candidate, and DCI 0_1 and 1_1 are different sizes, so
         carrying the uplink format here doubles the work. Dropped for sensing;
@@ -1020,10 +1022,10 @@ int DCIDecoder::DCIDecoderandReceptionInit(WorkState* state, int bwp_id, cf_t* i
   }
   if (!RunRecorder::enabled()) std::cout << "ending.." << std::endl;
 
-  /* Full-carrier grid for the PDSCH DM-RS check (recording mode only). The
-    carrier and the initial BWP (the only one this cell uses, bwp-Id 0) are
+  /* Full-carrier grid for the PDSCH DM-RS check (recording mode) and for sensing.
+    The carrier and the initial BWP (the only one this cell uses, bwp-Id 0) are
     placed from SIB1: offsetToCarrier, carrierBandwidth, locationAndBandwidth. */
-  if (RunRecorder::enabled()) {
+  if (RunRecorder::enabled() || nrscope_sensing_args.enable) {
     const auto& freq_dl = sib1.serving_cell_cfg_common.dl_cfg_common.freq_info_dl;
     const auto& carrier = freq_dl.scs_specific_carrier_list[0];
     crb_offset          = carrier.offset_to_carrier;
@@ -1048,6 +1050,16 @@ int DCIDecoder::DCIDecoderandReceptionInit(WorkState* state, int bwp_id, cf_t* i
       ERROR("DM-RS check: could not set up the carrier grid; grants will not be checked");
     } else {
       dmrs_check_ready = true;
+    }
+
+    /* Sensing reads the same grid; its context is shared by every decoder, its
+      scratch is this decoder's own so workers estimate in parallel. */
+    if (dmrs_check_ready && nrscope_sensing_args.enable) {
+      sensing = nrscope_sensing_get((uint64_t)grid_center_hz, arg_scs.srate,
+                                    (uint32_t)std::lround(arg_scs.srate / cell.abs_pdcch_scs), (uint32_t)cell.abs_pdcch_scs);
+      if (sensing != nullptr) {
+        sensing_scratch = nrscope_sensing_scratch_alloc(grid_carrier.nof_prb * SRSRAN_NRE);
+      }
     }
   }
   return SRSRAN_SUCCESS;
@@ -1372,10 +1384,19 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
             } else if (pdsch_cfg.grant.n_scid && pdsch_cfg.dmrs.scrambling_id1_present) {
               n_id = pdsch_cfg.dmrs.scrambling_id1;
             }
-            if (nof_dmrs > 0 && pdsch_cfg.dmrs.type == srsran_dmrs_sch_type_1) {
+            if (RunRecorder::enabled() && nof_dmrs > 0 && pdsch_cfg.dmrs.type == srsran_dmrs_sch_type_1) {
               dmrs_res = dmrs_check_pdsch(ue_dl_grid.sf_symbols[0], grid_carrier.nof_prb, crb_offset, bwp_start_crb,
                                           pdsch_cfg.grant, dmrs_symbols, (uint32_t)nof_dmrs, n_id,
                                           SRSRAN_SLOT_NR_MOD(carrier_dl.scs, slot->idx));
+            }
+
+            // Sensing: this grant's DM-RS channel, as delay responses into the history
+            if (sensing != nullptr && sensing_scratch != nullptr) {
+              const nr_dmrs_placement_t place = {crb_offset, bwp_start_crb, 0};
+              nrscope_sensing_process_grant(sensing, sensing_scratch, ue_dl_grid.sf_symbols[0],
+                                            grid_carrier.nof_prb * SRSRAN_NRE, &place, &pdsch_cfg, (int)d.ports,
+                                            state->cs_ret.ssb_res.N_id, state->sfn,
+                                            SRSRAN_SLOT_NR_MOD(carrier_dl.scs, slot->idx), state->window_shift_samples);
             }
           }
 

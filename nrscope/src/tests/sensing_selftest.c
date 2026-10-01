@@ -31,6 +31,7 @@
  */
 
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,6 +39,7 @@
 #include "nrscope/hdr/sensing/nr_ue_dmrs_despread.h"
 #include "nrscope/hdr/sensing/nr_ue_map.h"
 #include "nrscope/hdr/sensing/nr_ue_sensing.h"
+#include "nrscope/hdr/sensing/nrscope_sensing.h"
 #include "nrscope/hdr/sensing/sensing_defs.h"
 #include "srsran/phy/ch_estimation/dmrs_sch.h"
 #include "srsran/phy/common/sequence.h"
@@ -539,6 +541,272 @@ static void test_despread_two_layers(const char* name, const uint32_t runs[][2],
   check(worst[1] < 0.02, "layer 1: worst |H - h1| / |a1|", worst[1], 0, 0.02);
 }
 
+/* The glue end to end: slots of a TDD pattern (3 full downlink slots, a special
+ * slot with a 5-symbol PDSCH, an uplink slot) go through
+ * nrscope_sensing_process_grant() exactly as the DCI decoder hands them over,
+ * with grids built by srsRAN's DM-RS mapper on two layers. The scene is a static
+ * direct path and a weaker moving target at known delays. The per-slot stage
+ * aligns every snapshot on the static scene (nr_ue_sensing_align), so the direct
+ * path must come out at 0 Hz and the target at its own Doppler, read from its
+ * phase across the snapshots' sample times. Both must peak at their delay bins.
+ * The receive window also moves one sample later every 30 slots, as the timing
+ * tracking does, with the ramp centred on DC as on air: the glue must undo the
+ * moves it is told about, leaving the direct path on its bin in every snapshot.
+ * Every DM-RS symbol must reach the history (the count is exact), which guards
+ * the second-symbol rejection seen on the first port. That covers placement,
+ * lattice, symbol timing, window shifts, alignment and the dump format together. */
+static void test_glue(void)
+{
+  printf("\nSensing glue: TDD slots through nrscope_sensing_process_grant, dump read back\n");
+  const uint32_t nof_prb = 273, n_sc = nof_prb * SRSRAN_NRE;
+  const double   f_d_hz  = 120.0; // Doppler of the target
+  const int      d_bins  = 23;    // delay of the direct path, in bins of 1 / (4096 * 30 kHz)
+  const int      t_bins  = 41;    // delay of the target
+  const float    t_amp   = 0.3f;  // target amplitude against the direct path
+  const char*    dir     = "sensing_selftest_out";
+
+  /* the Benetel config's options. symbols is only the cost cap, left at the history
+    depth so the window alone decides what a map holds: at 0.30 m/s that is 0.145 s,
+    which at 4400 reference symbols/s is about 640 of them. Short windows do not work
+    here: with 7 D, 1 S, 2 U the TDD replicas are 200 Hz apart, and a window of a few
+    TDD periods is too short for the detector to tell the target from them. */
+  nrscope_sensing_default_args(&nrscope_sensing_args);
+  nrscope_sensing_args.enable         = true;
+  nrscope_sensing_args.symbols        = NR_SENSING_HISTORY_DEPTH;
+  nrscope_sensing_args.max_speed_ms   = 10.0; // 0.30 m/s needs 0.145 s, feasible up to ~10 m/s
+  nrscope_sensing_args.clutter_kernel = true;
+  nrscope_sensing_args.tdd_detect     = true;
+  snprintf(nrscope_sensing_args.dump, sizeof(nrscope_sensing_args.dump), "%s/map2d.csv", dir);
+  nr_sensing_tdd_period_slots = 10; // 7 D, 1 S, 2 U: the Benetel cell, as SIB1 sets it
+  char rm[128];
+  snprintf(rm, sizeof(rm), "rm -rf %s", dir);
+  if (system(rm) != 0) {
+    printf("  could not clear %s\n", dir);
+  }
+  nrscope_sensing_t*         s  = nrscope_sensing_get(3450000000ULL, 122.88e6, 4096, 30000);
+  nrscope_sensing_scratch_t* sc = nrscope_sensing_scratch_alloc(n_sc);
+  if (s == NULL || sc == NULL) {
+    printf("  could not create the context\n");
+    failures++;
+    return;
+  }
+
+  srsran_carrier_nr_t carrier = SRSRAN_DEFAULT_CARRIER_NR;
+  carrier.pci = 1, carrier.nof_prb = nof_prb, carrier.scs = srsran_subcarrier_spacing_30kHz;
+  srsran_dmrs_sch_t dmrs = {};
+  srsran_dmrs_sch_init(&dmrs, false);
+  srsran_dmrs_sch_set_carrier(&dmrs, &carrier);
+
+  static cf_t tx[273 * SRSRAN_NRE * SRSRAN_NSYMB_PER_SLOT_NR], rx[273 * SRSRAN_NRE * SRSRAN_NSYMB_PER_SLOT_NR];
+  const nr_dmrs_placement_t place = {0, 0, 0};
+  const cf_t a[2] = {1.0f, 0.6f - 0.4f * I};
+  int pushed = 0;
+  for (int sl = 0; sl < 1800; sl++) {
+    const int phase = sl % 10; // D D D D D D D S U U
+    if (phase >= 8) {
+      continue;
+    }
+    srsran_sch_cfg_nr_t cfg = {};
+    cfg.dmrs.type = srsran_dmrs_sch_type_1, cfg.dmrs.typeA_pos = srsran_dmrs_sch_typeA_pos_2;
+    cfg.dmrs.additional_pos = srsran_dmrs_sch_add_pos_2, cfg.dmrs.length = srsran_dmrs_sch_len_1;
+    cfg.grant.mapping = srsran_sch_mapping_type_A, cfg.grant.S = 1, cfg.grant.L = (phase == 7) ? 5 : 13;
+    cfg.grant.nof_layers = 2, cfg.grant.nof_dmrs_cdm_groups_without_data = 1, cfg.grant.beta_dmrs = 1.0f;
+    cfg.grant.nof_prb = nof_prb;
+    for (uint32_t p = 0; p < nof_prb; p++) {
+      cfg.grant.prb_idx[p] = true;
+    }
+    const uint32_t sfn = 100 + sl / 20, slot_idx = sl % 20;
+    srsran_slot_cfg_t slot = {.idx = slot_idx};
+    memset(tx, 0, sizeof(tx));
+    srsran_sch_cfg_nr_t tx_cfg = cfg;
+    tx_cfg.grant.nof_layers    = 1; // srsRAN writes port 1000; 1001 is its covered copy
+    srsran_dmrs_sch_put_sf(&dmrs, &slot, &tx_cfg, &tx_cfg.grant, tx);
+    memset(rx, 0, sizeof(rx));
+    const int64_t shift = sl / 30; // window moved one sample later every 30 slots
+    for (uint32_t l = 0; l < SRSRAN_NSYMB_PER_SLOT_NR; l++) {
+      // same symbol clock as the glue: long CP on symbol 0, normal on the rest
+      const uint32_t t_in = (l == 0) ? 352 : 352 + 4096 + (l - 1) * 4384 + 288;
+      const double   t    = ((double)(100 * 20 + sl) * 61440 + t_in) / 122.88e6;
+      const cf_t     dop  = t_amp * cexpf(I * (float)(2.0 * M_PI * f_d_hz * t));
+      for (uint32_t k = 0; k < n_sc; k++) {
+        const cf_t x = tx[l * n_sc + k];
+        if (x == 0) {
+          continue;
+        }
+        // paths appear `shift` samples earlier, as a ramp about DC (the carrier centre)
+        const cf_t  win = cexpf(I * (float)(2.0 * M_PI * shift * ((double)k - n_sc / 2.0) / 4096.0));
+        const cf_t  h   = win * (cexpf(-I * (float)(2.0 * M_PI * d_bins * k / 4096.0)) +
+                                 dop * cexpf(-I * (float)(2.0 * M_PI * t_bins * k / 4096.0)));
+        const float w1 = ((k / 2) % 2 == 1) ? -1.0f : 1.0f;
+        rx[l * n_sc + k] = h * x * (a[0] + a[1] * w1);
+      }
+    }
+    const int n = nrscope_sensing_process_grant(s, sc, rx, n_sc, &place, &cfg, 2, 1, sfn, slot_idx, shift);
+    pushed += n > 0 ? n : 0;
+  }
+  srsran_dmrs_sch_free(&dmrs);
+  /* 1800 slots, 0.9 s: 1260 full downlink (3 DM-RS symbols), 180 special (1), 360
+    uplink; 2 layers. 22 symbols per 5 ms TDD period, i.e. 4400 per second per layer. */
+  check(pushed == 7920, "snapshots pushed, every DM-RS symbol", pushed, 7920, 0);
+
+  nrscope_sensing_wait_maps(s);
+
+  /* OAI's one-shot snapshot dump, written with the 10th map (NR_SENSING_SNAP_DUMP_MAP):
+    one layer's snapshots, direct path and target on their own */
+  char path[512];
+  snprintf(path, sizeof(path), "%s/map2d.csv.snap.csv", dir);
+  FILE* f = fopen(path, "r");
+  if (f == NULL) {
+    printf("  no snapshot dump written\n");
+    failures++;
+    return;
+  }
+  char  line[65536];
+  int    n_rows = 0, peak_ok = 0;
+  double t_prev = 0, ph_prev[2] = {0, 0}, turn[2] = {0, 0}, dt = 0;
+  fgets(line, sizeof(line), f); // header
+  while (fgets(line, sizeof(line), f)) {
+    double v[11];
+    char*  p = line;
+    for (int i = 0; i < 11; i++) {
+      v[i] = strtod(p, &p);
+      p++;
+    }
+    const int n_bins = (int)v[7];
+    double    re[NR_SENSING_MAP_MAX_BINS_RANGE], im[NR_SENSING_MAP_MAX_BINS_RANGE];
+    int       best_b = -1;
+    double    best   = -1;
+    for (int b = 0; b < n_bins; b++) {
+      re[b] = strtod(p, &p), p++;
+      im[b] = strtod(p, &p), p++;
+      if (re[b] * re[b] + im[b] * im[b] > best) {
+        best = re[b] * re[b] + im[b] * im[b], best_b = b;
+      }
+    }
+    peak_ok += (best_b == d_bins);
+    // phase advance of the direct path and of the target between consecutive snapshots
+    const int bins[2] = {d_bins, t_bins};
+    for (int j = 0; j < 2; j++) {
+      const double ph = atan2(im[bins[j]], re[bins[j]]);
+      if (n_rows > 0) {
+        double d = ph - ph_prev[j];
+        while (d > M_PI) d -= 2 * M_PI;
+        while (d < -M_PI) d += 2 * M_PI;
+        turn[j] += d;
+      }
+      ph_prev[j] = ph;
+    }
+    if (n_rows > 0) {
+      dt += v[2] - t_prev;
+    }
+    t_prev = v[2];
+    n_rows++;
+  }
+  fclose(f);
+  const double f_los = dt > 0 ? turn[0] / dt / (2 * M_PI) : 0, f_tgt = dt > 0 ? turn[1] / dt / (2 * M_PI) : 0;
+  check(fabs(n_rows - 638) <= 8, "snapshots in the dump", n_rows, 638, 8);
+  check(peak_ok == n_rows, "snapshots peaking at the direct path", peak_ok, n_rows, 0);
+  check(fabs(f_los) < 1.0, "direct path Doppler (Hz)", f_los, 0, 1.0);
+  check(fabs(f_tgt - f_d_hz) < 2.0, "target Doppler (Hz)", f_tgt, f_d_hz, 2.0);
+
+  /* The maps: with the static scene removed, the strongest cell of each is the target,
+    at its delay and its Doppler */
+  snprintf(path, sizeof(path), "%s/map2d.csv", dir);
+  f = fopen(path, "r");
+  int n_maps = 0, maps_ok = 0, snap_min = 1 << 30;
+  static char mline[4 << 20];
+  if (f != NULL) {
+    fgets(mline, sizeof(mline), f); // header
+    while (fgets(mline, sizeof(mline), f)) {
+      double v[21];
+      char*  p = mline;
+      for (int i = 0; i < 21; i++) {
+        v[i] = strtod(p, &p);
+        p++;
+      }
+      const int    n_bins = (int)v[12], n_freq = (int)v[13];
+      snap_min            = (int)v[7] < snap_min ? (int)v[7] : snap_min;
+      const double f_max  = v[10];
+      int          best_i = 0;
+      double       best   = -1;
+      for (int i = 0; i < n_bins * n_freq; i++) {
+        const double pw = strtod(p, &p);
+        p++;
+        if (pw > best) {
+          best = pw, best_i = i;
+        }
+      }
+      const int    b    = best_i / n_freq;
+      const double f_hz = -f_max + (best_i % n_freq) * 2.0 * f_max / n_freq;
+      const double cell = 2.0 * f_max / n_freq;
+      if (n_maps == 0) {
+        printf("  map 0: peak at bin %d, %.1f Hz (cell %.1f Hz), %.1f above the floor\n", b, f_hz, cell, best);
+      }
+      maps_ok += (abs(b - t_bins) <= 1 && fabs(f_hz - f_d_hz) <= 2 * cell);
+      n_maps++;
+    }
+    fclose(f);
+  }
+  /* 0.9 s of slots over a 0.145 s window: 6 maps per layer, each one window long,
+    back to back. The trigger is the window, so neither the cadence nor the span
+    depends on how many symbols the traffic offered. */
+  check(n_maps == 12, "maps built (6 per layer)", n_maps, 12, 0);
+  check(maps_ok == n_maps, "maps peaking at the target", maps_ok, n_maps, 0);
+  /* One history per layer, so each map holds everything its own layer collected in
+    the window (about 640), not half of a ring shared with the other layer. */
+  check(fabs(snap_min - 638) <= 8, "snapshots per map, fewest", snap_min, 638, 8);
+  nrscope_sensing_scratch_free(sc);
+}
+
+/* The delay transform must be safe to call from several workers at once, as the
+ * sniffer's decoders do. 64 fixed inputs are transformed once on this thread as
+ * the reference; 8 threads then transform them 400 times each, interleaved, and
+ * every output must match its reference exactly. Before the fix, srsRAN's
+ * srsran_dft_run_c() shared the plan's buffers between callers and outputs were
+ * mixes of several inputs. */
+#define IDFT_T_SIZE 1024
+#define IDFT_T_INPUTS 64
+static cf_t idft_in[IDFT_T_INPUTS][IDFT_T_SIZE] __attribute__((aligned(32)));
+static cf_t idft_ref[IDFT_T_INPUTS][IDFT_T_SIZE] __attribute__((aligned(32)));
+
+static void* idft_worker(void* arg)
+{
+  const long id  = (long)arg;
+  long       bad = 0;
+  static __thread cf_t out[IDFT_T_SIZE] __attribute__((aligned(32)));
+  for (int it = 0; it < 400; it++) {
+    const int i = (int)((id * 7 + it) % IDFT_T_INPUTS);
+    nr_ue_sensing_idft(IDFT_T_SIZE, idft_in[i], out);
+    if (memcmp(out, idft_ref[i], sizeof(out)) != 0) {
+      bad++;
+    }
+  }
+  return (void*)bad;
+}
+
+static void test_idft_threads(void)
+{
+  printf("\nDelay transform from 8 threads at once\n");
+  srand(3);
+  for (int i = 0; i < IDFT_T_INPUTS; i++) {
+    for (int k = 0; k < IDFT_T_SIZE; k++) {
+      idft_in[i][k] = (float)rand() / RAND_MAX - 0.5f + I * ((float)rand() / RAND_MAX - 0.5f);
+    }
+    nr_ue_sensing_idft(IDFT_T_SIZE, idft_in[i], idft_ref[i]);
+  }
+  pthread_t th[8];
+  for (long t = 0; t < 8; t++) {
+    pthread_create(&th[t], NULL, idft_worker, (void*)t);
+  }
+  long bad = 0;
+  for (int t = 0; t < 8; t++) {
+    void* r;
+    pthread_join(th[t], &r);
+    bad += (long)r;
+  }
+  check(bad == 0, "outputs differing from the reference", bad, 0, 0);
+}
+
 int main(void)
 {
   printf("sensing self-test: %d RB, %d kHz SCS, %.2f MHz carrier, %.3f m/bin\n",
@@ -595,6 +863,9 @@ int main(void)
     test_despread_two_layers("gapped allocation", gapped, 3, 0);
     test_despread_two_layers("PRBs 33-272, grid and BWP from CRB 5", upper, 1, 5);
   }
+
+  test_glue();
+  test_idft_threads();
 
   nr_ue_sensing_idft_free();
 

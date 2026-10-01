@@ -101,6 +101,8 @@ typedef struct SRSRAN_API {
   // Metrics
   float cfo_hz;       ///< Current CFO in Hz
   float avg_delay_us; ///< Current average delay
+  /// Samples the receive window has been moved since start, by timing corrections: positive = dropped (window later)
+  int64_t window_shift_total;
 
   float resample_ratio;
 
@@ -132,6 +134,7 @@ typedef struct SRSRAN_API {
   srsran_timestamp_t timestamp; ///< Last received timestamp
   float              cfo_hz;    ///< Current CFO in Hz
   float              delay_us;  ///< Current average delay in microseconds
+  int64_t            window_shift_total; ///< Samples the window has moved since start, including this subframe
 } srsran_ue_sync_nr_outcome_t;
 
 SRSRAN_API int prepare_resampler(resampler_kit * q, float resample_ratio, uint32_t pre_resample_sf_sz, uint32_t resample_worker_num);

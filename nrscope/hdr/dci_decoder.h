@@ -63,6 +63,9 @@ public:
   uint32_t                      bwp_start_crb  = 0;
   uint32_t                      crb_offset     = 0;
   int64_t                       dmrs_grid_slot = -1;
+  // Sensing on the same grid, when the yaml's sensing block enables it
+  struct nrscope_sensing_s*         sensing         = nullptr;
+  struct nrscope_sensing_scratch_s* sensing_scratch = nullptr;
 
   srsran_dci_dl_nr_t* dci_dl;
   /* Which PDCCH DM-RS scrambling ID the CORESET channel estimates currently hold,

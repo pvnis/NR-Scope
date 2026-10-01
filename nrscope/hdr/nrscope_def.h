@@ -312,6 +312,9 @@ struct WorkState_ {
   int              results_cpu    = -1;
   /* A known RNTI is dropped after this long without a decoded DCI */
   double rnti_expiry_s = 5.0;
+  /* Samples the receive window has moved since start, as of this slot
+  (srsran_ue_sync_nr_outcome_t.window_shift_total), for the sensing path */
+  int64_t window_shift_samples = 0;
 
   uint32_t slot_sz;
   /* Receive chains actually captured, after clamping args_t.nof_antennas to

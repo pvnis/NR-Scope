@@ -1,0 +1,135 @@
+/*
+ * SPDX-License-Identifier: LicenseRef-CSSL-1.0
+ */
+/*
+ * \brief The sensing pipeline behind one context, fed per decoded downlink grant.
+ *
+ * Everything in the sensing directory is the algorithm moved from
+ * OpenAirInterface5G (tag isac-reference-for-nrscope-port). This file is the glue
+ * that feeds it from NR-Scope's receiver, and the only sensing interface the rest
+ * of NR-Scope sees.
+ *
+ * Per grant, on the worker that decoded it:
+ *   1. the grid is the slot's full-carrier resource grid the DCI decoder already
+ *      demodulates for the DM-RS check (dmrs_check.h), so nothing is transformed
+ *      twice;
+ *   2. each layer's channel is estimated on the DM-RS symbols by the despreader
+ *      (nr_ue_dmrs_despread.h), on the pilots the DM-RS check verifies on air;
+ *   3. nr_ue_sensing_slot_profile() turns each DM-RS symbol into a delay response
+ *      and pushes it, stamped with its absolute sample time, into the history the
+ *      range-Doppler maps are built from.
+ *
+ *   4. when a stream's newest snapshot is one observation window past the end of its
+ *      last map (nr_ue_sensing_window_s(), the window the transform gathers over),
+ *      its history is copied and handed to a map thread, which runs OAI's map task
+ *      (nr_ue_sensing_map_task in OAI's phy_procedures_nr_ue.c): range-Doppler map,
+ *      TDD detector, AoA, MUSIC, and the map dump, with OAI's prints.
+ *
+ * Scratch buffers belong to the caller (one per DCI decoder) so workers estimate in
+ * parallel; only the push into the shared history takes its lock.
+ */
+#ifndef NRSCOPE_SENSING_H
+#define NRSCOPE_SENSING_H
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "nrscope/hdr/sensing/nr_ue_dmrs_despread.h"
+#include "srsran/phy/phch/phch_cfg_nr.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Runtime configuration, the sensing: block of the yaml. One field per sensing
+   option of OAI's nr-uesoftmodem (--sensing-*), same meaning and same defaults. */
+typedef struct {
+  bool enable;
+  /* --sensing-symbols: the most reference symbols one map may use, which caps the
+  cost of a transform (O(n_freq * n_bins * symbols)) and nothing else. The map is
+  triggered by time, not by this count, so a value under what the window holds only
+  thins a map; NR_SENSING_MIN_SNAPSHOTS..NR_SENSING_HISTORY_DEPTH. */
+  int symbols;
+  /// --sensing-max-speed: largest speed the map window is sized for, m/s
+  double max_speed_ms;
+  /// --sensing-dump: map CSV (plus <dump>.snap.csv once, .music.csv, .L1.csv); empty for none
+  char dump[256];
+  /// --sensing-clutter-removal: remove the static scene (slow-time mean)
+  bool clutter_removal;
+  /// --sensing-clutter-kernel: remove it with each snapshot's point spread function instead
+  bool clutter_kernel;
+  /// --sensing-clutter-compare: also dump the map with only the direct path removed
+  bool clutter_compare;
+  /// --sensing-antenna-avg: one map averaged over the Rx antennas, and the AoA
+  bool antenna_avg;
+  /// --sensing-layer-avg: one map averaged over the layers
+  bool layer_avg;
+  /// --sensing-random-drop: break up the periodicity of the slow-time sampling
+  bool random_drop;
+  /// --sensing-tdd-detect: run the TDD detector on each map
+  bool tdd_detect;
+  /// --sensing-music: also build each map with Doppler MUSIC
+  bool music;
+  /* NR-Scope only, off: undo the receive window's moves (from the timing tracking)
+  before the alignment, instead of leaving the alignment to find them as in OAI. */
+  bool compensate_window_shifts;
+} nrscope_sensing_args_t;
+
+void nrscope_sensing_default_args(nrscope_sensing_args_t* args);
+
+/* The args the yaml gave, set once by load_config before the decoders start. */
+extern nrscope_sensing_args_t nrscope_sensing_args;
+
+typedef struct nrscope_sensing_s nrscope_sensing_t;
+
+/* Per-caller scratch: one slot of channel estimates and their valid mask, over
+   the whole carrier. About 400 kB, so one per DCI decoder, allocated once. */
+typedef struct nrscope_sensing_scratch_s nrscope_sensing_scratch_t;
+nrscope_sensing_scratch_t* nrscope_sensing_scratch_alloc(uint32_t n_sc_grid);
+void                       nrscope_sensing_scratch_free(nrscope_sensing_scratch_t* sc);
+
+/* The shared context, created on first use by whichever decoder gets there first
+   and then returned to every caller. NULL when sensing is disabled.
+   carrier_hz  : the downlink carrier centre, which sets the Doppler-to-speed scale
+   srate_hz    : sample rate of the capture, which sets the sample clock of t_sample
+   ofdm_size   : FFT size of the grid (4096 at 122.88 Msps and 30 kHz) */
+nrscope_sensing_t* nrscope_sensing_get(uint64_t carrier_hz, double srate_hz, uint32_t ofdm_size, uint32_t scs_hz);
+
+/* One decoded downlink grant.
+   grid        : the slot's full-carrier grid, n_sc_grid subcarriers per symbol,
+                 symbol-major, starting at CRB place->grid_crb0 (chain 0)
+   cfg         : the PDSCH configuration derived from the DCI (grant + DM-RS)
+   dci_ports   : the DCI's antenna-ports field (TS 38.212 7.3.1.2.2), or -1 for a
+                 DCI 1_0, which has none and means port 1000
+   pci         : physical cell identity, the DM-RS scrambling fallback
+   sfn, slot_idx : where the slot sits in the frame
+   window_shift : samples the receive window has moved since start, as of this
+                 slot (srsran_ue_sync_nr_outcome_t.window_shift_total)
+   Returns snapshots pushed, 0 when the grant is not used (too narrow, a DM-RS
+   configuration the estimator does not model), negative on error. */
+int nrscope_sensing_process_grant(nrscope_sensing_t*          s,
+                                  nrscope_sensing_scratch_t*  sc,
+                                  const cf_t*                 grid,
+                                  uint32_t                    n_sc_grid,
+                                  const nr_dmrs_placement_t*  place,
+                                  const srsran_sch_cfg_nr_t*  cfg,
+                                  int                         dci_ports,
+                                  uint32_t                    pci,
+                                  uint32_t                    sfn,
+                                  uint32_t                    slot_idx,
+                                  int64_t                     window_shift);
+
+/* Block until every queued map is built and dumped. For tests. */
+void nrscope_sensing_wait_maps(nrscope_sensing_t* s);
+
+/* DM-RS ports behind the DCI's antenna-ports value, TS 38.212 table 7.3.1.2.2-1
+   (configuration type 1, maxLength 1, one codeword): a bitmap, bit i meaning
+   antenna port 1000 + i. Sets *cdm_groups to the CDM groups without data the same
+   row gives. Returns 0 for a reserved value. */
+uint16_t nrscope_dmrs_ports_type1_len1(uint32_t value, uint32_t* cdm_groups);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

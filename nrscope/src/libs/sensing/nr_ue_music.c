@@ -199,7 +199,7 @@ int nr_ue_music_doppler(const nr_sensing_slowtime_t *obs, int n_obs, nr_sensing_
     for (int i = 0; i < n && same; i++)
       same = fabs(s->t_s[i] - t[i]) < 1e-7;
     if (!same) {
-      DEBUG("sensing music: observation %d sampled at other instants, left out\n", o);
+      LOG_D(NR_PHY, "sensing music: observation %d sampled at other instants, left out\n", o);
       continue;
     }
     use[n_use++] = o;

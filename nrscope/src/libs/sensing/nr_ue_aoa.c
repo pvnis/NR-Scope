@@ -124,7 +124,7 @@ int nr_ue_aoa_process(const nr_sensing_map_t *map,
   and the map it would contribute is not there either. */
   for (int a = 0; a < n_ant; a++) {
     if (slow[a].n_snap < 1 || slow[a].n_bins != map->n_bins) {
-      WARNING(
+      LOG_W(NR_PHY,
             "aoa: rx%d has %d snapshots over %d bins against %d bins on the map, no angles\n",
             a,
             slow[a].n_snap,
@@ -133,7 +133,7 @@ int nr_ue_aoa_process(const nr_sensing_map_t *map,
       return 0;
     }
     if (slow[a].n_snap != slow[0].n_snap) {
-      WARNING("aoa: rx%d gathered %d snapshots against %d on rx0, no angles\n", a, slow[a].n_snap, slow[0].n_snap);
+      LOG_W(NR_PHY, "aoa: rx%d gathered %d snapshots against %d on rx0, no angles\n", a, slow[a].n_snap, slow[0].n_snap);
       return 0;
     }
   }
@@ -144,7 +144,7 @@ int nr_ue_aoa_process(const nr_sensing_map_t *map,
   has no speed axis to report on. Bail rather than divide by zero and fill the dump
   with infinities. */
   if (map->carrier_hz <= 0.0) {
-    WARNING("aoa: map carries no carrier frequency, no angles\n");
+    LOG_W(NR_PHY, "aoa: map carries no carrier frequency, no angles\n");
     return 0;
   }
 
@@ -165,7 +165,7 @@ int nr_ue_aoa_process(const nr_sensing_map_t *map,
   truncated axis, which means the window is mistimed rather than that the scene is
   empty, so it is worth saying out loud. */
   if (b_min >= map->n_bins) {
-    WARNING(
+    LOG_W(NR_PHY,
           "aoa: LoS at bin %.2f leaves no searchable bins below %d, no angles\n",
           map->bin_los,
           map->n_bins);
