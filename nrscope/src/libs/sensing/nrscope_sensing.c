@@ -36,6 +36,7 @@ void nrscope_sensing_default_args(nrscope_sensing_args_t* args)
   args->symbols         = NR_SENSING_HISTORY_DEPTH;
   args->max_speed_ms    = 30.0;
   args->clutter_removal = true;
+  args->mirror_reject   = true;
 }
 
 struct nrscope_sensing_scratch_s {
@@ -652,8 +653,9 @@ static void nr_ue_sensing_map_task(void *arg)
     on. Each side is the strongest cell within one bin and one Doppler cell, so an
     off-grid peak is not compared against the skirt of its own mirror. A target within a
     cell of zero Doppler is its own mirror and is kept. Set aside rather than dropped:
-    they travel with the map as markers, but the AoA and the localisation never see them. */
-    {
+    they travel with the map as markers, but the AoA and the localisation never see them.
+    Runtime parameter mirror_reject. */
+    if (t->args->mirror_reject) {
       const int nf = t->map.n_freq;
       const int nb = t->map.n_bins;
       const double df = nf > 1 ? 2.0 * t->map.f_max_hz / (nf - 1) : 0.0;

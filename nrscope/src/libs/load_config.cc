@@ -317,6 +317,7 @@ int load_config(std::vector<Radio>& radios, std::string file_name)
     flag("music", &nrscope_sensing_args.music);
     flag("compensate_window_shifts", &nrscope_sensing_args.compensate_window_shifts);
     flag("spatial_null", &nrscope_sensing_args.spatial_null);
+    flag("mirror_reject", &nrscope_sensing_args.mirror_reject);
   }
 
   if (config_yaml[setting_name]["push_to_google"]) {

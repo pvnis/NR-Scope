@@ -78,6 +78,10 @@ typedef struct {
   the chains' maps. The AoA and the direct-path bin still come from the raw chains. Needs
   antenna_avg and two chains. See nr_ue_sensing_spatial_null(). */
   bool spatial_null;
+  /* NR-Scope only, on: set aside as uncertain (verdict 3, not drawn, not localised) a
+  detection whose mirror at -v on the same range is within NR_TDD_MIRROR_DB of it. Off
+  keeps every detection the TDD detector accepts. */
+  bool mirror_reject;
 } nrscope_sensing_args_t;
 
 void nrscope_sensing_default_args(nrscope_sensing_args_t* args);
