@@ -1130,8 +1130,9 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
  
   /*
   Store the bin LOS. We know this bin is the LOS, and we can use it for the localization
-  The bin the kernel is centred on. The direct path is static and tens of dB
-  above every reflection, so the bin holding the most energy over the window is it 
+  The bin the kernel is centred on. The direct path is static and the shortest path,
+  so it is the earliest strong arrival of the window's energy profile; in a lab it is
+  also tens of dB above every reflection, outdoors it need not be
   */
   double e_prof[NR_SENSING_MAP_MAX_BINS_RANGE];
   int u0 = 0;
@@ -1146,6 +1147,16 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
     if (e > best) {
       best = e;
       u0 = b;
+    }
+  }
+  /* The earliest local peak within NR_SENSING_LOS_FIRST_DB of the strongest, see
+  there: the direct path arrives first, it does not have to be the strongest. */
+  const double e_min = best * pow(10.0, -NR_SENSING_LOS_FIRST_DB / 10.0);
+  for (int b = 0; b < u0; b++) {
+    const bool peak = (b == 0 || e_prof[b] >= e_prof[b - 1]) && e_prof[b] >= e_prof[b + 1];
+    if (peak && e_prof[b] >= e_min) {
+      u0 = b;
+      break;
     }
   }
 

@@ -542,6 +542,14 @@ that genuinely fluctuates is not either. */
 #define NR_CLUTTER_LOS_NORM 0
 #endif
 
+/* How far below the strongest bin the direct path may sit, in dB. The direct path is
+the shortest path, so it is the earliest arrival, not necessarily the strongest: outdoors
+a cluster of reflections close to the receiver can match or beat it, and taking the
+strongest bin then made bin_los jump between the two ends of that cluster from map to
+map (bins 2 and 6.5 on one run). bin_los is the earliest local peak of the window's
+energy profile within this margin of the strongest. */
+#define NR_SENSING_LOS_FIRST_DB 6.0
+
 /* Bins either side of a path that its kernel is computed on and subtracted from.
 Beyond ~48 bins the Hann skirt is some 100 dB down, below anything a cf_t response
 holds, and limiting it keeps the cost of a path independent of the map size. */
