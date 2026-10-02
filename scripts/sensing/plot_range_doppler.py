@@ -138,8 +138,9 @@ _META_NO_AOA = tuple(n for n in _META_NO_STREAM if n != "n_aoa")
 _META_NO_MARKERS = tuple(n for n in _META_NO_AOA if n != "n_marker")
 _META_LEGACY = tuple(n for n in _META_NO_MARKERS if n != "carrier_hz")
 
-# verdict codes, mirroring nr_tdd_verdict_t
-VERDICT_TARGET, VERDICT_REPLICA, VERDICT_DUPLICATE = 0, 1, 2
+# verdict codes, mirroring nr_tdd_verdict_t. UNCERTAIN (a target with an equally strong
+# mirror at -v) is listed by --list but deliberately not drawn on the map.
+VERDICT_TARGET, VERDICT_REPLICA, VERDICT_DUPLICATE, VERDICT_UNCERTAIN = 0, 1, 2, 3
 
 # A single plane wave gives a spatial peak-to-mean of Mr, so 6 dB on four antennas.
 # Below this the cell holds more than one arrival, or nothing but noise.
@@ -227,9 +228,14 @@ class Map:
         parts.append(f"{rv.size} TDD replica(s) rejected" if rv.size else "no replicas rejected")
         if dv.size:
             parts.append(f"{dv.size} residue")
+        uv, ur, usnr = self.markers_of(VERDICT_UNCERTAIN)
+        if uv.size:
+            parts.append(f"{uv.size} uncertain (mirrored at -v, not drawn)")
         lines = ["tdd-detect: " + ", ".join(parts)]
         for v, r, snr in zip(tv, tr, tsnr):
             lines.append(f"target {r:8.1f} m {v:+7.2f} m/s {snr:5.1f} dB")
+        for v, r, snr in zip(uv, ur, usnr):
+            lines.append(f"uncert {r:8.1f} m {v:+7.2f} m/s {snr:5.1f} dB")
 
         # The case worth seeing: the strongest cell of the map is something the
         # detector threw out, so reading the map by argmax alone reports a replica as

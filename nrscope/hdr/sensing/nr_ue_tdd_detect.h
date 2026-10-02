@@ -113,7 +113,18 @@ typedef enum {
   NR_TDD_VERDICT_REPLICA = 1,
   /// rejected: inside the resolution of a target already accepted, so it is residue
   NR_TDD_VERDICT_DUPLICATE = 2,
+  /* set aside: its mirror at -f on the same range bin is within NR_TDD_MIRROR_DB of it.
+  One moving reflector has one Doppler sign; a balanced +-f pair is what a static path
+  whose amplitude flickers looks like (someone shadowing it), but also what the swinging
+  limbs of a person walking with no radial speed look like. Which one it is cannot be
+  told from the map, so it is neither accepted nor thrown out, and not localised. */
+  NR_TDD_VERDICT_UNCERTAIN = 3,
 } nr_tdd_verdict_t;
+
+/* How close in power, in dB, a target's mirror cell at -f must be for the target to be
+   set aside as NR_TDD_VERDICT_UNCERTAIN. A target standing this far above its mirror
+   keeps its verdict even with a modulation underneath it. */
+#define NR_TDD_MIRROR_DB 6.0
 
 /* One detected target, with off-grid range and Doppler from nr_tdd_focus(). */
 typedef struct {

@@ -596,6 +596,48 @@ static void nr_ue_sensing_map_task(void *arg)
     int n_rej = 0;
     n_tgt = nr_tdd_detect(&obs, &cfg, tgt, NR_TDD_MAX_TARGETS, rej, &n_rej);
 
+    /* Set aside the targets whose mirror at -f is about as strong, see
+    NR_TDD_VERDICT_UNCERTAIN. Read on the averaged map, the same grid the detector ran
+    on. Each side is the strongest cell within one bin and one Doppler cell, so an
+    off-grid peak is not compared against the skirt of its own mirror. A target within a
+    cell of zero Doppler is its own mirror and is kept. Set aside rather than dropped:
+    they travel with the map as markers, but the AoA and the localisation never see them. */
+    {
+      const int nf = t->map.n_freq;
+      const int nb = t->map.n_bins;
+      const double df = nf > 1 ? 2.0 * t->map.f_max_hz / (nf - 1) : 0.0;
+      int n_kept = 0;
+      for (int i = 0; i < n_tgt; i++) {
+        const int b0 = (int)lround(tgt[i].bin);
+        const int f0 = df > 0.0 ? (int)lround((tgt[i].f_hz + t->map.f_max_hz) / df) : -1;
+        const int fm = nf - 1 - f0;
+        bool uncertain = false;
+        if (b0 >= 0 && b0 < nb && f0 >= 0 && f0 < nf && abs(f0 - fm) > 2) {
+          double p_own = 0.0, p_mir = 0.0;
+          for (int b = b0 - 1; b <= b0 + 1; b++) {
+            if (b < 0 || b >= nb)
+              continue;
+            for (int d = -1; d <= 1; d++) {
+              if (f0 + d >= 0 && f0 + d < nf && t->map.power[b * nf + f0 + d] > p_own)
+                p_own = t->map.power[b * nf + f0 + d];
+              if (fm + d >= 0 && fm + d < nf && t->map.power[b * nf + fm + d] > p_mir)
+                p_mir = t->map.power[b * nf + fm + d];
+            }
+          }
+          uncertain = p_mir > 0.0 && p_own < p_mir * pow(10.0, NR_TDD_MIRROR_DB / 10.0);
+        }
+        if (uncertain) {
+          if (n_rej < NR_TDD_MAX_REJECTED) { // its marker only; set aside either way
+            rej[n_rej] = tgt[i];
+            rej[n_rej++].verdict = NR_TDD_VERDICT_UNCERTAIN;
+          }
+        } else {
+          tgt[n_kept++] = tgt[i];
+        }
+      }
+      n_tgt = n_kept;
+    }
+
     // LOG_I(NR_PHY,
     //       "SENSING DETECT %d.%d rx%d ports 0x%x layer %d: %d target(s) from %d snapshots, "
     //       "grid +-%.0f Hz x %d, replicas every %.0f Hz (%.1f m/s)\n",
