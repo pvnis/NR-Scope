@@ -1841,6 +1841,7 @@ bool nr_ue_sensing_spatial_null(const nr_sensing_history_t *h0,
   double m0r[NR_SENSING_MAP_MAX_BINS_RANGE] = {0}, m0i[NR_SENSING_MAP_MAX_BINS_RANGE] = {0};
   double m1r[NR_SENSING_MAP_MAX_BINS_RANGE] = {0}, m1i[NR_SENSING_MAP_MAX_BINS_RANGE] = {0};
   double e_prof[NR_SENSING_MAP_MAX_BINS_RANGE] = {0};
+  double e1 = 0.0; // chain 1's energy, every bin
   for (int k = 0; k < h0->count; k++) {
     if (pair[k] < 0)
       continue;
@@ -1849,7 +1850,20 @@ bool nr_ue_sensing_spatial_null(const nr_sensing_history_t *h0,
       m0r[b] += crealf(a[b]), m0i[b] += cimagf(a[b]);
       m1r[b] += crealf(c[b]), m1i[b] += cimagf(c[b]);
       e_prof[b] += (double)crealf(a[b]) * crealf(a[b]) + (double)cimagf(a[b]) * cimagf(a[b]);
+      e1 += (double)crealf(c[b]) * crealf(c[b]) + (double)cimagf(c[b]) * cimagf(c[b]);
     }
+  }
+  {
+    double e0 = 0.0, s0 = 0.0, s1 = 0.0;
+    const double np = res->n_pairs;
+    for (int b = 0; b < n_bins; b++) {
+      e0 += e_prof[b];
+      s0 += (m0r[b] * m0r[b] + m0i[b] * m0i[b]) / np; // |mean|^2 * n, as the energies are sums over n
+      s1 += (m1r[b] * m1r[b] + m1i[b] * m1i[b]) / np;
+    }
+    res->p1_db = (e0 > 0.0 && e1 > 0.0) ? 10.0 * log10(e1 / e0) : -99.0;
+    res->static0 = e0 > 0.0 ? s0 / e0 : 0.0;
+    res->static1 = e1 > 0.0 ? s1 / e1 : 0.0;
   }
 
   /* The direct path's mainlobe, the bins the null is fitted on: one direction, the

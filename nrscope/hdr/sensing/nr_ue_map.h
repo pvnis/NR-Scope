@@ -746,6 +746,15 @@ typedef struct {
   /// snapshots of the stream on chain 0, and how many of them chain 1 also held
   int n0;
   int n_pairs;
+  /* Health of the pair, to tell a chain that does not see the scene from a scene that
+  has no single direction to null. p1_db: chain 1's mean power over chain 0's, every bin
+  and paired snapshot, near 0 dB for two like antennas and chains. static0, static1: the
+  share of each chain's power that is static (|slow-time mean|^2 over mean |h|^2),
+  close to 1 for a still scene that stands well above the noise, near 0 for a chain that
+  holds noise only. */
+  double p1_db;
+  double static0;
+  double static1;
 } nr_sensing_null_t;
 
 /// aarx of a map built from the nulled chains, as -1 marks the average of them

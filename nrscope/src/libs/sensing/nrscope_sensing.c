@@ -563,14 +563,17 @@ static void nr_ue_sensing_map_task(void *arg)
       free(raw);
       LOG_I(NR_PHY,
             "sensing: spatial null w %.3f%+.3fj at bin %d: direct path %.1f dB, static scene %.1f dB, "
-            "%d of %d symbols on both chains\n",
+            "%d of %d symbols on both chains. rx1 %+.1f dB against rx0, static share rx0 %.2f rx1 %.2f\n",
             crealf(null_res.w),
             cimagf(null_res.w),
             null_res.u0,
             null_res.los_db,
             null_res.static_db,
             null_res.n_pairs,
-            null_res.n0);
+            null_res.n0,
+            null_res.p1_db,
+            null_res.static0,
+            null_res.static1);
     }
   } else {
     n = nr_ue_sensing_task_map(t, clutter, NR_CLUTTER_MAX_PATHS, &t->map, slow, n_slow, &n_combined, obs);

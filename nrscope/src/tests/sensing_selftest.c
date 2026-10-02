@@ -883,6 +883,9 @@ static void test_spatial_null(void)
     check(r.los_db < -60.0, "direct path static power after null (dB)", r.los_db, -60, 0);
     check(los_left < 1e-4, "direct path left per symbol", los_left, 0, 1e-4);
     check(fabs(tgt_ratio - want) < 1e-3, "mover gain through the null", tgt_ratio, want, 1e-3);
+    // chain 1 holds the scene at |c| = 0.8 of chain 0's, -1.9 dB
+    check(fabs(r.p1_db - 20.0 * log10(0.8)) < 0.1, "rx1 power against rx0 (dB)", r.p1_db, 20.0 * log10(0.8), 0.1);
+    check(r.static0 > 0.99 && r.static1 > 0.99, "static share of a still direct path", r.static1, 1, 0.01);
     free(out.ring);
     pthread_mutex_destroy(&out.lock);
   }
