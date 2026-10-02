@@ -855,6 +855,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
                                 double max_speed_ms,
                                 nr_sensing_clutter_t clutter_mode,
                                 int max_paths,
+                                int n_freq_fixed,
                                 nr_sensing_map_t *map,
                                 nr_sensing_slowtime_t *slow_out)
 {
@@ -933,6 +934,31 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
   see the OBSERVATION WINDOW block in nr_ue_map.h.
   */
 
+  /* Number of Doppler points: 2 per resolution cell (1/t_span). That is the same
+  density as the TDD detector's grid, so the same CFAR settings work on both. Odd, so
+  that 0 Hz falls exactly on a point. */
+  int n_freq = (int)(4.0 * f_max * t_span) | 1;
+  if (n_freq < 3)
+    n_freq = 3;
+  if (n_freq > NR_SENSING_MAP_MAX_BINS_FREQ) {
+    /* Should be unreachable now that the window is bounded */
+    LOG_W(NR_PHY,
+          "sensing: Doppler grid clamped, %d points wanted for f_max %.0f Hz over %.3f s but only %d available. "
+          "The grid is %.2f points per resolution cell instead of 2 and peak heights are understated. "
+          "Lower --sensing-max-speed or the window bound (%.3f s), or raise NR_SENSING_MAP_MAX_BINS_FREQ.\n",
+          n_freq,
+          f_max,
+          t_span,
+          NR_SENSING_MAP_MAX_BINS_FREQ - 1,
+          (double)((NR_SENSING_MAP_MAX_BINS_FREQ - 1) | 1) / (2.0 * f_max * t_span),
+          max_span_s);
+    n_freq = (NR_SENSING_MAP_MAX_BINS_FREQ - 1) | 1;
+  }
+  /* Another map's grid, see n_freq_fixed. Its window differs from this one by a
+  snapshot or so, so the density stays within a hair of 2 points per cell. */
+  if (n_freq_fixed > 0 && n_freq_fixed <= NR_SENSING_MAP_MAX_BINS_FREQ)
+    n_freq = n_freq_fixed;
+
   /* The bounds the window was held to (grid budget and resolution target), reported
   with each map. */
   const nr_sensing_span_t sp = nr_ue_sensing_span_bounds(hist, max_speed_ms, n_pilots_widest, first->stream.k_step);
@@ -988,29 +1014,8 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
           dv_got,
           dv_err_pct,
           f_max * lambda_m / 2.0,
-          (int)(4.0 * f_max * t_span) | 1,
-          ((int)(4.0 * f_max * t_span) | 1) / (2.0 * f_max * t_span));
-
-  /* Number of Doppler points: 2 per resolution cell (1/t_span). That is the same
-  density as the TDD detector's grid, so the same CFAR settings work on both. Odd, so
-  that 0 Hz falls exactly on a point. */
-  int n_freq = (int)(4.0 * f_max * t_span) | 1;
-  if (n_freq < 3)
-    n_freq = 3;
-  if (n_freq > NR_SENSING_MAP_MAX_BINS_FREQ) {
-    /* Should be unreachable now that the window is bounded */
-    LOG_W(NR_PHY,
-          "sensing: Doppler grid clamped, %d points wanted for f_max %.0f Hz over %.3f s but only %d available. "
-          "The grid is %.2f points per resolution cell instead of 2 and peak heights are understated. "
-          "Lower --sensing-max-speed or the window bound (%.3f s), or raise NR_SENSING_MAP_MAX_BINS_FREQ.\n",
           n_freq,
-          f_max,
-          t_span,
-          NR_SENSING_MAP_MAX_BINS_FREQ - 1,
-          (double)((NR_SENSING_MAP_MAX_BINS_FREQ - 1) | 1) / (2.0 * f_max * t_span),
-          max_span_s);
-    n_freq = (NR_SENSING_MAP_MAX_BINS_FREQ - 1) | 1;
-  }
+          n_freq / (2.0 * f_max * t_span));
 
   map->n_bins = n_bins;
   map->n_freq = n_freq;

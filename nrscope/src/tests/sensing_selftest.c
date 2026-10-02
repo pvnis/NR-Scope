@@ -206,6 +206,7 @@ static bool test_run_scene(const char* name,
                                                       20.0, // max speed of the grid, m/s; see the span criteria below
                                                       clutter,
                                                       NR_CLUTTER_MAX_PATHS,
+                                                      0,
                                                       map,
                                                       NULL);
   if (n <= 0) {
@@ -214,6 +215,23 @@ static bool test_run_scene(const char* name,
     free(map);
     nr_ue_sensing_history_free(&hist);
     return false;
+  }
+
+  /* A shorter window sizes its own Doppler grid differently, as a second Rx chain one
+  snapshot short of the first does, and its map can then not be summed with this one
+  cell by cell. Built on this map's grid (n_freq_fixed) it has to land on it exactly. */
+  {
+    nr_sensing_map_t* other = calloc_or_fail(1, sizeof(*other));
+    const int         n_short = n - n / 20;
+    const int n_own = nr_ue_sensing_range_doppler(&hist, &stream, n_short, 20.0, clutter, NR_CLUTTER_MAX_PATHS, 0, other, NULL);
+    const int own_freq = other->n_freq;
+    const int n_fix =
+        nr_ue_sensing_range_doppler(&hist, &stream, n_short, 20.0, clutter, NR_CLUTTER_MAX_PATHS, map->n_freq, other, NULL);
+    check(n_own > 0 && own_freq != map->n_freq, "shorter window sizes its own grid differently", own_freq,
+          map->n_freq, 0);
+    check(n_fix > 0 && other->n_freq == map->n_freq && other->f_max_hz == map->f_max_hz,
+          "shorter window on the first map's grid", other->n_freq, map->n_freq, 0);
+    free(other);
   }
 
   /* Strongest cell away from zero Doppler. The direct path is static and, with

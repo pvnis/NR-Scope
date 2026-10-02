@@ -620,6 +620,13 @@ void nr_ue_sensing_clutter_kernel(int n_pilots, int a_m, double u0, int idft_siz
    clamped to 1..NR_CLUTTER_MAX_PATHS. Pass NR_CLUTTER_MAX_PATHS normally, 1 for the
    direct path only. Ignored by the other modes.
 
+   n_freq_fixed, when positive, is the number of Doppler points to use instead of the
+   2 per resolution cell this window's t_span asks for. The axis runs over the same
+   +-f_max whatever the window, so a map built with another map's n_freq lands on that
+   map's grid exactly, which is what averaging maps cell by cell needs: two Rx chains
+   whose windows differ by a snapshot otherwise get 379 and 383 points. Pass 0 to size
+   the grid from the window.
+
    slow_out receives the conditioned slow-time samples when it is not NULL; see
    nr_sensing_slowtime_t. Passing NULL skips it entirely and costs nothing.
 
@@ -630,6 +637,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
                                 double max_speed_ms,
                                 nr_sensing_clutter_t clutter_mode,
                                 int max_paths,
+                                int n_freq_fixed,
                                 nr_sensing_map_t *map,
                                 nr_sensing_slowtime_t *slow_out);
 

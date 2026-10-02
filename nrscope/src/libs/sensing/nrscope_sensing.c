@@ -364,6 +364,7 @@ static int nr_ue_sensing_task_map(const nr_sensing_map_task_t *t,
                                       t->args->max_speed_ms,
                                       clutter,
                                       max_paths,
+                                      0, // the first chain sizes the grid every other map is built on
                                       map,
                                       obs != NULL ? &obs[0] : (n_slow > 0 ? &slow[0] : NULL));
   if (obs != NULL && n > 0 && n_slow > 0)
@@ -395,19 +396,20 @@ static int nr_ue_sensing_task_map(const nr_sensing_map_task_t *t,
 
         /* Here we handle the fact that we do not necessarily use all layers. In fact,
         the scheduler can maybe not schedule layer 1 in the window. */
+        /* On the first chain's Doppler grid (map->n_freq), so the maps can be summed cell
+        by cell; see n_freq_fixed. */
         if (nr_ue_sensing_range_doppler(&t->snap[a], &st, t->args->symbols, t->args->max_speed_ms,
-                                        clutter, max_paths, other, ob != NULL ? ob : sl) <= 0) {
+                                        clutter, max_paths, map->n_freq, other, ob != NULL ? ob : sl) <= 0) {
           if (ob != NULL)
             ob->n_snap = 0;
           continue;
         }
         if (ob != NULL && sl != NULL)
           nr_ue_sensing_slowtime_copy(sl, ob);
-        /* Each chain sizes its own grid from the window it gathered, so a chain whose
-        window came out a snapshot shorter can land on a different n_freq (379 against
-        383). Summed cell by cell, its rows would then be read with the wrong stride,
-        and past its end when it is the smaller one: the last range bin filled with
-        whatever the buffer held. Such a map is left out of the average. */
+        /* Every map is built on the first chain's grid above, so this only guards the
+        assumption: summed cell by cell, a map of another shape would be read with the
+        wrong row stride, and past its end when it is the smaller one, which is what
+        filled the last range bin with garbage before the grid was shared. */
         if (other->n_bins != map->n_bins || other->n_freq != map->n_freq || other->f_max_hz != map->f_max_hz) {
           LOG_W(NR_PHY,
                 "sensing: rx%d layer %d map is %d x %d against %d x %d on the first, left out of the average\n",
