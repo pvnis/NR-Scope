@@ -831,6 +831,65 @@ static void test_glue(void)
  * 1 carries a fixed 50 degree offset, as a cable would, so a correction computed on
  * its own symbols would differ from chain 0's by exactly that. OAI remembered only the
  * last symbol, which here would leave two of every three to be recomputed. */
+/* The spatial null across two chains. The direct path reaches chain 1 through one
+ * complex factor and a mover from another direction through a different one, as two
+ * antennas give paths from two directions. Chain 0 minus w chain 1 has to cancel the
+ * first and keep the second, at the gain |1 - c_tgt / c_los| the geometry leaves it.
+ * Chain 1 misses one symbol, which must be left out rather than paired with another. */
+static void test_spatial_null(void)
+{
+  printf("\nSpatial null across two chains\n");
+  enum { N = 400, LOS = 5, TGT = 20, DROP = 123 };
+  const nr_sensing_stream_t st    = {.ports = 0x1, .layer = 0, .k_step = 2, .k_offset = 0};
+  const cf_t                c_los = 0.8f * cexpf(I * 1.0f);  // chain 1 / chain 0 for the gNB's direction
+  const cf_t                c_tgt = 0.8f * cexpf(-I * 0.7f); // and for the mover's
+  nr_sensing_history_t      h0, h1, out;
+  if (!nr_ue_sensing_history_init(&h0, N, 30000, 4096, 3450000000ULL) ||
+      !nr_ue_sensing_history_init(&h1, N, 30000, 4096, 3450000000ULL)) {
+    printf("  could not allocate the histories\n");
+    failures++;
+    return;
+  }
+  int n1 = 0;
+  for (int i = 0; i < N; i++) {
+    nr_sensing_snapshot_t e = {.t_sample = 1000 + (uint64_t)i * 21900, .stream = st, .n_pilots = 1638,
+                               .idft_size = 2048, .k_first = 0, .n_bins = NR_SENSING_MAP_MAX_BINS_RANGE};
+    const cf_t los = 1.0f, tgt = 0.05f * cexpf(I * (float)(2.0 * M_PI * 40.0 * i * 21900 / 122.88e6));
+    nr_sensing_snapshot_t e1 = e;
+    e.h[LOS] = los, e.h[TGT] = tgt;
+    e1.h[LOS] = c_los * los, e1.h[TGT] = c_tgt * tgt;
+    h0.ring[i] = e;
+    if (i != DROP)
+      h1.ring[n1++] = e1;
+  }
+  h0.count = N, h0.head = 0;
+  h1.count = n1, h1.head = n1 % N;
+
+  nr_sensing_null_t r;
+  const bool        ok = nr_ue_sensing_spatial_null(&h0, &h1, &st, &out, &r);
+  check(ok, "null built", ok, 1, 0);
+  if (ok) {
+    double tgt_ratio = 0.0, los_left = 0.0;
+    for (int i = 0; i < N; i++) {
+      if (i == DROP)
+        continue;
+      tgt_ratio += cabsf(out.ring[i].h[TGT]) / cabsf(h0.ring[i].h[TGT]) / (N - 1);
+      los_left += cabsf(out.ring[i].h[LOS]) / (N - 1);
+    }
+    const double want = cabsf(1.0f - c_tgt / c_los);
+    check(r.n_pairs == N - 1, "symbols paired across the chains", r.n_pairs, N - 1, 0);
+    check(out.ring[DROP].stream.ports == 0, "unpaired symbol left out", out.ring[DROP].stream.ports, 0, 0);
+    check(r.u0 == LOS, "null fitted at the direct path", r.u0, LOS, 0);
+    check(r.los_db < -60.0, "direct path static power after null (dB)", r.los_db, -60, 0);
+    check(los_left < 1e-4, "direct path left per symbol", los_left, 0, 1e-4);
+    check(fabs(tgt_ratio - want) < 1e-3, "mover gain through the null", tgt_ratio, want, 1e-3);
+    free(out.ring);
+    pthread_mutex_destroy(&out.lock);
+  }
+  nr_ue_sensing_history_free(&h0);
+  nr_ue_sensing_history_free(&h1);
+}
+
 static void test_align_chains(void)
 {
   printf("\nAlignment across two chains, chain 0's symbols first\n");
@@ -972,6 +1031,7 @@ int main(void)
 
   test_glue();
   test_align_chains();
+  test_spatial_null();
   test_idft_threads();
 
   nr_ue_sensing_idft_free();

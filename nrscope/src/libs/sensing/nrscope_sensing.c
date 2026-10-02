@@ -526,7 +526,56 @@ static void nr_ue_sensing_map_task(void *arg)
   }
 
   int n_combined = 0;
-  int n = nr_ue_sensing_task_map(t, clutter, NR_CLUTTER_MAX_PATHS, &t->map, slow, n_slow, &n_combined, obs);
+  int n = 0;
+
+  /* Runtime parameter spatial_null: the map from chain 0 minus w times chain 1, w
+  cancelling the direct path's direction, instead of the average of the chains' maps;
+  see nr_ue_sensing_spatial_null(). Built as a one-chain task on the nulled history, so
+  it goes through the same clutter removal and transform as any map, and its slow-time
+  samples are what the detector runs on (det below). The raw chains are still
+  transformed, into a map that is thrown away, for what has to come from them: the AoA,
+  which compares the chains and would find no direct path left in the nulled one, the
+  MUSIC observations, and bin_los, the direct path the excess ranges are measured from. */
+  const bool null = t->args->spatial_null && t->n_ant >= 2;
+  nr_sensing_map_task_t *tn = NULL;
+  nr_sensing_slowtime_t slow_null = {0};
+  nr_sensing_null_t null_res;
+  if (null) {
+    tn = malloc_or_fail(sizeof(*tn) + sizeof(tn->snap[0]));
+    memcpy(tn, t, sizeof(*t));
+    tn->n_ant = 1;
+    if (!nr_ue_sensing_spatial_null(&t->snap[0], &t->snap[1], &t->stream, &tn->snap[0], &null_res)) {
+      LOG_W(NR_PHY, "sensing: spatial null found no symbol on both chains, map averaged instead\n");
+      free(tn);
+      tn = NULL;
+    }
+  }
+  if (tn != NULL) {
+    slow_null.t_s = malloc_or_fail((size_t)tn->snap[0].depth * sizeof(*slow_null.t_s));
+    slow_null.h_re = malloc_or_fail((size_t)tn->snap[0].depth * NR_SENSING_MAP_MAX_BINS_RANGE * sizeof(*slow_null.h_re));
+    slow_null.h_im = malloc_or_fail((size_t)tn->snap[0].depth * NR_SENSING_MAP_MAX_BINS_RANGE * sizeof(*slow_null.h_im));
+    n = nr_ue_sensing_task_map(tn, clutter, NR_CLUTTER_MAX_PATHS, &t->map, &slow_null, 1, NULL, NULL);
+    if (n > 0) {
+      nr_sensing_map_t *raw = malloc_or_fail(sizeof(*raw));
+      if (nr_ue_sensing_task_map(t, clutter, NR_CLUTTER_MAX_PATHS, raw, slow, n_slow, &n_combined, obs) > 0)
+        t->map.bin_los = raw->bin_los;
+      free(raw);
+      LOG_I(NR_PHY,
+            "sensing: spatial null w %.3f%+.3fj at bin %d: direct path %.1f dB, static scene %.1f dB, "
+            "%d of %d symbols on both chains\n",
+            crealf(null_res.w),
+            cimagf(null_res.w),
+            null_res.u0,
+            null_res.los_db,
+            null_res.static_db,
+            null_res.n_pairs,
+            null_res.n0);
+    }
+  } else {
+    n = nr_ue_sensing_task_map(t, clutter, NR_CLUTTER_MAX_PATHS, &t->map, slow, n_slow, &n_combined, obs);
+  }
+  // the slow-time samples the map was built from, which the detector has to see too
+  const nr_sensing_slowtime_t *det = tn != NULL ? &slow_null : &slow[0];
 
   nr_sensing_marker_t markers[NR_TDD_MAX_TARGETS + NR_TDD_MAX_REJECTED];
   int n_markers = 0;
@@ -550,14 +599,14 @@ static void nr_ue_sensing_map_task(void *arg)
   Now by taking the DFT we get (see math) 2 sums where one of them creates replicas every
   f = k / T_TDD, which is at 5ms of period is every 200 Hz.
   */
-  if (detect && n > 0 && slow[0].n_snap >= 8) {
+  if (detect && n > 0 && det->n_snap >= 8) {
     const double slot_dur_s = 1e-3 / ((double)t->snap[0].scs_hz / 15000.0);
     const double t_tdd_s = NR_SENSING_TDD_PERIOD_SLOTS * slot_dur_s;
-    const double t_span = slow[0].t_s[slow[0].n_snap - 1] - slow[0].t_s[0];
+    const double t_span = det->t_s[det->n_snap - 1] - det->t_s[0];
 
-    float *hann = malloc_or_fail((size_t)slow[0].win_len * sizeof(*hann));
-    if (!nr_ue_sensing_hann_coeffs(slow[0].win_len, hann))
-      for (int i = 0; i < slow[0].win_len; i++)
+    float *hann = malloc_or_fail((size_t)det->win_len * sizeof(*hann));
+    if (!nr_ue_sensing_hann_coeffs(det->win_len, hann))
+      for (int i = 0; i < det->win_len; i++)
         hann[i] = 1.0f; // degenerate lattice: the transform was left rectangular too
 
     const double lambda_m = C_M_PER_S / t->map.carrier_hz;
@@ -568,22 +617,22 @@ static void nr_ue_sensing_map_task(void *arg)
     models a target the way the data holds it. Same basis, from the same function, as
     the filter itself; laid out [n_q][n_snap] for the detector. */
     double q_basis[NR_CLUTTER_SLOW_TREND_MAX + 1][NR_SENSING_HISTORY_DEPTH];
-    const int trend_n_q = nr_ue_sensing_slow_basis(slow[0].t_s, slow[0].n_snap, slow[0].trend_degree, q_basis);
-    double *trend_q = trend_n_q > 0 ? malloc_or_fail((size_t)trend_n_q * slow[0].n_snap * sizeof(*trend_q)) : NULL;
+    const int trend_n_q = nr_ue_sensing_slow_basis(det->t_s, det->n_snap, det->trend_degree, q_basis);
+    double *trend_q = trend_n_q > 0 ? malloc_or_fail((size_t)trend_n_q * det->n_snap * sizeof(*trend_q)) : NULL;
     for (int k = 0; k < trend_n_q; k++)
-      memcpy(&trend_q[(size_t)k * slow[0].n_snap], q_basis[k], (size_t)slow[0].n_snap * sizeof(*trend_q));
+      memcpy(&trend_q[(size_t)k * det->n_snap], q_basis[k], (size_t)det->n_snap * sizeof(*trend_q));
 
     const nr_tdd_obs_t obs = {
-        .n_snap = slow[0].n_snap,
-        .t_s = slow[0].t_s,
-        .h_re = slow[0].h_re,
-        .h_im = slow[0].h_im,
-        .n_bins = slow[0].n_bins,
-        .idft_size = slow[0].idft_size,
-        .win_len = slow[0].win_len,
-        .win_start = slow[0].win_start,
+        .n_snap = det->n_snap,
+        .t_s = det->t_s,
+        .h_re = det->h_re,
+        .h_im = det->h_im,
+        .n_bins = det->n_bins,
+        .idft_size = det->idft_size,
+        .win_len = det->win_len,
+        .win_start = det->win_start,
         .win = hann,
-        .m_per_bin = slow[0].m_per_bin,
+        .m_per_bin = det->m_per_bin,
         .n_freq = n_freq_det,
         .f_max_hz = f_max_det,
         .lambda_m = lambda_m,
@@ -758,7 +807,10 @@ static void nr_ue_sensing_map_task(void *arg)
       snprintf(rx_label, sizeof(rx_label), "avg");
     else
       snprintf(rx_label, sizeof(rx_label), "%d", t->aarx);
-    nr_ue_sensing_dump_map(t->args->dump[0] ? t->args->dump : NULL, t->frame, t->slot, t->aarx, &t->map, markers, n_markers, aoa_out, n_aoa);
+    /* aarx -2 marks a nulled map, as -1 marks an average: the plot labels it, and nothing
+    else in a dump changes */
+    nr_ue_sensing_dump_map(t->args->dump[0] ? t->args->dump : NULL, t->frame, t->slot,
+                           tn != NULL ? NR_SENSING_AARX_NULL : t->aarx, &t->map, markers, n_markers, aoa_out, n_aoa);
 
     /* The MUSIC map of the same window, on the same grid, written to its own file one line
     per map in the same order as the DFT dump, so line i of both files is the same window.
@@ -844,6 +896,14 @@ static void nr_ue_sensing_map_task(void *arg)
             t->n_ant * t->n_layers,
             t->n_ant,
             t->n_layers);
+  }
+  if (tn != NULL) {
+    free(slow_null.t_s);
+    free(slow_null.h_re);
+    free(slow_null.h_im);
+    free(tn->snap[0].ring);
+    pthread_mutex_destroy(&tn->snap[0].lock);
+    free(tn);
   }
   for (int a = 0; a < n_slow; a++) {
     free(slow[a].t_s);

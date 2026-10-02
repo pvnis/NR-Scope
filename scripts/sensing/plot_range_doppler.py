@@ -348,8 +348,9 @@ class Map:
         return self.ranges[b], self.speeds(override)[f]
 
     def label(self, override=None):
-        # aarx -1 marks a map averaged over every Rx antenna, see --sensing-antenna-avg
-        rx = "rx avg" if self.aarx < 0 else f"rx{self.aarx}"
+        # aarx -1 marks a map averaged over every Rx antenna, see --sensing-antenna-avg,
+        # and -2 one built from chain 0 minus weighted chain 1 (spatial_null)
+        rx = "rx null" if self.aarx == -2 else "rx avg" if self.aarx < 0 else f"rx{self.aarx}"
         return (f"{rx} {self.signal}: "
                 f"{self.n_snapshots} snapshots over {self.t_span_s * 1e3:.1f} ms, "
                 f"{self.n_bins} bins x {self.n_freq} doppler, "

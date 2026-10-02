@@ -73,6 +73,11 @@ typedef struct {
   /* NR-Scope only, off: undo the receive window's moves (from the timing tracking)
   before the alignment, instead of leaving the alignment to find them as in OAI. */
   bool compensate_window_shifts;
+  /* NR-Scope only, off: build the map from chain 0 minus a weighted chain 1, the weight
+  chosen so the direct path cancels (a spatial null toward the gNB), instead of averaging
+  the chains' maps. The AoA and the direct-path bin still come from the raw chains. Needs
+  antenna_avg and two chains. See nr_ue_sensing_spatial_null(). */
+  bool spatial_null;
 } nrscope_sensing_args_t;
 
 void nrscope_sensing_default_args(nrscope_sensing_args_t* args);

@@ -96,3 +96,4 @@ sensing:
   tdd_detect: true
   music: false
   compensate_window_shifts: false  # NR-Scope only; off is OAI's behaviour
+  spatial_null: false  # map from chain 0 minus weighted chain 1, nulling the direct path; needs antenna_avg, 2 chains

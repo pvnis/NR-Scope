@@ -715,4 +715,46 @@ void nr_ue_sensing_dump_snapshots(const char *path,
                                   int n_snap_max,
                                   double max_speed_ms);
 
+/* SPATIAL NULL toward the gNB with two Rx chains.
+
+Every path reaches the two chains with a phase (and gain) difference set by the
+direction it comes from. A direction's paths therefore all satisfy h1 = c h0 for one
+complex c, and chain 0 minus w = 1/c times chain 1 cancels that direction while paths
+from other directions, which have their own c, survive with gain |1 - w c'|. Fitted on
+the direct path's mainlobe in the static (slow-time mean) profile:
+
+    w = <m0, m1> / <m1, m1>  over the bins around the direct path
+
+so the direct path, and any static or moving path arriving from the gNB's direction,
+cancels. Flicker of paths from other directions does not; this is a single null, as two
+chains allow one.
+
+out receives chain 0's history with each snapshot that chain 1 also holds (same symbol:
+same t_sample and layer) replaced by h0 - w h1, and every other snapshot of the stream
+marked with ports 0 so no gather takes it. out owns a new ring and lock, to be freed by
+the caller. res reports the weight and how deep the null went: los_db is the direct
+path's static power after over before, static_db the same over the whole profile.
+Returns false, out untouched, when no snapshot pairs up. */
+typedef struct {
+  cf_t w;
+  /// the direct path's bin the weight was fitted around
+  int u0;
+  /// static power around the direct path after the null over before, dB
+  double los_db;
+  /// static power of the whole profile after over before, dB
+  double static_db;
+  /// snapshots of the stream on chain 0, and how many of them chain 1 also held
+  int n0;
+  int n_pairs;
+} nr_sensing_null_t;
+
+/// aarx of a map built from the nulled chains, as -1 marks the average of them
+#define NR_SENSING_AARX_NULL (-2)
+
+bool nr_ue_sensing_spatial_null(const nr_sensing_history_t *h0,
+                                const nr_sensing_history_t *h1,
+                                const nr_sensing_stream_t *st,
+                                nr_sensing_history_t *out,
+                                nr_sensing_null_t *res);
+
 #endif // __NR_UE_MAP__H__

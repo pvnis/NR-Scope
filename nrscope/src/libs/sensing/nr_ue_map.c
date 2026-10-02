@@ -849,6 +849,24 @@ static int nr_ue_sensing_cmp_double(const void *a, const void *b)
   return (x > y) - (x < y);
 }
 
+/* The direct path's bin in an energy profile: the earliest local peak within
+NR_SENSING_LOS_FIRST_DB of the strongest, see there. The direct path arrives first,
+it does not have to be the strongest. */
+static int nr_ue_sensing_los_peak(const double *e_prof, int n_bins)
+{
+  int u0 = 0;
+  for (int b = 1; b < n_bins; b++)
+    if (e_prof[b] > e_prof[u0])
+      u0 = b;
+  const double e_min = e_prof[u0] * pow(10.0, -NR_SENSING_LOS_FIRST_DB / 10.0);
+  for (int b = 0; b < u0; b++) {
+    const bool peak = (b == 0 || e_prof[b] >= e_prof[b - 1]) && e_prof[b] >= e_prof[b + 1];
+    if (peak && e_prof[b] >= e_min)
+      return b;
+  }
+  return u0;
+}
+
 int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
                                 const nr_sensing_stream_t *stream,
                                 int n_snap_max,
@@ -1140,8 +1158,6 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
   also tens of dB above every reflection, outdoors it need not be
   */
   double e_prof[NR_SENSING_MAP_MAX_BINS_RANGE];
-  int u0 = 0;
-  double best = -1.0;
   for (int b = 0; b < n_bins; b++) {
     double e = 0.0;
     for (int i = 0; i < n; i++) {
@@ -1149,21 +1165,8 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
       e += (double)crealf(h[b]) * crealf(h[b]) + (double)cimagf(h[b]) * cimagf(h[b]);
     }
     e_prof[b] = e;
-    if (e > best) {
-      best = e;
-      u0 = b;
-    }
   }
-  /* The earliest local peak within NR_SENSING_LOS_FIRST_DB of the strongest, see
-  there: the direct path arrives first, it does not have to be the strongest. */
-  const double e_min = best * pow(10.0, -NR_SENSING_LOS_FIRST_DB / 10.0);
-  for (int b = 0; b < u0; b++) {
-    const bool peak = (b == 0 || e_prof[b] >= e_prof[b - 1]) && e_prof[b] >= e_prof[b + 1];
-    if (peak && e_prof[b] >= e_min) {
-      u0 = b;
-      break;
-    }
-  }
+  const int u0 = nr_ue_sensing_los_peak(e_prof, n_bins);
 
   /* Sub-bin refinement of the direct path. Worth doing rather than reporting the
   integer bin: at 2.44 m/bin the rounding alone is up to 1.2 m of bias, and it lands
@@ -1767,4 +1770,138 @@ void nr_ue_sensing_dump_snapshots(const char *path,
         stream->layer,
         stream->k_step,
         path);
+}
+
+/* SPATIAL NULL, see nr_ue_sensing_spatial_null() in nr_ue_map.h. */
+
+typedef struct {
+  uint64_t key;
+  int idx;
+} null_key_t;
+
+static int null_key_cmp(const void *a, const void *b)
+{
+  const uint64_t x = ((const null_key_t *)a)->key, y = ((const null_key_t *)b)->key;
+  return (x > y) - (x < y);
+}
+
+static bool null_stream_match(const nr_sensing_snapshot_t *e, const nr_sensing_stream_t *st)
+{
+  return e->stream.ports == st->ports && e->stream.k_step == st->k_step && e->stream.k_offset == st->k_offset;
+}
+
+bool nr_ue_sensing_spatial_null(const nr_sensing_history_t *h0,
+                                const nr_sensing_history_t *h1,
+                                const nr_sensing_stream_t *st,
+                                nr_sensing_history_t *out,
+                                nr_sensing_null_t *res)
+{
+  memset(res, 0, sizeof(*res));
+  if (h0->ring == NULL || h1->ring == NULL || h0->count <= 0)
+    return false;
+
+  /* Chain 1's snapshots of this measurement, by symbol: time and layer identify a
+  symbol on every chain alike (the chains are sample aligned), the same key the map
+  task matches chains with. */
+  null_key_t *k1 = malloc_or_fail((size_t)(h1->count > 0 ? h1->count : 1) * sizeof(*k1));
+  int n1 = 0;
+  for (int k = 0; k < h1->count; k++) {
+    const nr_sensing_snapshot_t *e = &h1->ring[k];
+    if (null_stream_match(e, st))
+      k1[n1++] = (null_key_t){.key = (e->t_sample << 8) | e->stream.layer, .idx = k};
+  }
+  qsort(k1, (size_t)n1, sizeof(*k1), null_key_cmp);
+
+  // pair[k] is chain 1's ring index of chain 0's snapshot k, -1 when it has none
+  int *pair = malloc_or_fail((size_t)h0->count * sizeof(*pair));
+  int n_bins = 0;
+  for (int k = 0; k < h0->count; k++) {
+    const nr_sensing_snapshot_t *e = &h0->ring[k];
+    pair[k] = -1;
+    if (!null_stream_match(e, st))
+      continue;
+    res->n0++;
+    const null_key_t want = {.key = (e->t_sample << 8) | e->stream.layer};
+    const null_key_t *hit = bsearch(&want, k1, (size_t)n1, sizeof(*k1), null_key_cmp);
+    if (hit != NULL && h1->ring[hit->idx].n_bins == e->n_bins) {
+      pair[k] = hit->idx;
+      res->n_pairs++;
+      n_bins = e->n_bins;
+    }
+  }
+  free(k1);
+  if (res->n_pairs == 0 || n_bins <= 0) {
+    free(pair);
+    return false;
+  }
+
+  /* The static scene of each chain: the slow-time mean per bin. The weight is fitted on
+  it rather than on the snapshots, so a target, which averages out over the window,
+  does not pull the null towards itself. */
+  double m0r[NR_SENSING_MAP_MAX_BINS_RANGE] = {0}, m0i[NR_SENSING_MAP_MAX_BINS_RANGE] = {0};
+  double m1r[NR_SENSING_MAP_MAX_BINS_RANGE] = {0}, m1i[NR_SENSING_MAP_MAX_BINS_RANGE] = {0};
+  double e_prof[NR_SENSING_MAP_MAX_BINS_RANGE] = {0};
+  for (int k = 0; k < h0->count; k++) {
+    if (pair[k] < 0)
+      continue;
+    const cf_t *a = h0->ring[k].h, *c = h1->ring[pair[k]].h;
+    for (int b = 0; b < n_bins; b++) {
+      m0r[b] += crealf(a[b]), m0i[b] += cimagf(a[b]);
+      m1r[b] += crealf(c[b]), m1i[b] += cimagf(c[b]);
+      e_prof[b] += (double)crealf(a[b]) * crealf(a[b]) + (double)cimagf(a[b]) * cimagf(a[b]);
+    }
+  }
+
+  /* The direct path's mainlobe, the bins the null is fitted on: one direction, the
+  gNB's. Fitting on the whole profile instead would null whatever mixture of
+  directions holds the most static energy, which is not a direction at all. */
+  const int u0 = nr_ue_sensing_los_peak(e_prof, n_bins);
+  const int b_lo = u0 > 0 ? u0 - 1 : 0, b_hi = u0 < n_bins - 1 ? u0 + 1 : n_bins - 1;
+  double num_r = 0.0, num_i = 0.0, den = 0.0;
+  for (int b = b_lo; b <= b_hi; b++) { // w = <m0, m1> / <m1, m1>
+    num_r += m0r[b] * m1r[b] + m0i[b] * m1i[b];
+    num_i += m0i[b] * m1r[b] - m0r[b] * m1i[b];
+    den += m1r[b] * m1r[b] + m1i[b] * m1i[b];
+  }
+  if (!(den > 0.0)) {
+    free(pair);
+    return false;
+  }
+  const double wr = num_r / den, wi = num_i / den;
+  res->w = (float)wr + I * (float)wi;
+  res->u0 = u0;
+
+  // what the null does to each chain-0 static bin, before and after
+  double los_before = 0.0, los_after = 0.0, all_before = 0.0, all_after = 0.0;
+  for (int b = 0; b < n_bins; b++) {
+    const double rr = m0r[b] - (wr * m1r[b] - wi * m1i[b]);
+    const double ri = m0i[b] - (wr * m1i[b] + wi * m1r[b]);
+    const double p0 = m0r[b] * m0r[b] + m0i[b] * m0i[b], p1 = rr * rr + ri * ri;
+    all_before += p0, all_after += p1;
+    if (b >= b_lo && b <= b_hi)
+      los_before += p0, los_after += p1;
+  }
+  res->los_db = (los_before > 0.0 && los_after > 0.0) ? 10.0 * log10(los_after / los_before) : -99.0;
+  res->static_db = (all_before > 0.0 && all_after > 0.0) ? 10.0 * log10(all_after / all_before) : -99.0;
+
+  /* The nulled history: chain 0's, every paired snapshot replaced by h0 - w h1, every
+  unpaired one marked with ports 0 so no gather takes it. */
+  *out = *h0;
+  out->ring = malloc_or_fail((size_t)h0->depth * sizeof(*out->ring));
+  memcpy(out->ring, h0->ring, (size_t)h0->depth * sizeof(*out->ring));
+  pthread_mutex_init(&out->lock, NULL);
+  const cf_t w = res->w;
+  for (int k = 0; k < h0->count; k++) {
+    nr_sensing_snapshot_t *e = &out->ring[k];
+    if (pair[k] < 0) {
+      if (null_stream_match(e, st))
+        e->stream.ports = 0;
+      continue;
+    }
+    const cf_t *c = h1->ring[pair[k]].h;
+    for (int b = 0; b < n_bins; b++)
+      e->h[b] -= w * c[b];
+  }
+  free(pair);
+  return true;
 }
