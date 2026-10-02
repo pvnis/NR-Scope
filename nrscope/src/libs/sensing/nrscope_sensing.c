@@ -403,6 +403,22 @@ static int nr_ue_sensing_task_map(const nr_sensing_map_task_t *t,
         }
         if (ob != NULL && sl != NULL)
           nr_ue_sensing_slowtime_copy(sl, ob);
+        /* Each chain sizes its own grid from the window it gathered, so a chain whose
+        window came out a snapshot shorter can land on a different n_freq (379 against
+        383). Summed cell by cell, its rows would then be read with the wrong stride,
+        and past its end when it is the smaller one: the last range bin filled with
+        whatever the buffer held. Such a map is left out of the average. */
+        if (other->n_bins != map->n_bins || other->n_freq != map->n_freq || other->f_max_hz != map->f_max_hz) {
+          LOG_W(NR_PHY,
+                "sensing: rx%d layer %d map is %d x %d against %d x %d on the first, left out of the average\n",
+                a,
+                j,
+                other->n_bins,
+                other->n_freq,
+                map->n_bins,
+                map->n_freq);
+          continue;
+        }
         for (int i = 0; i < map->n_bins * map->n_freq; i++)
           map->power[i] += other->power[i];
         n_combined++;
