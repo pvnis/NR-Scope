@@ -357,6 +357,10 @@ bool nr_ue_sensing_history_take(nr_sensing_history_t *src,
 typedef struct {
   int n_snap;
   int n_bins;
+  /* t_sample of the first snapshot, the instant t_s counts from. t_s alone cannot
+  tell two windows apart that sample the same pattern from different starts, which
+  is what the AoA has to rule out across antennas. */
+  uint64_t t0_sample;
   /// [n_snap] sample instants in seconds, relative to the first
   double *t_s;
   /// [n_snap][n_bins] conditioned delay responses, row major
@@ -535,7 +539,7 @@ What it does not fix: anything that is not a common factor. The point spread fun
 changing shape with the grant width is not, which is what K_m is for, and a scatterer
 that genuinely fluctuates is not either. */
 #ifndef NR_CLUTTER_LOS_NORM
-#define NR_CLUTTER_LOS_NORM 1
+#define NR_CLUTTER_LOS_NORM 0
 #endif
 
 /* Bins either side of a path that its kernel is computed on and subtracted from.

@@ -100,10 +100,10 @@ int NRScopeWorker::InitWorker(WorkState task_scheduler_state, int worker_id_)
     rx_buffer[a] = (a < worker_state.nof_antennas) ? srsran_vec_cf_malloc(buf_samples) : nullptr;
   }
 
-  /* A wrapper for the synchronised chain. Only channel 0 is populated: the
-    decoders below are all initialised with nof_rx_antennas = 1 and read
-    input[0], so handing them the other chains would be misleading rather than
-    useful. The sensing path reads rx_buffer[] directly instead. */
+  /* A wrapper for the synchronised chain. Only channel 0 is populated: the SIB
+    and RACH decoders are initialised with nof_rx_antennas = 1 and read input[0].
+    The DCI decoders are handed every chain instead (see InitDCIDecoders), for the
+    carrier grid that sensing estimates on each of them. */
   rf_buffer_t = srsran::rf_buffer_t(rx_buffer[0], buf_samples);
   /* Start the worker thread */
   // std::cout << "Starting the worker..." << std::endl;
@@ -171,7 +171,14 @@ int NRScopeWorker::InitDCIDecoders()
     // for each rnti worker group, for each bwp, spawn a decoder
     for (uint8_t j = 0; j < worker_state.nof_bwps; j++) {
       DCIDecoder* decoder = new DCIDecoder(100);
-      if (decoder->DCIDecoderandReceptionInit(&worker_state, j, rf_buffer_t.to_cf_t()) < SRSASN_SUCCESS) {
+      /* Every captured chain. The PDCCH search is set up for one antenna and reads
+        chain 0 alone; the carrier grid the DM-RS check and sensing read is set up
+        for all of them when sensing is on, since sensing estimates every chain. */
+      cf_t* chains[SRSRAN_MAX_PORTS] = {};
+      for (uint32_t a = 0; a < worker_state.nof_antennas && a < SRSRAN_MAX_PORTS; a++) {
+        chains[a] = rx_buffer[a];
+      }
+      if (decoder->DCIDecoderandReceptionInit(&worker_state, j, chains) < SRSASN_SUCCESS) {
         ERROR("DCIDecoder Init Error");
         return SRSRAN_ERROR;
       }

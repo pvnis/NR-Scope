@@ -39,6 +39,7 @@
 #include "nrscope/hdr/sensing/nr_ue_dmrs_despread.h"
 #include "nrscope/hdr/sensing/nr_ue_map.h"
 #include "nrscope/hdr/sensing/nr_ue_sensing.h"
+#include "nrscope/hdr/sensing/nr_ue_sensing_align.h"
 #include "nrscope/hdr/sensing/nrscope_sensing.h"
 #include "nrscope/hdr/sensing/sensing_defs.h"
 #include "srsran/phy/ch_estimation/dmrs_sch.h"
@@ -576,6 +577,7 @@ static void test_glue(void)
   nrscope_sensing_args.max_speed_ms   = 10.0; // 0.30 m/s needs 0.145 s, feasible up to ~10 m/s
   nrscope_sensing_args.clutter_kernel = true;
   nrscope_sensing_args.tdd_detect     = true;
+  nrscope_sensing_args.antenna_avg    = true; // two chains, one map per layer averaged over them
   snprintf(nrscope_sensing_args.dump, sizeof(nrscope_sensing_args.dump), "%s/map2d.csv", dir);
   nr_sensing_tdd_period_slots = 10; // 7 D, 1 S, 2 U: the Benetel cell, as SIB1 sets it
   char rm[128];
@@ -583,7 +585,7 @@ static void test_glue(void)
   if (system(rm) != 0) {
     printf("  could not clear %s\n", dir);
   }
-  nrscope_sensing_t*         s  = nrscope_sensing_get(3450000000ULL, 122.88e6, 4096, 30000);
+  nrscope_sensing_t*         s  = nrscope_sensing_get(3450000000ULL, 122.88e6, 4096, 30000, 2);
   nrscope_sensing_scratch_t* sc = nrscope_sensing_scratch_alloc(n_sc);
   if (s == NULL || sc == NULL) {
     printf("  could not create the context\n");
@@ -591,6 +593,7 @@ static void test_glue(void)
     return;
   }
 
+  const int warnings_before = nr_sensing_log_warnings();
   srsran_carrier_nr_t carrier = SRSRAN_DEFAULT_CARRIER_NR;
   carrier.pci = 1, carrier.nof_prb = nof_prb, carrier.scs = srsran_subcarrier_spacing_30kHz;
   srsran_dmrs_sch_t dmrs = {};
@@ -598,6 +601,22 @@ static void test_glue(void)
   srsran_dmrs_sch_set_carrier(&dmrs, &carrier);
 
   static cf_t tx[273 * SRSRAN_NRE * SRSRAN_NSYMB_PER_SLOT_NR], rx[273 * SRSRAN_NRE * SRSRAN_NSYMB_PER_SLOT_NR];
+  /* Chain 1 sees the same scene through a fixed 50 degree offset, as a cable or LO
+    path would give it: same delays and Dopplers, so its map matches chain 0's. */
+  const cf_t        cable   = cexpf(I * (float)(50.0 * M_PI / 180.0));
+  int               pushed1 = 0;
+  /* Chain 1 of a slot is handed over LAG downlink slots after its chain 0, as a dozen
+    parallel workers deliver them: when a slot's last chain triggers a map, chain 0's
+    ring already holds several newer slots than chain 1's. One slot late is not
+    enough to show it, as both windows then often hold the same count. */
+  enum { LAG = 7 };
+  static cf_t rx1q[LAG][273 * SRSRAN_NRE * SRSRAN_NSYMB_PER_SLOT_NR];
+  struct {
+    srsran_sch_cfg_nr_t cfg;
+    uint32_t            sfn, slot_idx;
+    int64_t             shift;
+  } pend[LAG];
+  int pend_n = 0, pend_head = 0;
   const nr_dmrs_placement_t place = {0, 0, 0};
   const cf_t a[2] = {1.0f, 0.6f - 0.4f * I};
   int pushed = 0;
@@ -641,13 +660,32 @@ static void test_glue(void)
         rx[l * n_sc + k] = h * x * (a[0] + a[1] * w1);
       }
     }
-    const int n = nrscope_sensing_process_grant(s, sc, rx, n_sc, &place, &cfg, 2, 1, sfn, slot_idx, shift);
+    const int n = nrscope_sensing_process_grant(s, sc, 0, rx, n_sc, &place, &cfg, 2, 1, sfn, slot_idx, shift);
     pushed += n > 0 ? n : 0;
+    if (pend_n == LAG) { // the oldest pending slot's chain 1
+      const int n1 = nrscope_sensing_process_grant(s, sc, 1, rx1q[pend_head], n_sc, &place, &pend[pend_head].cfg, 2, 1,
+                                                   pend[pend_head].sfn, pend[pend_head].slot_idx, pend[pend_head].shift);
+      pushed1 += n1 > 0 ? n1 : 0;
+      pend_head = (pend_head + 1) % LAG;
+      pend_n--;
+    }
+    const int q = (pend_head + pend_n) % LAG;
+    for (uint32_t i = 0; i < n_sc * SRSRAN_NSYMB_PER_SLOT_NR; i++) {
+      rx1q[q][i] = cable * rx[i];
+    }
+    pend[q].cfg = cfg, pend[q].sfn = sfn, pend[q].slot_idx = slot_idx, pend[q].shift = shift;
+    pend_n++;
+  }
+  for (; pend_n > 0; pend_n--, pend_head = (pend_head + 1) % LAG) {
+    const int n1 = nrscope_sensing_process_grant(s, sc, 1, rx1q[pend_head], n_sc, &place, &pend[pend_head].cfg, 2, 1,
+                                                 pend[pend_head].sfn, pend[pend_head].slot_idx, pend[pend_head].shift);
+    pushed1 += n1 > 0 ? n1 : 0;
   }
   srsran_dmrs_sch_free(&dmrs);
   /* 1800 slots, 0.9 s: 1260 full downlink (3 DM-RS symbols), 180 special (1), 360
     uplink; 2 layers. 22 symbols per 5 ms TDD period, i.e. 4400 per second per layer. */
   check(pushed == 7920, "snapshots pushed, every DM-RS symbol", pushed, 7920, 0);
+  check(pushed1 == 7920, "snapshots pushed on chain 1", pushed1, 7920, 0);
 
   nrscope_sensing_wait_maps(s);
 
@@ -713,7 +751,7 @@ static void test_glue(void)
     at its delay and its Doppler */
   snprintf(path, sizeof(path), "%s/map2d.csv", dir);
   f = fopen(path, "r");
-  int n_maps = 0, maps_ok = 0, snap_min = 1 << 30;
+  int n_maps = 0, maps_ok = 0, snap_min = 1 << 30, maps_avg = 0, maps_aoa = 0;
   static char mline[4 << 20];
   if (f != NULL) {
     fgets(mline, sizeof(mline), f); // header
@@ -726,6 +764,8 @@ static void test_glue(void)
       }
       const int    n_bins = (int)v[12], n_freq = (int)v[13];
       snap_min            = (int)v[7] < snap_min ? (int)v[7] : snap_min;
+      maps_avg += ((int)v[2] == -1); // aarx -1: averaged over the chains
+      maps_aoa += ((int)v[15] > 0);  // n_aoa: the AoA ran on equal windows of both chains
       const double f_max  = v[10];
       int          best_i = 0;
       double       best   = -1;
@@ -751,11 +791,59 @@ static void test_glue(void)
     back to back. The trigger is the window, so neither the cadence nor the span
     depends on how many symbols the traffic offered. */
   check(n_maps == 12, "maps built (6 per layer)", n_maps, 12, 0);
+  // one map per layer per window, each over both chains, not one per chain
+  check(maps_avg == n_maps, "maps averaged over the 2 chains", maps_avg, n_maps, 0);
+  check(maps_aoa == n_maps, "maps with angles of arrival", maps_aoa, n_maps, 0);
   check(maps_ok == n_maps, "maps peaking at the target", maps_ok, n_maps, 0);
+  /* The scene is exactly what the pipeline models, so nothing should warn. A map
+    averaged from fewer chains than captured, for one, shows up only as a warning:
+    two identical chains give the same map whether one or both went into it. */
+  check(nr_sensing_log_warnings() == warnings_before, "warnings logged", nr_sensing_log_warnings() - warnings_before,
+        0, 0);
   /* One history per layer, so each map holds everything its own layer collected in
     the window (about 640), not half of a ring shared with the other layer. */
   check(fabs(snap_min - 638) <= 8, "snapshots per map, fewest", snap_min, 638, 8);
   nrscope_sensing_scratch_free(sc);
+}
+
+/* Two receive chains of the same symbols get the same alignment, in the order the
+ * sniffer feeds them: all of chain 0's DM-RS symbols of a slot, then chain 1's. The
+ * correction is common to the chains (one LO, one sample clock); giving chain 1 its
+ * own would remove the phase between the chains, which is what the AoA reads. Chain
+ * 1 carries a fixed 50 degree offset, as a cable would, so a correction computed on
+ * its own symbols would differ from chain 0's by exactly that. OAI remembered only the
+ * last symbol, which here would leave two of every three to be recomputed. */
+static void test_align_chains(void)
+{
+  printf("\nAlignment across two chains, chain 0's symbols first\n");
+  enum { NP = 819, KS = 4 }; // rank 2 lattice over the full carrier
+  const pilot_lattice_t     lat   = {.n = NP, .n_lattice = NP, .k_first = 0, .k_step = KS};
+  const nr_sensing_stream_t st    = {.ports = 0x8, .layer = 0}; // a key no other test uses
+  const cf_t                cable = cexpf(I * (float)(50.0 * M_PI / 180.0));
+  static cf_t               p[NP];
+  int                       same = 0, total = 0;
+  for (int slot = 0; slot < 8; slot++) {
+    nr_sensing_align_t r0[3];
+    uint64_t           t[3];
+    for (int c = 0; c < 2; c++) {
+      for (int m = 0; m < 3; m++) {
+        t[m]              = 1000000 + (uint64_t)slot * 61440 + (uint64_t)m * 4 * 4384;
+        const float drift = 0.2f * (float)(slot * 3 + m); // common phase drift, as the LO gives
+        for (int k = 0; k < NP; k++) {
+          p[k] = (c ? cable : 1.0f) * cexpf(I * (drift - (float)(2.0 * M_PI * 23 * k / (4096 / KS))));
+        }
+        nr_sensing_align_t r;
+        nr_ue_sensing_align_symbol(t[m], st, &lat, p, &r);
+        if (c == 0) {
+          r0[m] = r;
+        } else {
+          same += (r.phase_rad == r0[m].phase_rad && r.delay_bins == r0[m].delay_bins);
+          total++;
+        }
+      }
+    }
+  }
+  check(same == total, "chain 1 symbols given chain 0's correction", same, total, 0);
 }
 
 /* The delay transform must be safe to call from several workers at once, as the
@@ -865,6 +953,7 @@ int main(void)
   }
 
   test_glue();
+  test_align_chains();
   test_idft_threads();
 
   nr_ue_sensing_idft_free();

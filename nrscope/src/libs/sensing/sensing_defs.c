@@ -130,8 +130,18 @@ void nr_ue_sensing_idft_free(void)
   pthread_mutex_unlock(&plans_mutex);
 }
 
+static int n_warnings = 0;
+
+int nr_sensing_log_warnings(void)
+{
+  return __atomic_load_n(&n_warnings, __ATOMIC_RELAXED);
+}
+
 void nr_sensing_log(const char* colour, const char* comp, const char* fmt, ...)
 {
+  if (strcmp(colour, "\033[93m") == 0) { // LOG_W
+    __atomic_add_fetch(&n_warnings, 1, __ATOMIC_RELAXED);
+  }
   /* Formatted whole, then written in one call, so lines from workers logging at
   the same time do not interleave. */
   char    msg[1024];

@@ -50,6 +50,11 @@ void nr_sensing_log(const char* colour, const char* comp, const char* fmt, ...) 
 #define LOG_I(c, ...) nr_sensing_log("", c, __VA_ARGS__)
 #define LOG_D(c, ...) ((void)0)
 
+/* Warnings logged so far. For tests: a scenario the pipeline models exactly should
+log none, and several of its failure modes show up only as a warning (a map averaged
+from fewer chains than captured, for one). */
+int nr_sensing_log_warnings(void);
+
 /* Allocation that cannot fail silently. The pipeline allocates its history
 rings and map buffers once per stream and has no path to recover from running
 out of memory mid-slot, so it stops instead of returning a partial map. */

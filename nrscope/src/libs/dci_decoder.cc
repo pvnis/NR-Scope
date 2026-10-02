@@ -1044,8 +1044,25 @@ int DCIDecoder::DCIDecoderandReceptionInit(WorkState* state, int bwp_id, cf_t* i
     nrscope_check_grid_in_capture(
         "carrier (DM-RS check)", arg_scs_grid.coreset_offset_scs, grid_carrier.nof_prb, arg_scs.srate, cell.abs_pdcch_scs);
 
+    /* One FFT per chain when sensing is on, chain 0 alone otherwise (the DM-RS check
+      reads only chain 0). Every chain goes through the same srsRAN demodulator, with
+      the same window and the same per-symbol phase compensation: the capture keeps
+      the chains sample-aligned (ue_sync applies its timing to the whole buffer), so
+      the grids differ only by what the antennas received, which is what the AoA
+      needs from them. */
+    srsran_ue_dl_nr_args_t grid_args = ue_dl_args;
+    grid_args.nof_rx_antennas        = 1;
+    if (nrscope_sensing_args.enable) {
+      grid_args.nof_rx_antennas = SRSRAN_MIN(SRSRAN_MAX(state->nof_antennas, 1u), (uint32_t)SRSRAN_MAX_PORTS);
+      for (uint32_t a = 1; a < grid_args.nof_rx_antennas; a++) {
+        if (input[a] == nullptr) { // the worker had fewer chains than the capture says
+          grid_args.nof_rx_antennas = a;
+          break;
+        }
+      }
+    }
     SRSRAN_MEM_ZERO(&ue_dl_grid, srsran_ue_dl_nr_t, 1); // no CORESET: estimate_fft only demodulates
-    if (srsran_ue_dl_nr_init_nrscope(&ue_dl_grid, input, &ue_dl_args, arg_scs_grid) < SRSRAN_SUCCESS ||
+    if (srsran_ue_dl_nr_init_nrscope(&ue_dl_grid, input, &grid_args, arg_scs_grid) < SRSRAN_SUCCESS ||
         srsran_ue_dl_nr_set_carrier_nrscope(&ue_dl_grid, &grid_carrier, arg_scs_grid) < SRSRAN_SUCCESS) {
       ERROR("DM-RS check: could not set up the carrier grid; grants will not be checked");
     } else {
@@ -1056,7 +1073,8 @@ int DCIDecoder::DCIDecoderandReceptionInit(WorkState* state, int bwp_id, cf_t* i
       scratch is this decoder's own so workers estimate in parallel. */
     if (dmrs_check_ready && nrscope_sensing_args.enable) {
       sensing = nrscope_sensing_get((uint64_t)grid_center_hz, arg_scs.srate,
-                                    (uint32_t)std::lround(arg_scs.srate / cell.abs_pdcch_scs), (uint32_t)cell.abs_pdcch_scs);
+                                    (uint32_t)std::lround(arg_scs.srate / cell.abs_pdcch_scs), (uint32_t)cell.abs_pdcch_scs,
+                                    ue_dl_grid.nof_rx_antennas);
       if (sensing != nullptr) {
         sensing_scratch = nrscope_sensing_scratch_alloc(grid_carrier.nof_prb * SRSRAN_NRE);
       }
@@ -1393,10 +1411,16 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
             // Sensing: this grant's DM-RS channel, as delay responses into the history
             if (sensing != nullptr && sensing_scratch != nullptr) {
               const nr_dmrs_placement_t place = {crb_offset, bwp_start_crb, 0};
-              nrscope_sensing_process_grant(sensing, sensing_scratch, ue_dl_grid.sf_symbols[0],
-                                            grid_carrier.nof_prb * SRSRAN_NRE, &place, &pdsch_cfg, (int)d.ports,
-                                            state->cs_ret.ssb_res.N_id, state->sfn,
-                                            SRSRAN_SLOT_NR_MOD(carrier_dl.scs, slot->idx), state->window_shift_samples);
+              /* Every chain, in chain order, chain 0 first: a map averaging the chains
+                is triggered by the last one, and the alignment hands the others the
+                correction chain 0's symbols got (nrscope_sensing_process_grant). */
+              for (uint32_t a = 0; a < ue_dl_grid.nof_rx_antennas; a++) {
+                nrscope_sensing_process_grant(sensing, sensing_scratch, a, ue_dl_grid.sf_symbols[a],
+                                              grid_carrier.nof_prb * SRSRAN_NRE, &place, &pdsch_cfg, (int)d.ports,
+                                              state->cs_ret.ssb_res.N_id, state->sfn,
+                                              SRSRAN_SLOT_NR_MOD(carrier_dl.scs, slot->idx),
+                                              state->window_shift_samples);
+              }
             }
           }
 

@@ -25,10 +25,19 @@ typedef struct {
   double delay;
   /// symbols in a row that did not match the reference
   int n_bad;
-  /// the last symbol handled, so the other antennas reuse its correction
-  bool last_valid;
-  uint64_t last_t;
-  nr_sensing_align_t last;
+  /* The corrections of the most recent symbols, so every other antenna of a symbol
+  reuses the one its first antenna got, which keeps the phase between the chains
+  that the AoA reads. OAI kept only the last symbol, which matched while its loop
+  had all antennas of a symbol back to back; NR-Scope handles a slot's chains one
+  after the other, each through all of its reference symbols, so by the time chain 1
+  reaches a symbol chain 0 has handled up to three more, and slots also arrive
+  slightly out of order across workers. */
+  struct {
+    bool valid;
+    uint64_t t;
+    nr_sensing_align_t res;
+  } recent[NR_SENSING_ALIGN_RECENT];
+  int recent_head;
 } align_state_t;
 
 static align_state_t align_states[NR_SENSING_MAX_STREAMS];
@@ -166,8 +175,12 @@ bool nr_ue_sensing_align_symbol(uint64_t t_sample,
   }
 
   // Another antenna of a symbol already handled: same correction, reference untouched.
-  if (s->last_valid && s->last_t == t_sample) {
-    res = s->last;
+  const nr_sensing_align_t *seen = NULL;
+  for (int i = 0; i < NR_SENSING_ALIGN_RECENT && seen == NULL; i++)
+    if (s->recent[i].valid && s->recent[i].t == t_sample)
+      seen = &s->recent[i].res;
+  if (seen != NULL) {
+    res = *seen;
     pthread_mutex_unlock(&align_lock);
     if (res.applied)
       align_apply(pilots, a, n, N, res.delay_bins, res.phase_rad, res.amp);
@@ -285,9 +298,10 @@ bool nr_ue_sensing_align_symbol(uint64_t t_sample,
     }
   }
 
-  s->last_valid = true;
-  s->last_t = t_sample;
-  s->last = res;
+  s->recent[s->recent_head].valid = true;
+  s->recent[s->recent_head].t = t_sample;
+  s->recent[s->recent_head].res = res;
+  s->recent_head = (s->recent_head + 1) % NR_SENSING_ALIGN_RECENT;
   pthread_mutex_unlock(&align_lock);
 
   if (out)

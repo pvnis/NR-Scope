@@ -73,6 +73,19 @@ Browse every map in one window, nothing written to disk:
     Home / End   first / last map
     q            quit
 
+Play every map back like a video, nothing written to disk:
+    ./plot_range_doppler.py /tmp/map.csv --play
+    ./plot_range_doppler.py /tmp/map.csv --play --fps 15 --trail 8 --max-range 50
+
+    space        play / pause
+    <- / ->      step one map while paused
+    -  /  +      slower / faster
+    drag slider  scrub to any map
+    q            quit
+
+Playback loops back to the first map after the last. Unlike --browse it redraws on fixed
+axes (the colour bar and layout are built once), so it stays smooth frame to frame.
+
 With --trail K the targets the detector accepted in the K maps before the current one are
 drawn faded on top of it. Without localisation this is the quickest way to tell a person
 from clutter residue: a real target leaves a trail that moves smoothly in range and speed
@@ -354,11 +367,15 @@ def load(path):
     return maps
 
 
-def draw_map(fig, ax, m, args, trail=()):
+def draw_map(fig, ax, m, args, trail=(), cax=None):
     """Draw one map on ax, with its markers and AoA cells, and its colour bar on fig.
 
     trail: maps shown before this one, whose accepted targets are overlaid faded, oldest
-    faintest (see --trail)."""
+    faintest (see --trail).
+    cax: reuse this axes for the colour bar instead of carving a new one out of ax every
+    call. --play clears and redraws it each frame, so one fixed axes keeps the layout
+    steady and the redraw cheap; without it (the one-shot and --browse paths) a new colour
+    bar is made next to ax as before."""
     vmax = 0.0 if args.norm == "peak" else 40.0
 
     x = m.speeds(args.carrier) if args.x == "speed" else m.dopplers
@@ -376,7 +393,10 @@ def draw_map(fig, ax, m, args, trail=()):
 
     mesh = ax.pcolormesh(x, y[keep], img[keep, :], vmin=args.floor, vmax=vmax,
                          shading="nearest", cmap="viridis")
-    fig.colorbar(mesh, ax=ax, label="dB below peak")
+    if cax is not None:
+        fig.colorbar(mesh, cax=cax, label="dB below peak")
+    else:
+        fig.colorbar(mesh, ax=ax, label="dB below peak")
 
     # zero Doppler is where every static return should sit
     ax.axvline(0.0, color="white", lw=0.6, ls=":", alpha=0.7)
@@ -446,6 +466,17 @@ def draw_map(fig, ax, m, args, trail=()):
     ax.set_title(m.label(args.carrier), fontsize=8)
 
 
+def _info_lines(m, i, n, args):
+    """The lines shown under an interactive map: which map it is, its grants, and the
+    detector's and AoA verdicts. Shared by --browse and --play."""
+    lines = [f"map {i + 1}/{n}   frame.slot {m.frame}.{m.slot}"]
+    if m.n_pilots_min is not None:
+        lines.append(f"grants: {m.n_pilots_min} to {m.n_pilots_max} pilots, "
+                     f"{m.n_positions} distinct position(s) a_m")
+    lines += m.detection_lines(args.carrier) + m.aoa_lines()
+    return lines
+
+
 # keys the viewer uses, and the step each one moves by
 _BROWSE_STEPS = {"right": 1, "left": -1, "up": 10, "down": -10, "pageup": 10, "pagedown": -10}
 
@@ -473,11 +504,7 @@ def browse(maps, args, start=0):
         trail = maps[max(0, i - args.trail):i] if args.trail > 0 else []
         draw_map(fig, ax, m, args, trail)
 
-        info = [f"map {i + 1}/{len(maps)}   frame.slot {m.frame}.{m.slot}"]
-        if m.n_pilots_min is not None:
-            info.append(f"grants: {m.n_pilots_min} to {m.n_pilots_max} pilots, "
-                        f"{m.n_positions} distinct position(s) a_m")
-        info += m.detection_lines(args.carrier) + m.aoa_lines()
+        info = _info_lines(m, i, len(maps), args)
         fig.text(0.01, 0.01, "\n".join(info), fontsize=7, family="monospace", va="bottom")
         fig.suptitle("<- / -> previous / next map    up / down 10 maps    Home / End first / last    q quit",
                      fontsize=8)
@@ -500,6 +527,103 @@ def browse(maps, args, start=0):
     show()
     plt.show()
     return fig, on_key, state
+
+
+# how far --play's -/+ keys can push the frame rate
+_PLAY_FPS_MIN, _PLAY_FPS_MAX = 0.5, 60.0
+
+
+def play(maps, args, start=0, fps=5.0):
+    """Play the maps back like a video in one window, nothing written to disk.
+
+    Everything that does not change between maps (figure, axes, colour-bar axes, slider)
+    is built once; each frame only clears the plot and the colour bar and redraws them, so
+    playback stays smooth where --browse, which rebuilds the whole figure per key press,
+    does not. A timer advances the frame, space pauses, the arrows step while paused, -/+
+    change the rate, and the slider scrubs."""
+    import matplotlib.pyplot as plt
+    from matplotlib.widgets import Slider
+
+    # The arrows step frames here; by default matplotlib's toolbar steals left/right for
+    # its zoom history.
+    for key, taken in (("keymap.back", ("left",)), ("keymap.forward", ("right",))):
+        plt.rcParams[key] = [k for k in plt.rcParams[key] if k not in taken]
+
+    fig = plt.figure(figsize=(10, 7.5))
+    # Fixed geometry: the plot, its colour bar, and the scrubber never move, so no
+    # per-frame tight_layout and no drift. The bottom strip is left for the info text.
+    ax = fig.add_axes((0.08, 0.34, 0.80, 0.56))
+    cax = fig.add_axes((0.90, 0.34, 0.015, 0.56))
+    sax = fig.add_axes((0.08, 0.20, 0.80, 0.025))
+    info = fig.text(0.01, 0.01, "", fontsize=7, family="monospace", va="bottom")
+
+    state = {"i": start % len(maps), "playing": True, "fps": float(fps)}
+
+    slider = Slider(sax, "map", 1, len(maps), valinit=state["i"] + 1, valstep=1)
+
+    def title():
+        rate = f"{state['fps']:g} fps"
+        mode = "playing" if state["playing"] else "paused"
+        fig.suptitle(f"space play / pause ({mode})    <- / -> step    - / + speed ({rate})"
+                     f"    drag to scrub    q quit", fontsize=8)
+
+    def render():
+        i = state["i"]
+        m = maps[i]
+        ax.cla()
+        cax.cla()
+        trail = maps[max(0, i - args.trail):i] if args.trail > 0 else []
+        draw_map(fig, ax, m, args, trail, cax=cax)
+        info.set_text("\n".join(_info_lines(m, i, len(maps), args)))
+        title()
+        fig.canvas.draw_idle()
+
+    def goto(i, from_slider=False):
+        state["i"] = min(max(i, 0), len(maps) - 1)
+        if not from_slider:
+            # set_val would re-enter goto through on_changed; mute it for the round trip
+            slider.eventson = False
+            slider.set_val(state["i"] + 1)
+            slider.eventson = True
+        render()
+
+    slider.on_changed(lambda v: goto(int(round(v)) - 1, from_slider=True))
+
+    timer = fig.canvas.new_timer(interval=int(1000.0 / state["fps"]))
+
+    def tick():
+        if state["playing"]:
+            goto(0 if state["i"] + 1 >= len(maps) else state["i"] + 1)
+
+    timer.add_callback(tick)
+
+    def set_fps(new):
+        state["fps"] = min(max(new, _PLAY_FPS_MIN), _PLAY_FPS_MAX)
+        timer.interval = int(1000.0 / state["fps"])
+        title()
+        fig.canvas.draw_idle()
+
+    def on_key(event):
+        if event.key == " ":
+            state["playing"] = not state["playing"]
+            title()
+            fig.canvas.draw_idle()
+        elif event.key == "right":
+            state["playing"] = False
+            goto(state["i"] + 1)
+        elif event.key == "left":
+            state["playing"] = False
+            goto(state["i"] - 1)
+        elif event.key in ("+", "="):
+            set_fps(state["fps"] * 1.5)
+        elif event.key == "-":
+            set_fps(state["fps"] / 1.5)
+
+    fig.canvas.mpl_connect("key_press_event", on_key)
+    render()
+    timer.start()
+    plt.show()
+    return fig, state
 
 
 def main():
@@ -541,9 +665,16 @@ def main():
                     help="show the maps one at a time in one window and step through them "
                          "with the arrow keys; nothing is written to disk. Starts at the "
                          "first --index if given, else at the first map")
+    ap.add_argument("--play", action="store_true",
+                    help="play the maps back like a video in one window; nothing is written "
+                         "to disk. space pauses, the arrows step while paused, -/+ change "
+                         "the rate, and a slider scrubs. Starts at the first --index if "
+                         "given, else at the first map")
+    ap.add_argument("--fps", type=float, default=5.0,
+                    help="starting frame rate for --play (default 5); adjust live with -/+")
     ap.add_argument("--trail", type=int, default=5,
-                    help="with --browse, also draw faded the targets of this many previous "
-                         "maps, to see whether a detection moves like a real target "
+                    help="with --browse or --play, also draw faded the targets of this many "
+                         "previous maps, to see whether a detection moves like a real target "
                          "(default 5, 0 to turn off)")
     ap.add_argument("-o", "--out", help="write the figure here instead of showing it")
     args = ap.parse_args()
@@ -580,13 +711,21 @@ def main():
                 print(pad + line)
         return
 
-    if args.browse:
+    if args.browse or args.play:
+        if args.browse and args.play:
+            sys.exit("--browse and --play are two different viewers; pick one")
+        mode = "--browse" if args.browse else "--play"
         if args.out:
-            sys.exit("--browse shows the maps in a window; it cannot be combined with --out")
+            sys.exit(f"{mode} shows the maps in a window; it cannot be combined with --out")
+        if args.play and args.fps <= 0:
+            sys.exit("--fps must be positive")
         start = args.index[0] if args.index else 0
         if not -len(maps) <= start < len(maps):
             sys.exit(f"--index out of range, {len(maps)} map(s) available")
-        browse(maps, args, start)
+        if args.browse:
+            browse(maps, args, start)
+        else:
+            play(maps, args, start % len(maps), args.fps)
         return
 
     wanted = args.index if args.index else [-1]

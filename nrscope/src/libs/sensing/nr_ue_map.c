@@ -1553,6 +1553,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
   if (slow_out != NULL) {
     slow_out->n_snap = n;
     slow_out->n_bins = n_bins;
+    slow_out->t0_sample = first->t_sample;
     for (int i = 0; i < n; i++) {
       slow_out->t_s[i] = t[i];
       for (int b = 0; b < n_bins; b++) {

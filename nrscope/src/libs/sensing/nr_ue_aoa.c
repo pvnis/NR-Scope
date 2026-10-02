@@ -136,6 +136,17 @@ int nr_ue_aoa_process(const nr_sensing_map_t *map,
       LOG_W(NR_PHY, "aoa: rx%d gathered %d snapshots against %d on rx0, no angles\n", a, slow[a].n_snap, slow[0].n_snap);
       return 0;
     }
+    /* The same instants, not only as many. A window that starts elsewhere but holds
+    the same count passes the test above, and the phase between the antennas would
+    then carry each target's Doppler times the offset on top of its angle. The
+    chains share the sample clock, so equal means equal to the sample. */
+    bool same = slow[a].t0_sample == slow[0].t0_sample;
+    for (int i = 0; same && i < slow[0].n_snap; i++)
+      same = slow[a].t_s[i] == slow[0].t_s[i];
+    if (!same) {
+      LOG_W(NR_PHY, "aoa: rx%d sampled other instants than rx0 over its %d snapshots, no angles\n", a, slow[a].n_snap);
+      return 0;
+    }
   }
 
   if (map->n_bins * map->n_freq < 1) return 0;

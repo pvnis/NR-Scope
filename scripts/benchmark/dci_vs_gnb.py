@@ -145,7 +145,15 @@ def dmrs_symbols_type_a(typea_pos, add_pos, dmrs_len, start, length):
 def parse_nrscope(path):
     rows = []
     with open(path) as f:
-        for r in csv.DictReader(f):
+        reader = csv.DictReader(f)
+        for r in reader:
+            # A row cut short: the recorder flushes every 0.25 s and runs end by
+            # being killed, so the last row can stop mid-line. DictReader fills the
+            # missing columns with None; the row is dropped, and said so.
+            if None in r.values():
+                print(f"note: {path} line {reader.line_num} is truncated ({sum(v is not None for v in r.values())} "
+                      f"of {len(reader.fieldnames)} columns), skipped", file=sys.stderr)
+                continue
             if r["direction"] != "DL":
                 continue
             prbs = parse_prbs(r["prbs"])

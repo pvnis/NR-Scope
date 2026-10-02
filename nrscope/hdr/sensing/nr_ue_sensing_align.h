@@ -119,7 +119,7 @@
 /// fewest pilots shared with the reference for an estimate to be trusted
 #define NR_SENSING_ALIGN_MIN_OVERLAP 64
 /// 1: also divide every aligned symbol by the magnitude of its gain against the reference (see above)
-#define NR_SENSING_ALIGN_AMPLITUDE 1
+#define NR_SENSING_ALIGN_AMPLITUDE 0
 /* Range |g| is clamped to before dividing by it, as a factor on the reference level (0.5 and
 2 are -6 and +6 dB). The fluctuation it corrects is a few tens of percent. A gain outside
 this range with a correlation still above NR_SENSING_ALIGN_MIN_CORR means the scene itself
@@ -127,6 +127,13 @@ changed, not its level: dividing fully would amplify the noise of a faded symbol
 strong one into the int16 saturation of the pilots. */
 #define NR_SENSING_ALIGN_AMP_MIN 0.5
 #define NR_SENSING_ALIGN_AMP_MAX 2.0
+
+/* Symbols whose correction is remembered for the other antennas. A worker handles a
+slot's chains back to back, but up to a dozen other workers align symbols of the same
+stream in between, each adding a slot's worth (three or four), so 16 was evicted
+before chain 1 got to it and chain 1 then computed its own correction. 256 is about
+60 ms of one stream at full traffic, far beyond the gap between two chains. */
+#define NR_SENSING_ALIGN_RECENT 256
 
 /// What the alignment found for one symbol
 typedef struct {

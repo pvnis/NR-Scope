@@ -92,12 +92,19 @@ void                       nrscope_sensing_scratch_free(nrscope_sensing_scratch_
    and then returned to every caller. NULL when sensing is disabled.
    carrier_hz  : the downlink carrier centre, which sets the Doppler-to-speed scale
    srate_hz    : sample rate of the capture, which sets the sample clock of t_sample
-   ofdm_size   : FFT size of the grid (4096 at 122.88 Msps and 30 kHz) */
-nrscope_sensing_t* nrscope_sensing_get(uint64_t carrier_hz, double srate_hz, uint32_t ofdm_size, uint32_t scs_hz);
+   ofdm_size   : FFT size of the grid (4096 at 122.88 Msps and 30 kHz)
+   nof_antennas: receive chains captured, 1 .. NR_AOA_MAX_ANT; each gets its own rings */
+nrscope_sensing_t* nrscope_sensing_get(uint64_t carrier_hz, double srate_hz, uint32_t ofdm_size, uint32_t scs_hz,
+                                       uint32_t nof_antennas);
 
-/* One decoded downlink grant.
-   grid        : the slot's full-carrier grid, n_sc_grid subcarriers per symbol,
-                 symbol-major, starting at CRB place->grid_crb0 (chain 0)
+/* One decoded downlink grant, as received on one chain.
+   aarx        : the receive chain grid came from. Call once per chain for a slot,
+                 in chain order, chain 0 first: a map averaging the chains is
+                 triggered by the last one, and the alignment gives the other chains
+                 the correction chain 0's symbols got, which keeps the phase between
+                 the chains that the AoA reads
+   grid        : the slot's full-carrier grid on that chain, n_sc_grid subcarriers
+                 per symbol, symbol-major, starting at CRB place->grid_crb0
    cfg         : the PDSCH configuration derived from the DCI (grant + DM-RS)
    dci_ports   : the DCI's antenna-ports field (TS 38.212 7.3.1.2.2), or -1 for a
                  DCI 1_0, which has none and means port 1000
@@ -109,6 +116,7 @@ nrscope_sensing_t* nrscope_sensing_get(uint64_t carrier_hz, double srate_hz, uin
    configuration the estimator does not model), negative on error. */
 int nrscope_sensing_process_grant(nrscope_sensing_t*          s,
                                   nrscope_sensing_scratch_t*  sc,
+                                  uint32_t                    aarx,
                                   const cf_t*                 grid,
                                   uint32_t                    n_sc_grid,
                                   const nr_dmrs_placement_t*  place,

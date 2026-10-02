@@ -13,11 +13,11 @@ usrp_setting_0:
   rf_args: "type=x4xx,master_clock_rate=245760000,recv_buff_size=1004857600,addr=192.168.20.2,mgmt_addr=192.168.118.190,use_dpdk=1234,num_send_frames=512"  
   
   # Fixed so the amplitude stays constant from slot to slot, as sensing needs.
-  # Chosen with agc: true under a full 200 Mb/s downlink, where the AGC settled
+  # Chosen with agc: true under a full 600 Mb/s downlink, where the AGC settled
   # at 25.4-27.4 dB: peak about -9 dBFS, mean about -26 dBFS. At 45 the X410
   # clipped (peak pinned at +3 dBFS) once the gNB filled the carrier, which broke
   # PBCH and sync. Re-check the status line's RX peak if the geometry changes.
-  rx_gain: 26
+  rx_gain: 30
   min_rx_gain: 0
   max_rx_gain: 45
   srate_hz: 122880000 # the sampling rate of USRP, integer division of 200MHz for TwinRX, and 5G sampling rate for CBX: 11520000 or 23040000
@@ -31,7 +31,7 @@ usrp_setting_0:
   # that many channels (bladeRF: 2, X410: 4) and they must share a clock, or the
   # chains will not be phase coherent and the angle estimate is meaningless.
   # Costs one slot of IQ per chain in every queued slot, see NRSCOPE_SLOT_QUEUE_DEPTH.
-  nof_antennas: 1
+  nof_antennas: 2
 
   scs_index: 1 #(0: 15kHz, 1: 30kHz, ..., the u in standard)
   rf_log_level: "info"
@@ -66,7 +66,7 @@ usrp_setting_0:
 log_config: 
 
   # Record MSG4, DCIs in csv files
-  recording_mode: false
+  recording_mode: true
 
   # Debug: every PDCCH candidate tried for a known RNTI, with its DM-RS EPRE and
   # correlation and the gate it stopped at, to PDCCH/. Tens of thousands of rows

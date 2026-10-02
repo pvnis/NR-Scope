@@ -87,8 +87,13 @@ struct nrscope_sensing_s {
       granted inside it. */
     bool                 armed;
     uint64_t             t_map_end;
-  } hist[NR_SENSING_MAX_STREAMS];
+  } hist[NR_AOA_MAX_ANT][NR_SENSING_MAX_STREAMS];
   pthread_mutex_t        hist_lock; // creation only; each history has its own lock
+  /* Receive chains feeding the rings, 1 .. NR_AOA_MAX_ANT. The chain indexes the
+    table above and is not part of the stream key: the map task gathers one
+    unchanged key from every chain's ring, which is what lets the per-chain maps be
+    averaged cell by cell and the AoA compare the same beam across the array. */
+  uint32_t               nof_antennas;
   uint64_t               carrier_hz;
   uint32_t               scs_hz;
   uint32_t               samples_per_slot;
@@ -121,7 +126,8 @@ static void* map_thread(void* arg);
 
    Workers decode slots in parallel and so arrive slightly out of order; a snapshot
    older than the current window's start is simply early for the next one. */
-static bool map_due(nrscope_sensing_t* s, const nr_sensing_history_t* hist, uint16_t ports, int layer, uint64_t t_now)
+static bool map_due(nrscope_sensing_t* s, const nr_sensing_history_t* hist, int aarx, uint16_t ports, int layer,
+                    uint64_t t_now)
 {
   // Time window of the map t_span required from the different parameters
   // Initially values 0,0 for the last two arguments because we did not compute already
@@ -138,16 +144,16 @@ static bool map_due(nrscope_sensing_t* s, const nr_sensing_history_t* hist, uint
   bool due = false;
   pthread_mutex_lock(&s->hist_lock);
   for (int i = 0; i < NR_SENSING_MAX_STREAMS; i++) {
-    if (!s->hist[i].used || s->hist[i].ports != ports || s->hist[i].layer != layer) {
+    if (!s->hist[aarx][i].used || s->hist[aarx][i].ports != ports || s->hist[aarx][i].layer != layer) {
       continue;
     }
-    if (!s->hist[i].armed) {
+    if (!s->hist[aarx][i].armed) {
       // the first snapshot of this stream opens the first window
-      s->hist[i].armed     = true;
-      s->hist[i].t_map_end = t_now;
-    } else if ((int64_t)(t_now - s->hist[i].t_map_end) >= window_samples) {
-      s->hist[i].t_map_end = t_now;
-      due                  = true;
+      s->hist[aarx][i].armed     = true;
+      s->hist[aarx][i].t_map_end = t_now;
+    } else if ((int64_t)(t_now - s->hist[aarx][i].t_map_end) >= window_samples) {
+      s->hist[aarx][i].t_map_end = t_now;
+      due                        = true;
     }
     break;
   }
@@ -157,26 +163,29 @@ static bool map_due(nrscope_sensing_t* s, const nr_sensing_history_t* hist, uint
 
 /* The history of one stream, created on first use. NULL when every slot is taken by
    other streams, which needs more distinct DM-RS port sets than the scheduler uses. */
-static nr_sensing_history_t* hist_of(nrscope_sensing_t* s, uint16_t ports, int layer)
+static nr_sensing_history_t* hist_of(nrscope_sensing_t* s, int aarx, uint16_t ports, int layer)
 {
+  if (aarx < 0 || aarx >= (int)s->nof_antennas) {
+    return NULL;
+  }
   nr_sensing_history_t* h = NULL;
   pthread_mutex_lock(&s->hist_lock);
   int free_i = -1;
   for (int i = 0; i < NR_SENSING_MAX_STREAMS && h == NULL; i++) {
-    if (!s->hist[i].used) {
+    if (!s->hist[aarx][i].used) {
       if (free_i < 0)
         free_i = i;
-    } else if (s->hist[i].ports == ports && s->hist[i].layer == layer) {
-      h = &s->hist[i].h;
+    } else if (s->hist[aarx][i].ports == ports && s->hist[aarx][i].layer == layer) {
+      h = &s->hist[aarx][i].h;
     }
   }
   if (h == NULL && free_i >= 0 &&
-      nr_ue_sensing_history_init(&s->hist[free_i].h, NR_SENSING_HISTORY_DEPTH, (int)s->scs_hz, (int)s->ofdm_size,
-                                 s->carrier_hz)) {
-    s->hist[free_i].used  = true;
-    s->hist[free_i].ports = ports;
-    s->hist[free_i].layer = (uint8_t)layer;
-    h                     = &s->hist[free_i].h;
+      nr_ue_sensing_history_init(&s->hist[aarx][free_i].h, NR_SENSING_HISTORY_DEPTH, (int)s->scs_hz,
+                                 (int)s->ofdm_size, s->carrier_hz)) {
+    s->hist[aarx][free_i].used  = true;
+    s->hist[aarx][free_i].ports = ports;
+    s->hist[aarx][free_i].layer = (uint8_t)layer;
+    h                           = &s->hist[aarx][free_i].h;
   }
   pthread_mutex_unlock(&s->hist_lock);
   return h;
@@ -185,7 +194,8 @@ static nr_sensing_history_t* hist_of(nrscope_sensing_t* s, uint16_t ports, int l
 static nrscope_sensing_t* g_ctx      = NULL;
 static pthread_mutex_t    g_ctx_lock = PTHREAD_MUTEX_INITIALIZER;
 
-nrscope_sensing_t* nrscope_sensing_get(uint64_t carrier_hz, double srate_hz, uint32_t ofdm_size, uint32_t scs_hz)
+nrscope_sensing_t* nrscope_sensing_get(uint64_t carrier_hz, double srate_hz, uint32_t ofdm_size, uint32_t scs_hz,
+                                       uint32_t nof_antennas)
 {
   if (!nrscope_sensing_args.enable) {
     return NULL;
@@ -202,6 +212,7 @@ nrscope_sensing_t* nrscope_sensing_get(uint64_t carrier_hz, double srate_hz, uin
     }
     if (s != NULL) {
       s->args             = nrscope_sensing_args;
+      s->nof_antennas     = nof_antennas < 1 ? 1 : (nof_antennas > NR_AOA_MAX_ANT ? NR_AOA_MAX_ANT : nof_antennas);
       s->carrier_hz       = carrier_hz;
       s->scs_hz           = scs_hz;
       pthread_mutex_init(&s->hist_lock, NULL);
@@ -369,8 +380,13 @@ static int nr_ue_sensing_task_map(const nr_sensing_map_task_t *t,
       for (int j = 0; j < t->n_layers; j++) {
         if (a == 0 && j == 0) continue; // done for antenna 0 by default above
 
+        /* The layers this map is built from: all of them for a layer-averaged map,
+        else the map's own. OAI set j here in both cases, so without layer
+        averaging a layer 1 map took layer 0 from every chain but the first: an
+        average of two different beams, and an AoA comparing H w_1 on rx0 with
+        H w_0 on the others. */
         nr_sensing_stream_t st = t->stream;
-        st.layer = (uint8_t)j;
+        st.layer = t->n_layers > 1 ? (uint8_t)j : t->stream.layer;
 
         /* slow[] feeds the AoA, which builds a spatial covariance across the array
         and so assumes one transmit beam per entry. Only layer 0 fills it. */
@@ -758,8 +774,16 @@ static void nr_ue_sensing_map_task(void *arg)
           /* Doppler resolution is 1/t_span Hz; as a speed that is lambda/2 per Hz,
           so it depends on the carrier the map was taken at. */
           (C_M_PER_S / t->map.carrier_hz) / 2.0 / t->map.t_span_s);
-    if (t->aarx < 0 && n_combined != t->n_ant)
-      LOG_W(NR_PHY, "sensing: averaged map built from %d of %d Rx antennas\n", n_combined, t->n_ant);
+    /* One map per (chain, layer) goes into the average. OAI compared the count with
+      the chains alone, so with the layers averaged as well every map warned
+      "4 of 2". */
+    if ((t->aarx < 0 || t->n_layers > 1) && n_combined != t->n_ant * t->n_layers)
+      LOG_W(NR_PHY,
+            "sensing: averaged map built from %d of %d maps (%d Rx antennas x %d layers)\n",
+            n_combined,
+            t->n_ant * t->n_layers,
+            t->n_ant,
+            t->n_layers);
   }
   for (int a = 0; a < n_slow; a++) {
     free(slow[a].t_s);
@@ -858,66 +882,163 @@ static void hist_merge(nr_sensing_history_t* parts, int n_parts, nr_sensing_hist
   pthread_mutex_init(&out->lock, NULL);
 }
 
-/* Queue a map for this layer when its window is complete, for one Rx antenna. OAI
-   triggered on a snapshot count (args.symbols) in pdsch_processing(), which let the
-   traffic decide the window and so the resolution; here args.symbols is only the most
-   snapshots one map may use. With layer_avg, the last layer triggers and every
-   layer's history is copied. */
-static void maybe_map(nrscope_sensing_t* s, uint16_t ports, int layer, int n_layers, const pilot_lattice_t* lat,
-                      uint32_t sfn, uint32_t slot_idx, uint64_t t_now)
+/* What one chain's rings hold of a stream, copied into one history for the map
+   task: the stream's own ring, or, when the map averages layers, every layer's merged
+   (hist_merge). Taken unconditionally, without a minimum count: the caller has already
+   claimed the window, and a window holding too few snapshots to condition is dropped
+   by nr_ue_sensing_range_doppler() on its own (NR_SENSING_MIN_SNAPSHOTS), where the
+   count it gathered is the one that matters. */
+static bool take_chain(nrscope_sensing_t* s, int aarx, uint16_t ports, const nr_sensing_stream_t* st, int n_layers,
+                       bool avg_lay, nr_sensing_history_t* out)
+{
+  if (!avg_lay) {
+    nr_sensing_history_t* h = hist_of(s, aarx, ports, st->layer);
+    return h != NULL && nr_ue_sensing_history_take(h, st, 1, 0, out);
+  }
+  nr_sensing_history_t parts[2];
+  if (n_layers > 2) {
+    return false;
+  }
+  for (int j = 0; j < n_layers; j++) {
+    nr_sensing_stream_t   sj = *st;
+    nr_sensing_history_t* hj = hist_of(s, aarx, ports, j);
+    sj.layer                 = (uint8_t)j;
+    if (hj == NULL || !nr_ue_sensing_history_take(hj, &sj, 1, 0, &parts[j])) {
+      for (int i = 0; i < j; i++) { // the ones already taken
+        free(parts[i].ring);
+        pthread_mutex_destroy(&parts[i].lock);
+      }
+      return false;
+    }
+  }
+  hist_merge(parts, n_layers, out);
+  return true;
+}
+
+static int cmp_u64(const void* a, const void* b)
+{
+  const uint64_t x = *(const uint64_t*)a, y = *(const uint64_t*)b;
+  return (x > y) - (x < y);
+}
+
+/* The keys of one chain's copy: time and layer of every snapshot of this measurement
+   up to the trigger, sorted. Time and layer identify a snapshot on every chain alike
+   (the chains are sample-aligned, so a symbol has the same t_sample on all of them).
+   Returns the count; *keys is the caller's to free. */
+static int chain_keys(const nr_sensing_history_t* h, const nr_sensing_stream_t* st, uint64_t t_end, uint64_t** keys)
+{
+  *keys = malloc_or_fail((size_t)(h->count > 0 ? h->count : 1) * sizeof(**keys));
+  int n = 0;
+  for (int k = 1; k <= h->count; k++) {
+    const nr_sensing_snapshot_t* e = &h->ring[(h->head - k + h->depth) % h->depth];
+    if (e->stream.ports == st->ports && e->stream.k_step == st->k_step && e->stream.k_offset == st->k_offset &&
+        e->t_sample <= t_end) {
+      (*keys)[n++] = (e->t_sample << 8) | e->stream.layer;
+    }
+  }
+  qsort(*keys, (size_t)n, sizeof(**keys), cmp_u64);
+  return n;
+}
+
+/* Keep, in every chain's copy, only the snapshots all the chains hold, up to the
+   slot that triggered the map. Workers decode slots in parallel, so when the last
+   chain of slot N triggers, chain 0's ring may already hold slot N+1 from another
+   worker, or still miss slot N-1. The transform measures each window back from that
+   copy's newest snapshot, so the chains would cover different instants: the AoA then
+   refuses them ("rx1 gathered 519 snapshots against 539 on rx0"), and an average
+   mixes two windows. The others are marked with ports 0, which no measurement has,
+   so the gather passes over them. */
+static void chains_common(nr_sensing_history_t* h, int n_ant, const nr_sensing_stream_t* st, uint64_t t_end)
+{
+  uint64_t* keys[NR_AOA_MAX_ANT] = {NULL};
+  int       n_keys[NR_AOA_MAX_ANT] = {0};
+  for (int a = 0; a < n_ant; a++) {
+    n_keys[a] = chain_keys(&h[a], st, t_end, &keys[a]);
+  }
+  // keys present on chain 0 and on every other chain
+  uint64_t* common   = malloc_or_fail((size_t)(n_keys[0] > 0 ? n_keys[0] : 1) * sizeof(*common));
+  int       n_common = 0;
+  for (int i = 0; i < n_keys[0]; i++) {
+    bool everywhere = true;
+    for (int a = 1; a < n_ant && everywhere; a++) {
+      everywhere = bsearch(&keys[0][i], keys[a], (size_t)n_keys[a], sizeof(uint64_t), cmp_u64) != NULL;
+    }
+    if (everywhere) {
+      common[n_common++] = keys[0][i];
+    }
+  }
+  for (int a = 0; a < n_ant; a++) {
+    for (int k = 0; k < h[a].count; k++) {
+      nr_sensing_snapshot_t* e = &h[a].ring[k];
+      if (e->stream.ports != st->ports || e->stream.k_step != st->k_step || e->stream.k_offset != st->k_offset) {
+        continue;
+      }
+      const uint64_t key = (e->t_sample << 8) | e->stream.layer;
+      if (e->t_sample > t_end || bsearch(&key, common, (size_t)n_common, sizeof(uint64_t), cmp_u64) == NULL) {
+        e->stream.ports = 0;
+      }
+    }
+    free(keys[a]);
+  }
+  free(common);
+}
+
+/* Queue a map for this chain and layer when its window is complete. OAI triggered on
+   a snapshot count (args.symbols) in pdsch_processing(), which let the traffic decide
+   the window and so the resolution; here args.symbols is only the most snapshots one
+   map may use.
+
+   Every chain and layer is fed the same reference symbols, so a map that averages
+   them waits for the last one: only then does every ring hold this slot. That is
+   OAI's my_turn. It relies on a slot's chains being processed in chain order, which
+   the caller guarantees (nrscope_sensing_process_grant). */
+static void maybe_map(nrscope_sensing_t* s, int aarx, uint16_t ports, int layer, int n_layers,
+                      const pilot_lattice_t* lat, uint32_t sfn, uint32_t slot_idx, uint64_t t_now)
 {
   const nr_sensing_stream_t st      = nr_ue_sensing_stream(ports, layer, lat);
+  const int                 n_rx    = (int)s->nof_antennas;
+  const bool                avg_ant = s->args.antenna_avg && n_rx > 1;
   const bool                avg_lay = s->args.layer_avg && n_layers > 1;
-  const bool                my_turn = !avg_lay || layer == n_layers - 1;
-  nr_sensing_history_t*     hist    = hist_of(s, ports, layer);
-  if (!my_turn || hist == NULL || !map_due(s, hist, ports, layer, t_now))
+  const bool                my_turn = (!avg_ant || aarx == n_rx - 1) && (!avg_lay || layer == n_layers - 1);
+  if (!my_turn) {
     return;
-  const int              n_ant = 1;
+  }
+  nr_sensing_history_t* hist = hist_of(s, aarx, ports, layer);
+  if (hist == NULL || !map_due(s, hist, aarx, ports, layer, t_now)) {
+    return;
+  }
+
+  const int              n_ant = avg_ant ? n_rx : 1;
   nr_sensing_map_task_t* t     = malloc_or_fail(sizeof(*t) + n_ant * sizeof(t->snap[0]));
   t->args     = &s->args;
-  t->aarx     = 0;
+  t->aarx     = avg_ant ? -1 : aarx;
   t->frame    = (int)sfn;
   t->slot     = (int)slot_idx;
   t->stream   = st;
   t->n_ant    = n_ant;
   t->n_layers = avg_lay ? n_layers : 1;
-  if (avg_lay)
+  if (avg_lay) {
     t->stream.layer = 0; // the seed call and the snapshot dump use layer 0
-
-  /* Taken unconditionally: map_due() claimed this window, and a window holding too
-    few snapshots to condition is dropped by nr_ue_sensing_range_doppler() on its own
-    (NR_SENSING_MIN_SNAPSHOTS), where the count it gathered is the one that matters. */
-  if (!avg_lay) {
-    if (nr_ue_sensing_history_take(hist, &st, 1, 0, &t->snap[0]))
-      map_push(s, t);
-    else
-      free(t);
-    return;
   }
-  nr_sensing_history_t parts[2];
-  if (n_layers > 2 || !nr_ue_sensing_history_take(hist, &st, 1, 0, &parts[n_layers - 1])) {
-    free(t);
-    return;
-  }
-  for (int j = 0; j < n_layers - 1; j++) {
-    nr_sensing_stream_t   sj = st;
-    nr_sensing_history_t* hj = hist_of(s, ports, j);
-    sj.layer                 = (uint8_t)j;
-    if (hj == NULL || !nr_ue_sensing_history_take(hj, &sj, 1, 0, &parts[j])) {
-      for (int i = j + 1; i < n_layers; i++) { // the ones already taken
-        free(parts[i].ring);
-        pthread_mutex_destroy(&parts[i].lock);
+  for (int a = 0; a < n_ant; a++) {
+    if (!take_chain(s, avg_ant ? a : aarx, ports, &st, n_layers, avg_lay, &t->snap[a])) {
+      for (int i = 0; i < a; i++) {
+        free(t->snap[i].ring);
+        pthread_mutex_destroy(&t->snap[i].lock);
       }
       free(t);
       return;
     }
   }
-  hist_merge(parts, n_layers, &t->snap[0]);
+  if (n_ant > 1) {
+    chains_common(t->snap, n_ant, &st, t_now);
+  }
   map_push(s, t);
 }
 
 int nrscope_sensing_process_grant(nrscope_sensing_t*          s,
                                   nrscope_sensing_scratch_t*  sc,
+                                  uint32_t                    aarx,
                                   const cf_t*                 grid,
                                   uint32_t                    n_sc_grid,
                                   const nr_dmrs_placement_t*  place,
@@ -1000,13 +1121,13 @@ int nrscope_sensing_process_grant(nrscope_sensing_t*          s,
     const cf_t(*H_grid)[n_sc_grid] = (const cf_t(*)[n_sc_grid])sc->H;
     const bool(*V_grid)[n_sc_grid] = (const bool(*)[n_sc_grid])sc->valid;
     uint16_t used = 0;
-    nr_sensing_history_t* hist = hist_of(s, ports, layer);
+    nr_sensing_history_t* hist = hist_of(s, (int)aarx, ports, layer);
     const int idft = nr_ue_sensing_slot_profile(NSYMB, (int)n_sc_grid, H_grid, V_grid, t_sample, hist,
                                                 (nr_sensing_stream_t){.ports = ports, .layer = (uint8_t)layer},
                                                 slot_abs, s->args.random_drop, (uint16_t)~dmrs_mask, &lats[layer], &used);
     if (idft > 0) {
       n_pushed += __builtin_popcount(used);
-      maybe_map(s, ports, layer, lay.n_ports, &lats[layer], sfn, slot_idx, t_newest);
+      maybe_map(s, (int)aarx, ports, layer, lay.n_ports, &lats[layer], sfn, slot_idx, t_newest);
     }
   }
 
