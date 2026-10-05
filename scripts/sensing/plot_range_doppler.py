@@ -408,10 +408,6 @@ def draw_map(fig, ax, m, args, trail=(), cax=None):
     # zero Doppler is where every static return should sit
     ax.axvline(0.0, color="white", lw=0.6, ls=":", alpha=0.7)
 
-    r, v = m.peak(args.carrier)
-    ax.plot([to_x(v)], [r], marker="o", mfc="none", mec="white", ms=13, mew=1.0,
-            alpha=0.8, label=f"strongest cell {r:.1f} m / {v:+.2f} m/s")
-
     if not args.no_markers and trail:
         # Targets of the previous maps, oldest faintest. Drawn first, so the current
         # map's own verdicts stay on top.
