@@ -96,3 +96,27 @@ sensing:
   compensate_window_shifts: false  # NR-Scope only; off is OAI's behaviour
   spatial_null: true  # map from chain 0 minus weighted chain 1, nulling the direct path; needs antenna_avg, 2 chains
   mirror_reject: true  # set aside a detection with an equally strong mirror at -v (not drawn); false keeps them all
+
+  # Parameter sweep (mode b): per map, rebuild the clutter removal from the base settings
+  # above with ONE field varied from lo to hi in step, each written to its own dump
+  # <dump>.<field>_<value>.csv (line i = same window as map2d.csv), and a peak-over-floor
+  # metric logged per set ("SENSING SWEEP ..."). The main map/detector/AoA are untouched.
+  # Leave out (or param: none) to disable. One field at a time; valid names:
+  #   trend_degree (0..3)  max_paths (1..4)  kernel_half_span (bins)  min_sep_bins
+  #   static_min  snr_min (linear)  los_first_db  los_max_corr_db  comb_harmonic (1..6)
+  #   comb_tdd_multiple  los_norm (0/1)  comb_remove (0/1)  clutter_mode (0=none,1=mean,2=kernel)
+  sweep:
+    param: clutter_mode
+    lo: 0
+    hi: 2
+    step: 1
+
+
+  # Record-only mode: for each window, write every (chain, layer) of its raw OFDM-symbol
+  # slow-time samples to <dump>.rec.NNNNN.csv (up to record_max_files) and SKIP live map
+  # building entirely (no clutter removal, null, detector, AoA or map dump -- all the map
+  # compute is saved). Rebuild the maps and sweep any parameter offline, no recapture:
+  #   scripts/sensing/replay_samples.py --rec '/tmp/map2d.csv.rec.*.csv' \
+  #       --sweep trend_degree --lo 0 --hi 3 --step 1 --out-dir /tmp/sweep_out
+  test_record_samples: false
+  record_max_files: 100

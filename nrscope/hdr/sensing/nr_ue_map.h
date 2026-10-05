@@ -585,6 +585,89 @@ holds, and limiting it keeps the cost of a path independent of the map size. */
 #error "NR_CLUTTER_SLOW_TREND_DEGREE must be between 0 and NR_CLUTTER_SLOW_TREND_MAX"
 #endif
 
+/* ---------------------------------------------------------------------------
+ Runtime clutter-removal parameters.
+
+ The NR_CLUTTER_* / NR_COMB_* / NR_SENSING_LOS_FIRST_DB macros above stay as the
+ compile-time DEFAULTS and, where an array is sized by one (NR_CLUTTER_MAX_PATHS,
+ NR_CLUTTER_MAX_KERNELS, NR_COMB_MAX_HARMONIC, NR_CLUTTER_SLOW_TREND_MAX), as the
+ hard CAPACITY. This struct carries the ACTIVE value nr_ue_sensing_range_doppler()
+ uses, so one build can run at different settings and be swept in a single run (see
+ nr_sensing_params_sweep()). Every field must stay within its capacity; the transform
+ asserts the ones that size arrays.
+--------------------------------------------------------------------------- */
+typedef struct {
+  nr_sensing_clutter_t clutter_mode; ///< NONE / MEAN / KERNEL
+  int    max_paths;          ///< kernel mode: static paths fitted, 1..NR_CLUTTER_MAX_PATHS
+  int    trend_degree;       ///< slow-trend polynomial degree, 0..NR_CLUTTER_SLOW_TREND_MAX
+  int    kernel_half_span;   ///< bins either side of a path its kernel touches
+  double static_min;         ///< S = |mean|^2/mean(|r|^2) for a peak to count as static
+  double snr_min;            ///< peak-over-noise (linear) for a path to be fitted
+  int    min_sep_bins;       ///< minimum separation between two fitted paths
+  double los_first_db;       ///< how far below the strongest the LOS may sit
+  bool   los_norm;           ///< divide each snapshot by its own direct path first
+  double los_max_corr_db;    ///< clamp, dB either way, on that division
+  bool   comb_remove;        ///< remove the rank-1 TDD replica comb
+  int    comb_harmonic;      ///< harmonics removed, 1..NR_COMB_MAX_HARMONIC
+  int    comb_tdd_multiple;  ///< comb fundamental = 1/(this * T_TDD)
+  int    comb_power_iters;   ///< power iterations for the rank-1 comb
+} nr_sensing_params_t;
+
+/// Fill p with the compile-time defaults (clutter_mode left at KERNEL; the caller sets it).
+static inline void nr_sensing_params_default(nr_sensing_params_t *p)
+{
+  p->clutter_mode      = NR_CLUTTER_KERNEL;
+  p->max_paths         = NR_CLUTTER_MAX_PATHS;
+  p->trend_degree      = NR_CLUTTER_SLOW_TREND_DEGREE;
+  p->kernel_half_span  = NR_CLUTTER_KERNEL_HALF_SPAN;
+  p->static_min        = NR_CLUTTER_STATIC_MIN;
+  p->snr_min           = NR_CLUTTER_SNR_MIN;
+  p->min_sep_bins      = NR_CLUTTER_MIN_SEP_BINS;
+  p->los_first_db      = NR_SENSING_LOS_FIRST_DB;
+  p->los_norm          = NR_CLUTTER_LOS_NORM;
+  p->los_max_corr_db   = NR_CLUTTER_LOS_MAX_CORR_DB;
+  p->comb_remove       = NR_CLUTTER_COMB_REMOVE;
+  p->comb_harmonic     = NR_COMB_MAX_HARMONIC;
+  p->comb_tdd_multiple = NR_COMB_TDD_MULTIPLE;
+  p->comb_power_iters  = NR_COMB_POWER_ITERS;
+}
+
+/// Most param sets one run may sweep over; also the width of the sets[]/labels[] a caller passes.
+#define NR_SWEEP_MAX_SETS 16
+
+/// Which single field a one-factor sweep varies.
+typedef enum {
+  NR_SWEEP_NONE = 0,
+  NR_SWEEP_CLUTTER_MODE,      ///< lo..hi over {0=NONE,1=MEAN,2=KERNEL}
+  NR_SWEEP_MAX_PATHS,
+  NR_SWEEP_TREND_DEGREE,
+  NR_SWEEP_KERNEL_HALF_SPAN,
+  NR_SWEEP_STATIC_MIN,
+  NR_SWEEP_SNR_MIN,
+  NR_SWEEP_MIN_SEP_BINS,
+  NR_SWEEP_LOS_FIRST_DB,
+  NR_SWEEP_LOS_NORM,          ///< lo..hi over {0,1}
+  NR_SWEEP_LOS_MAX_CORR_DB,
+  NR_SWEEP_COMB_REMOVE,       ///< lo..hi over {0,1}
+  NR_SWEEP_COMB_HARMONIC,
+  NR_SWEEP_COMB_TDD_MULTIPLE,
+} nr_sweep_param_t;
+
+/// Parse a sweep field name ("trend_degree", ...), NR_SWEEP_NONE if it matches none.
+nr_sweep_param_t nr_sweep_param_from_str(const char *s);
+
+/* Build a one-factor sweep: copies of base with field `which` set to lo, lo+step, ...
+ up to hi inclusive, each clamped to that field's valid range. Writes at most
+ NR_SWEEP_MAX_SETS sets to sets[] with a short label ("trend_degree=2") per set in
+ labels[], and returns the count. which == NR_SWEEP_NONE (or step <= 0) returns 0. */
+int nr_sensing_params_sweep(const nr_sensing_params_t *base,
+                            nr_sweep_param_t which,
+                            double lo,
+                            double hi,
+                            double step,
+                            nr_sensing_params_t sets[NR_SWEEP_MAX_SETS],
+                            char labels[NR_SWEEP_MAX_SETS][48]);
+
 /* Delay response (IDFT) of one grant's Hann window, sampled at u = b - u0.
 
    This is K_m of NR_CLUTTER_KERNEL: the transform of the taper alone, placed where
@@ -635,8 +718,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
                                 const nr_sensing_stream_t *stream,
                                 int n_snap_max,
                                 double max_speed_ms,
-                                nr_sensing_clutter_t clutter_mode,
-                                int max_paths,
+                                const nr_sensing_params_t *p,
                                 int n_freq_fixed,
                                 nr_sensing_map_t *map,
                                 nr_sensing_slowtime_t *slow_out);
@@ -714,6 +796,21 @@ void nr_ue_sensing_dump_snapshots(const char *path,
                                   const nr_sensing_stream_t *stream,
                                   int n_snap_max,
                                   double max_speed_ms);
+
+/* test_record_samples mode: one file per map holding every (chain, layer) it used, so a
+ reprocessor (scripts/sensing/replay_samples.py) can rebuild the whole map offline and
+ sweep any parameter. One call per (chain, layer) block appends to the same file; the
+ first block passes truncate and header true. aarx tags the chain. Columns: aarx, layer,
+ snap, t_sample, t_rel_s, k_step, k_first, n_pilots, idft_size, n_bins, scs_hz, fs_hz,
+ carrier_hz, max_speed_ms, tdd_slots, then n_bins interleaved (re, im) pairs. Returns rows written. */
+int nr_ue_sensing_dump_snapshots_tagged(const char *path,
+                                        const nr_sensing_history_t *hist,
+                                        const nr_sensing_stream_t *stream,
+                                        int n_snap_max,
+                                        double max_speed_ms,
+                                        int aarx,
+                                        bool truncate,
+                                        bool header);
 
 /* SPATIAL NULL toward the gNB with two Rx chains.
 

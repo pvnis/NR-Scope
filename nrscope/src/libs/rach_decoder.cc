@@ -394,7 +394,7 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
     char str[1024] = {};
     srsran_dci_dl_nr_to_str(&(ue_dl_rach.dci), &dci_rach[dci_id], str, (uint32_t)sizeof(str));
     // While recording, printed only once its PDSCH has decoded: most candidates are chance CRC matches
-    if (!RunRecorder::enabled()) printf("RACHDecoder -- Found DCI: %s\n", str);
+    if (RunRecorder::verbose()) printf("RACHDecoder -- Found DCI: %s\n", str);
     tc_rnti = dci_rach[dci_id].ctx.rnti;
 
     /* Every candidate's Msg4 is decoded, also after the first RRCSetup of the
@@ -425,11 +425,11 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
 
     if (srsran_ra_dl_dci_to_grant_nr(
             &pdsch_carrier, slot, &pdsch_hl_cfg, &dci_rach[dci_id], &pdsch_cfg, &pdsch_cfg.grant) < SRSRAN_SUCCESS) {
-      if (!RunRecorder::enabled()) ERROR("RACHDecoder -- Error decoding PDSCH search");
+      if (RunRecorder::verbose()) ERROR("RACHDecoder -- Error decoding PDSCH search");
       return SRSRAN_ERROR;
     }
 
-    if (!RunRecorder::enabled()) {
+    if (RunRecorder::verbose()) {
       srsran_sch_cfg_nr_info(&pdsch_cfg, str, (uint32_t)sizeof(str));
       printf("PDSCH_cfg:\n%s", str);
     }
@@ -452,7 +452,7 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
 
     // Decode PDSCH
     if (srsran_ue_dl_nr_decode_pdsch(&ue_dl_pdsch, slot, &pdsch_cfg, &pdsch_res) < SRSRAN_SUCCESS) {
-      if (!RunRecorder::enabled()) printf("Error decoding PDSCH search\n");
+      if (RunRecorder::verbose()) printf("Error decoding PDSCH search\n");
       return SRSRAN_ERROR;
     }
 
@@ -472,7 +472,7 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
     }
 
     if (!pdsch_res.tb[0].crc) {
-      if (!RunRecorder::enabled()) printf("RACHDecoder -- Error decoding PDSCH (CRC)\n");
+      if (RunRecorder::verbose()) printf("RACHDecoder -- Error decoding PDSCH (CRC)\n");
 
       return SRSRAN_ERROR;
     }
@@ -486,7 +486,7 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
       }
     }
     if (all_zero) {
-      if (!RunRecorder::enabled()) ERROR("RACHDecoder -- PDSCH payload is all zeros");
+      if (RunRecorder::verbose()) ERROR("RACHDecoder -- PDSCH payload is all zeros");
       return SRSRAN_ERROR;
     }
 
@@ -495,7 +495,7 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
     if (RunRecorder::enabled()) printf("RACHDecoder -- Found DCI: %s\n", dci_str);
 
     if (pdsch_cfg.grant.tb[0].tbs / 8 < 40) {
-      if (!RunRecorder::enabled()) ERROR("Too short for RRC Setup");
+      if (RunRecorder::verbose()) ERROR("Too short for RRC Setup");
       log_msg4_bytes(slot->idx, tc_rnti, dci_str, "too_short", 0, pdsch_res.tb[0].payload, pdsch_cfg.grant.tb[0].tbs / 8);
       return SRSRAN_ERROR;
     }
@@ -560,7 +560,7 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
       continue;
     }
 
-    if (!RunRecorder::enabled()) std::cout << "Decoding Msg 4..." << std::endl;
+    if (RunRecorder::verbose()) std::cout << "Decoding Msg 4..." << std::endl;
     asn1::rrc_nr::dl_ccch_msg_s dlcch_msg;
     /* What the first few bytes are? In srsgNB there are 10 extra bytes and for
       small cell there are 3 extra bytes before the RRCSetup message. */
@@ -599,7 +599,7 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
                    pdsch_cfg.grant.tb[0].tbs / 8);
 
     result->rrc_setup = dlcch_msg.msg.c1().rrc_setup();
-    if (!RunRecorder::enabled()) std::cout << "Msg 4 Decoded." << std::endl;
+    if (RunRecorder::verbose()) std::cout << "Msg 4 Decoded." << std::endl;
     switch (dlcch_msg.msg.c1().type().value) {
       case asn1::rrc_nr::dl_ccch_msg_type_c::c1_c_::types::rrc_reject: {
         std::cout << "Unfortunately, it's a rrc_reject ;(" << std::endl;
@@ -607,11 +607,11 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
       } break;
       case asn1::rrc_nr::dl_ccch_msg_type_c::c1_c_::types::rrc_setup: {
         std::cout << "It's a rrc_setup, hooray!" << std::endl;
-        if (!RunRecorder::enabled()) printf("rrc-TransactionIdentifier: %u\n", (result->rrc_setup).rrc_transaction_id);
+        if (RunRecorder::verbose()) printf("rrc-TransactionIdentifier: %u\n", (result->rrc_setup).rrc_transaction_id);
         result->found_rach = true;
       } break;
       default: {
-        if (!RunRecorder::enabled()) std::cout << "None detected, skip. Bytes in msg4_bytes.log" << std::endl;
+        if (RunRecorder::verbose()) std::cout << "None detected, skip. Bytes in msg4_bytes.log" << std::endl;
         return SRSRAN_ERROR;
       } break;
     }
@@ -628,7 +628,7 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
 
     asn1::json_writer js;
     result->master_cell_group.to_json(js);
-    if (!RunRecorder::enabled()) {
+    if (RunRecorder::verbose()) {
       printf("masterCellGroup: %s\n", js.to_string().c_str());
     }
 

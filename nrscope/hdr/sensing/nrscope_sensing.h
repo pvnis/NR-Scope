@@ -82,6 +82,24 @@ typedef struct {
   detection whose mirror at -v on the same range is within NR_TDD_MIRROR_DB of it. Off
   keeps every detection the TDD detector accepts. */
   bool mirror_reject;
+  /* Parameter sweep (mode b): per map, re-run the clutter removal from copies of the
+  base parameters with one field varied from sweep_lo to sweep_hi in sweep_step, each
+  dumped to <dump>.<field>_<value>.csv. sweep_param is the field name
+  (nr_sweep_param_from_str: "trend_degree", "max_paths", "kernel_half_span",
+  "static_min", "snr_min", "min_sep_bins", "los_first_db", "los_norm", "los_max_corr_db",
+  "comb_remove", "comb_harmonic", "comb_tdd_multiple", "clutter_mode"); empty or "none"
+  disables it. The main map/detector/AoA pipeline is unchanged. */
+  char   sweep_param[32];
+  double sweep_lo;
+  double sweep_hi;
+  double sweep_step;
+  /* test_record_samples: record-only mode. Write one file per window holding every
+  (chain, layer) of its slow-time samples to <dump>.rec.<NNNNN>.csv, up to
+  record_max_files, and skip the whole live map pipeline (range_doppler, spatial null,
+  detector, AoA, map dump). A Python reprocessor (scripts/sensing/replay_samples.py)
+  rebuilds the maps offline and sweeps any parameter without a rebuild or recapture. */
+  bool   test_record_samples;
+  int    record_max_files;
 } nrscope_sensing_args_t;
 
 void nrscope_sensing_default_args(nrscope_sensing_args_t* args);

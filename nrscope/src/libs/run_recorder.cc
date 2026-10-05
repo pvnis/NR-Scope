@@ -27,6 +27,7 @@ namespace {
 const double DCI_FLUSH_PERIOD_S = 0.25;
 
 bool        is_enabled = false;
+bool        is_quiet   = false; // keep the terminal clean without recording; see set_quiet()
 std::string run_stamp; // when the run started, shared by both files of the run
 
 std::mutex msg4_mtx;
@@ -217,6 +218,18 @@ void init(bool enable)
 bool enabled()
 {
   return is_enabled;
+}
+
+void set_quiet(bool quiet)
+{
+  is_quiet = quiet;
+  if (quiet && !is_enabled)
+    printf("Quiet mode: terminal kept to the \"Found DCI\" and \"hooray\" lines, no CSV recording\n");
+}
+
+bool verbose()
+{
+  return !is_enabled && !is_quiet;
 }
 
 void close()

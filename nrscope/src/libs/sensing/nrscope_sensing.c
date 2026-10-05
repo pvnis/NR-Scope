@@ -37,6 +37,7 @@ void nrscope_sensing_default_args(nrscope_sensing_args_t* args)
   args->max_speed_ms    = 30.0;
   args->clutter_removal = true;
   args->mirror_reject   = true;
+  args->record_max_files = 100;
 }
 
 struct nrscope_sensing_scratch_s {
@@ -347,8 +348,7 @@ see exactly the same conditioned samples.
 Split out so --sensing-clutter-compare can build the same map twice from the same
 snapshots, once per max_paths. */
 static int nr_ue_sensing_task_map(const nr_sensing_map_task_t *t,
-                                  nr_sensing_clutter_t clutter,
-                                  int max_paths,
+                                  const nr_sensing_params_t *p,
                                   nr_sensing_map_t *map,
                                   nr_sensing_slowtime_t *slow,
                                   int n_slow,
@@ -363,8 +363,7 @@ static int nr_ue_sensing_task_map(const nr_sensing_map_task_t *t,
                                       &t->stream,
                                       t->args->symbols,
                                       t->args->max_speed_ms,
-                                      clutter,
-                                      max_paths,
+                                      p,
                                       0, // the first chain sizes the grid every other map is built on
                                       map,
                                       obs != NULL ? &obs[0] : (n_slow > 0 ? &slow[0] : NULL));
@@ -400,7 +399,7 @@ static int nr_ue_sensing_task_map(const nr_sensing_map_task_t *t,
         /* On the first chain's Doppler grid (map->n_freq), so the maps can be summed cell
         by cell; see n_freq_fixed. */
         if (nr_ue_sensing_range_doppler(&t->snap[a], &st, t->args->symbols, t->args->max_speed_ms,
-                                        clutter, max_paths, map->n_freq, other, ob != NULL ? ob : sl) <= 0) {
+                                        p, map->n_freq, other, ob != NULL ? ob : sl) <= 0) {
           if (ob != NULL)
             ob->n_snap = 0;
           continue;
@@ -450,12 +449,51 @@ static void nr_ue_sensing_map_task(void *arg)
 {
   nr_sensing_map_task_t *t = (nr_sensing_map_task_t *)arg;
 
+  /* test_record_samples: record-only mode. Dump every chain and layer of this window's
+  slow-time samples to its own file <dump>.rec.<NNNNN>.csv and skip the entire map
+  pipeline -- no range_doppler, spatial null, detector, AoA or map dump: the maps are
+  rebuilt offline from the recordings, where any parameter can be swept without a rebuild
+  or recapture. See nr_ue_sensing_dump_snapshots_tagged() and scripts/sensing/replay_samples.py. */
+  if (t->args->test_record_samples) {
+    if (t->args->dump[0] != 0) {
+      static int rec_count = 0;
+      const int rc = __sync_add_and_fetch(&rec_count, 1);
+      if (rc <= t->args->record_max_files) {
+        char rec_path[512];
+        snprintf(rec_path, sizeof(rec_path), "%s.rec.%05d.csv", t->args->dump, rc);
+        bool first = true;
+        int n_rec = 0;
+        for (int a = 0; a < t->n_ant; a++)
+          for (int j = 0; j < t->n_layers; j++) {
+            nr_sensing_stream_t st = t->stream;
+            st.layer = t->n_layers > 1 ? (uint8_t)j : t->stream.layer;
+            n_rec += nr_ue_sensing_dump_snapshots_tagged(rec_path, &t->snap[a], &st, t->args->symbols,
+                                                         t->args->max_speed_ms, a, first, first);
+            first = false;
+          }
+        LOG_I(NR_PHY, "SENSING RECORD %d.%d: %d snapshots over %d chain-layers to %s\n", t->frame,
+              t->slot, n_rec, t->n_ant * t->n_layers, rec_path);
+      }
+    }
+    for (int a = 0; a < t->n_ant; a++)
+      free(t->snap[a].ring);
+    free(t);
+    return;
+  }
+
   /* Runtime parameter: clutter removal for static objects. --sensing-clutter-removal
   turns it on and --sensing-clutter-kernel picks the mode, so the kernel flag alone
   does nothing and removal stays a single switch. */
   const nr_sensing_clutter_t clutter = !t->args->clutter_removal ? NR_CLUTTER_NONE
                                        : t->args->clutter_kernel ? NR_CLUTTER_KERNEL
                                                                        : NR_CLUTTER_MEAN;
+
+  /* The clutter-removal parameters for the real pipeline below: compile-time defaults
+  with the clutter mode set from the runtime switches above. The parameter sweep
+  (mode b, at the end of this function) re-runs the map from copies of this base. */
+  nr_sensing_params_t base_params;
+  nr_sensing_params_default(&base_params);
+  base_params.clutter_mode = clutter;
 
   /* Runtime parameter --sensing-tdd-detect: run the TDD detector (the TDD paper).
   It finds the targets and their true speed, even beyond the map's Doppler window, by
@@ -555,10 +593,10 @@ static void nr_ue_sensing_map_task(void *arg)
     slow_null.t_s = malloc_or_fail((size_t)tn->snap[0].depth * sizeof(*slow_null.t_s));
     slow_null.h_re = malloc_or_fail((size_t)tn->snap[0].depth * NR_SENSING_MAP_MAX_BINS_RANGE * sizeof(*slow_null.h_re));
     slow_null.h_im = malloc_or_fail((size_t)tn->snap[0].depth * NR_SENSING_MAP_MAX_BINS_RANGE * sizeof(*slow_null.h_im));
-    n = nr_ue_sensing_task_map(tn, clutter, NR_CLUTTER_MAX_PATHS, &t->map, &slow_null, 1, NULL, NULL);
+    n = nr_ue_sensing_task_map(tn, &base_params, &t->map, &slow_null, 1, NULL, NULL);
     if (n > 0) {
       nr_sensing_map_t *raw = malloc_or_fail(sizeof(*raw));
-      if (nr_ue_sensing_task_map(t, clutter, NR_CLUTTER_MAX_PATHS, raw, slow, n_slow, &n_combined, obs) > 0)
+      if (nr_ue_sensing_task_map(t, &base_params, raw, slow, n_slow, &n_combined, obs) > 0)
         t->map.bin_los = raw->bin_los;
       free(raw);
       LOG_I(NR_PHY,
@@ -576,7 +614,7 @@ static void nr_ue_sensing_map_task(void *arg)
             null_res.static1);
     }
   } else {
-    n = nr_ue_sensing_task_map(t, clutter, NR_CLUTTER_MAX_PATHS, &t->map, slow, n_slow, &n_combined, obs);
+    n = nr_ue_sensing_task_map(t, &base_params, &t->map, slow, n_slow, &n_combined, obs);
   }
   // the slow-time samples the map was built from, which the detector has to see too
   const nr_sensing_slowtime_t *det = tn != NULL ? &slow_null : &slow[0];
@@ -857,13 +895,49 @@ static void nr_ue_sensing_map_task(void *arg)
     Line i of both files is the same window, so --index i compares them. No detector
     or AoA runs on it. */
     if (t->args->clutter_compare && clutter == NR_CLUTTER_KERNEL && t->args->dump[0] != 0) {
+      nr_sensing_params_t p_l1 = base_params;
+      p_l1.max_paths = 1;
       nr_sensing_map_t *map_l1 = malloc_or_fail(sizeof(*map_l1));
-      if (nr_ue_sensing_task_map(t, clutter, 1, map_l1, NULL, 0, NULL, NULL) > 0) {
+      if (nr_ue_sensing_task_map(t, &p_l1, map_l1, NULL, 0, NULL, NULL) > 0) {
         char l1_path[512];
         snprintf(l1_path, sizeof(l1_path), "%s.L1.csv", t->args->dump);
         nr_ue_sensing_dump_map(l1_path, t->frame, t->slot, t->aarx, map_l1, NULL, 0, NULL, 0);
       }
       free(map_l1);
+    }
+
+    /* Parameter sweep (mode b): re-run the map from copies of base_params with one field
+    varied across --sensing-sweep-param's range, each to its own dump
+    <sensing-dump>.<field>_<value>.csv, line i the same window as the main dump. Map only,
+    no detector/AoA/MUSIC, and on the same history the main map used (nulled when the
+    spatial null is on), so the sweep is directly comparable to it. A peak-over-floor
+    metric per set is logged so the sweep is self-scoring. The real pipeline is untouched. */
+    if (t->args->dump[0] != 0) {
+      const nr_sweep_param_t which = nr_sweep_param_from_str(t->args->sweep_param);
+      if (which != NR_SWEEP_NONE) {
+        const nr_sensing_map_task_t *ts = tn != NULL ? tn : t;
+        nr_sensing_params_t sets[NR_SWEEP_MAX_SETS];
+        char labels[NR_SWEEP_MAX_SETS][48];
+        const int n_sets = nr_sensing_params_sweep(&base_params, which, t->args->sweep_lo,
+                                                   t->args->sweep_hi, t->args->sweep_step, sets, labels);
+        nr_sensing_map_t *map_s = malloc_or_fail(sizeof(*map_s));
+        for (int sp = 0; sp < n_sets; sp++) {
+          if (nr_ue_sensing_task_map(ts, &sets[sp], map_s, NULL, 0, NULL, NULL) <= 0)
+            continue;
+          /* The map is normalised to its own noise floor, so the peak value is its SNR. */
+          double peak = 0.0;
+          const int ncell = map_s->n_bins * map_s->n_freq;
+          for (int i = 0; i < ncell; i++)
+            if (map_s->power[i] > peak)
+              peak = map_s->power[i];
+          char sweep_path[512];
+          snprintf(sweep_path, sizeof(sweep_path), "%s.%s.csv", t->args->dump, labels[sp]);
+          nr_ue_sensing_dump_map(sweep_path, t->frame, t->slot, t->aarx, map_s, NULL, 0, NULL, 0);
+          LOG_I(NR_PHY, "SENSING SWEEP %d.%d %s: peak %.1f dB over floor\n", t->frame, t->slot,
+                labels[sp], (peak > 0.0) ? 10.0 * log10(peak) : 0.0);
+        }
+        free(map_s);
+      }
     }
 
     /* Slots the window spans. Not the slots that carried DM-RS: PDSCH is only scheduled

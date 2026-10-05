@@ -199,13 +199,16 @@ static bool test_run_scene(const char* name,
     pushed += TEST_N_DMRS_SYM;
   }
 
+  nr_sensing_params_t sp;
+  nr_sensing_params_default(&sp);
+  sp.clutter_mode = clutter;
+
   nr_sensing_map_t* map = calloc_or_fail(1, sizeof(*map));
   const int         n   = nr_ue_sensing_range_doppler(&hist,
                                                       &stream,
                                                       pushed < NR_SENSING_HISTORY_DEPTH ? pushed : NR_SENSING_HISTORY_DEPTH,
                                                       20.0, // max speed of the grid, m/s; see the span criteria below
-                                                      clutter,
-                                                      NR_CLUTTER_MAX_PATHS,
+                                                      &sp,
                                                       0,
                                                       map,
                                                       NULL);
@@ -223,10 +226,10 @@ static bool test_run_scene(const char* name,
   {
     nr_sensing_map_t* other = calloc_or_fail(1, sizeof(*other));
     const int         n_short = n - n / 20;
-    const int n_own = nr_ue_sensing_range_doppler(&hist, &stream, n_short, 20.0, clutter, NR_CLUTTER_MAX_PATHS, 0, other, NULL);
+    const int n_own = nr_ue_sensing_range_doppler(&hist, &stream, n_short, 20.0, &sp, 0, other, NULL);
     const int own_freq = other->n_freq;
     const int n_fix =
-        nr_ue_sensing_range_doppler(&hist, &stream, n_short, 20.0, clutter, NR_CLUTTER_MAX_PATHS, map->n_freq, other, NULL);
+        nr_ue_sensing_range_doppler(&hist, &stream, n_short, 20.0, &sp, map->n_freq, other, NULL);
     check(n_own > 0 && own_freq != map->n_freq, "shorter window sizes its own grid differently", own_freq,
           map->n_freq, 0);
     check(n_fix > 0 && other->n_freq == map->n_freq && other->f_max_hz == map->f_max_hz,

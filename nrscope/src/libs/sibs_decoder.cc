@@ -170,7 +170,7 @@ int SIBsDecoder::DecodeandParseSIB1fromSlot(srsran_slot_cfg_t* slot,
   }
 
   srsran_sch_cfg_nr_info(&pdsch_cfg, str, (uint32_t)sizeof(str));
-  if (!RunRecorder::enabled()) printf("PDSCH_cfg:\n%s", str);
+  if (RunRecorder::verbose()) printf("PDSCH_cfg:\n%s", str);
 
   if (srsran_softbuffer_rx_init_guru(&softbuffer, SRSRAN_SCH_NR_MAX_NOF_CB_LDPC, 
       SRSRAN_LDPC_MAX_LEN_ENCODED_CB) < SRSRAN_SUCCESS) {
@@ -243,7 +243,7 @@ int SIBsDecoder::DecodeandParseSIB1fromSlot(srsran_slot_cfg_t* slot,
     /* Uncomment to print the decode SIBs. */
     asn1::json_writer js_sibs;
     (decoded_sib).to_json(js_sibs);
-    if (!RunRecorder::enabled()) printf("Decoded SIBs: %s\n", js_sibs.to_string().c_str());
+    if (RunRecorder::verbose()) printf("Decoded SIBs: %s\n", js_sibs.to_string().c_str());
   }else if(srsran_unlikely(asn1::rrc_nr::bcch_dl_sch_msg_type_c::c1_c_::
       types_opts::sys_info != dlsch_msg.msg.c1().type())){
     result->found_sib1 = true;
@@ -269,7 +269,7 @@ int SIBsDecoder::DecodeandParseSIB1fromSlot(srsran_slot_cfg_t* slot,
     /* Uncomment to print the decode SIB1. */
     asn1::json_writer js_sib1;
     (result->sib1).to_json(js_sib1);
-    if (!RunRecorder::enabled()) printf("Decoded SIB1: %s\n", js_sib1.to_string().c_str());
+    if (RunRecorder::verbose()) printf("Decoded SIB1: %s\n", js_sib1.to_string().c_str());
   }
 
   srsran_softbuffer_rx_free(&softbuffer);

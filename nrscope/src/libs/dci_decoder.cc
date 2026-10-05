@@ -250,7 +250,7 @@ int DCIDecoder::DCIDecoderandReceptionInit(WorkState* state, int bwp_id, cf_t* i
     srsran_coreset_t coreset_n;
     coreset_n.id = bwp_dl_ded_s_ptr->pdcch_cfg.setup().ctrl_res_set_to_add_mod_list[crst_id].ctrl_res_set_id;
 
-    if (!RunRecorder::enabled()) printf("to addmod coreset_n.id in bwp0: %u\n", coreset_n.id);
+    if (RunRecorder::verbose()) printf("to addmod coreset_n.id in bwp0: %u\n", coreset_n.id);
     coreset_n.duration = bwp_dl_ded_s_ptr->pdcch_cfg.setup().ctrl_res_set_to_add_mod_list[crst_id].dur;
     for (int i = 0; i < 45; i++) {
       coreset_n.freq_resources[i] =
@@ -330,14 +330,14 @@ int DCIDecoder::DCIDecoderandReceptionInit(WorkState* state, int bwp_id, cf_t* i
       coreset_n.dmrs_scrambling_id =
           bwp_dl_ded_s_ptr->pdcch_cfg.setup().ctrl_res_set_to_add_mod_list[crst_id].pdcch_dmrs_scrambling_id;
     }
-    if (!RunRecorder::enabled()) printf("coreset_dmrs_scrambling id: %u\n", coreset_n.dmrs_scrambling_id);
+    if (RunRecorder::verbose()) printf("coreset_dmrs_scrambling id: %u\n", coreset_n.dmrs_scrambling_id);
 
     pdcch_cfg.coreset[coreset_n.id]         = coreset_n;
     pdcch_cfg.coreset_present[coreset_n.id] = true;
 
     char coreset_info[512] = {};
     srsran_coreset_to_str(&coreset_n, coreset_info, sizeof(coreset_info));
-    if (!RunRecorder::enabled()) printf("Coreset %d parameter: %s", coreset_n.id, coreset_info);
+    if (RunRecorder::verbose()) printf("Coreset %d parameter: %s", coreset_n.id, coreset_info);
 
     if (crst_id == 0) {
       coreset1_t = coreset_n;
@@ -460,7 +460,7 @@ int DCIDecoder::DCIDecoderandReceptionInit(WorkState* state, int bwp_id, cf_t* i
   }
   if (rrc_recfg_user.recfg_dci_cfg.count("report_trigger_size")) {
     dci_cfg.report_trigger_size = stoi(rrc_recfg_user.recfg_dci_cfg["report_trigger_size"]);
-    if (!RunRecorder::enabled()) std::cout << "report_trigger_size: " << dci_cfg.report_trigger_size << std::endl;
+    if (RunRecorder::verbose()) std::cout << "report_trigger_size: " << dci_cfg.report_trigger_size << std::endl;
   }
 
   if (bwp_ul_ded_s_ptr->pusch_cfg.setup().transform_precoder ==
@@ -739,7 +739,7 @@ int DCIDecoder::DCIDecoderandReceptionInit(WorkState* state, int bwp_id, cf_t* i
     } else if (rrc_recfg_user.recfg_dci_cfg["pdsch_alloc_type"] == "dynamic") {
       dci_cfg.pdsch_alloc_type = srsran_resource_alloc_dynamic;
     }
-    if (!RunRecorder::enabled()) std::cout << "pdsch alloc type: " << dci_cfg.pdsch_alloc_type << std::endl;
+    if (RunRecorder::verbose()) std::cout << "pdsch alloc type: " << dci_cfg.pdsch_alloc_type << std::endl;
   }
 
   if (rrc_recfg_user.recfg_dci_cfg.count("multiple_scell")) {
@@ -748,7 +748,7 @@ int DCIDecoder::DCIDecoderandReceptionInit(WorkState* state, int bwp_id, cf_t* i
     } else if (rrc_recfg_user.recfg_dci_cfg["multiple_scell"] == "false") {
       dci_cfg.multiple_scell = false;
     }
-    if (!RunRecorder::enabled()) std::cout << "multiple scell: " << dci_cfg.multiple_scell << std::endl;
+    if (RunRecorder::verbose()) std::cout << "multiple scell: " << dci_cfg.multiple_scell << std::endl;
   }
 
   /* for non carrier aggregation*/
@@ -1020,7 +1020,7 @@ int DCIDecoder::DCIDecoderandReceptionInit(WorkState* state, int bwp_id, cf_t* i
     ERROR("Error init soft-buffer");
     return SRSRAN_ERROR;
   }
-  if (!RunRecorder::enabled()) std::cout << "ending.." << std::endl;
+  if (RunRecorder::verbose()) std::cout << "ending.." << std::endl;
 
   /* Full-carrier grid for the PDSCH DM-RS check (recording mode) and for sensing.
     The carrier and the initial BWP (the only one this cell uses, bwp-Id 0) are
@@ -1264,7 +1264,7 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
       // printf("M=%d\n", ue_dl_tmp->pdcch.M);
       // printf("symbols=");
       // srsran_vec_fprint_c(stdout, ue_dl_tmp->pdcch.symbols, ue_dl_tmp->pdcch.M);
-      if (!RunRecorder::enabled()) printf("DCIDecoder -- DCI found with CA\n");
+      if (RunRecorder::verbose()) printf("DCIDecoder -- DCI found with CA\n");
       continue;
     }
 
@@ -1358,7 +1358,7 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
       // printf("M=%d\n", ue_dl_tmp->pdcch.M);
       // printf("symbols=");
       // srsran_vec_fprint_c(stdout, ue_dl_tmp->pdcch.symbols, ue_dl_tmp->pdcch.M);
-      if (!RunRecorder::enabled()) printf("DCIDecoder -- DCI Found without CA\n");
+      if (RunRecorder::verbose()) printf("DCIDecoder -- DCI Found without CA\n");
     }
   }
 
@@ -1369,7 +1369,7 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
         sharded_results[dci_decoder_id].dl_dcis[dci_idx_dl] = dci_dl[dci_idx_dl];
         char str[1024]                                      = {};
         srsran_dci_dl_nr_to_str(&(ue_dl_dci.dci), &dci_dl[dci_idx_dl], str, (uint32_t)sizeof(str));
-        if (!RunRecorder::enabled()) printf("DCIDecoder -- Found DCI: %s\n", str);
+        if (RunRecorder::verbose()) printf("DCIDecoder -- Found DCI: %s\n", str);
         // The grant may not be decoded correctly, since srsRAN's code is not complete.
         // We can calculate the DL bandwidth for this subframe by ourselves.
         if (dci_dl[dci_idx_dl].ctx.format == srsran_dci_format_nr_1_1) {
@@ -1429,7 +1429,7 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
                                   d.tpc, d.ports, d.dmrs_id, d.srs_request, &pdsch_cfg,
                                   dci_dl_ca[dci_idx_dl], dci_dl_bits[dci_idx_dl].c_str(), str,
                                   dmrs_res.valid ? &dmrs_res : nullptr);
-          if (!RunRecorder::enabled()) {
+          if (RunRecorder::verbose()) {
             srsran_sch_cfg_nr_info(&pdsch_cfg, str, (uint32_t)sizeof(str));
             printf("DCIDecoder -- PDSCH_cfg:\n%s", str);
           }
@@ -1491,7 +1491,7 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
         sharded_results[dci_decoder_id].ul_dcis[dci_idx_ul] = dci_ul[dci_idx_ul];
         char str[1024]                                      = {};
         srsran_dci_ul_nr_to_str(&(ue_dl_dci.dci), &dci_ul[dci_idx_ul], str, (uint32_t)sizeof(str));
-        if (!RunRecorder::enabled()) printf("DCIDecoder -- Found DCI: %s\n", str);
+        if (RunRecorder::verbose()) printf("DCIDecoder -- Found DCI: %s\n", str);
         // The grant may not be decoded correctly, since srsRAN's code is not complete.
         // We can calculate the UL bandwidth for this subframe by ourselves.
         srsran_sch_cfg_nr_t pusch_cfg = {};
@@ -1505,7 +1505,7 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
         RunRecorder::record_dci(state->cs_ret.ssb_res.N_id, state->sfn, slot->idx, false, u.ctx,
                                 u.freq_domain_assigment, u.time_domain_assigment, u.mcs, u.ndi, u.rv, u.pid,
                                 u.tpc, u.ports, u.dmrs_id, u.srs_request, &pusch_cfg, false, "", str);
-        if (!RunRecorder::enabled()) {
+        if (RunRecorder::verbose()) {
           srsran_sch_cfg_nr_info(&pusch_cfg, str, (uint32_t)sizeof(str));
           printf("DCIDecoder -- PUSCH_cfg:\n%s", str);
         }

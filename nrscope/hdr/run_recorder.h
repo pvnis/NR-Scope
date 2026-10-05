@@ -27,6 +27,15 @@ namespace RunRecorder {
 void init(bool enable);
 bool enabled();
 
+/* Keep the terminal quiet (no grant dumps, JSON or per-field lines) without writing the
+  CSVs, for a sensing run that wants recording_mode's clean terminal but not its files.
+  Set from log_config.quiet in the yaml. */
+void set_quiet(bool quiet);
+
+/* Whether the verbose terminal output should be printed: only when neither recording nor
+  quiet is on. The "print unless recording" guards call this so quiet silences them too. */
+bool verbose();
+
 /* One-shot snapshot of the cell configuration recovered from the air, used to
   draw the static cell map (SSB / CORESET#0 / SIB1 / initial DL BWP against
   Point A). Every field comes from what NR-Scope itself decoded (MIB, SIB1,

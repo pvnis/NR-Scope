@@ -613,11 +613,12 @@ static void nr_ue_sensing_remove_path(const nr_sensing_history_t *hist,
                                       int n,
                                       int n_bins,
                                       double u,
+                                      int kernel_half_span,
                                       float *res_re,
                                       float *res_im)
 {
-  int b_lo = (int)floor(u) - NR_CLUTTER_KERNEL_HALF_SPAN;
-  int b_hi = (int)ceil(u) + NR_CLUTTER_KERNEL_HALF_SPAN;
+  int b_lo = (int)floor(u) - kernel_half_span;
+  int b_hi = (int)ceil(u) + kernel_half_span;
   if (b_lo < 0)
     b_lo = 0;
   if (b_hi > n_bins - 1)
@@ -775,6 +776,7 @@ written is returned. Room for 2*NR_COMB_MAX_HARMONIC rows is needed. */
 static int nr_ue_sensing_comb_basis(const double *t,
                                     int n,
                                     double f0_hz,
+                                    int n_harmonic,
                                     const double q[][NR_SENSING_HISTORY_DEPTH],
                                     int n_q,
                                     double *e_re,
@@ -784,7 +786,7 @@ static int nr_ue_sensing_comb_basis(const double *t,
     return 0;
 
   int n_e = 0;
-  for (int k = 1; k <= NR_COMB_MAX_HARMONIC; k++) {
+  for (int k = 1; k <= n_harmonic; k++) {
     for (int sgn = 1; sgn >= -1; sgn -= 2) {
       double *vr = &e_re[(size_t)n_e * n];
       double *vi = &e_im[(size_t)n_e * n];
@@ -849,16 +851,105 @@ static int nr_ue_sensing_cmp_double(const void *a, const void *b)
   return (x > y) - (x < y);
 }
 
+/* ------------------------------------------------------------------ */
+/* One-factor parameter sweep (mode b): see nr_sensing_params_sweep(). */
+
+static const char *nr_sweep_name(nr_sweep_param_t w)
+{
+  switch (w) {
+    case NR_SWEEP_CLUTTER_MODE:      return "clutter_mode";
+    case NR_SWEEP_MAX_PATHS:         return "max_paths";
+    case NR_SWEEP_TREND_DEGREE:      return "trend_degree";
+    case NR_SWEEP_KERNEL_HALF_SPAN:  return "kernel_half_span";
+    case NR_SWEEP_STATIC_MIN:        return "static_min";
+    case NR_SWEEP_SNR_MIN:           return "snr_min";
+    case NR_SWEEP_MIN_SEP_BINS:      return "min_sep_bins";
+    case NR_SWEEP_LOS_FIRST_DB:      return "los_first_db";
+    case NR_SWEEP_LOS_NORM:          return "los_norm";
+    case NR_SWEEP_LOS_MAX_CORR_DB:   return "los_max_corr_db";
+    case NR_SWEEP_COMB_REMOVE:       return "comb_remove";
+    case NR_SWEEP_COMB_HARMONIC:     return "comb_harmonic";
+    case NR_SWEEP_COMB_TDD_MULTIPLE: return "comb_tdd_multiple";
+    default:                         return "none";
+  }
+}
+
+nr_sweep_param_t nr_sweep_param_from_str(const char *s)
+{
+  if (s == NULL) return NR_SWEEP_NONE;
+  for (nr_sweep_param_t w = NR_SWEEP_CLUTTER_MODE; w <= NR_SWEEP_COMB_TDD_MULTIPLE; w++)
+    if (strcmp(s, nr_sweep_name(w)) == 0)
+      return w;
+  return NR_SWEEP_NONE;
+}
+
+/* Set the one swept field of p to v, clamped to the field's valid range. The caps that
+also size arrays (paths, trend degree, comb harmonic) are enforced here, so a swept set
+can never exceed what range_doppler asserts. */
+static void nr_sweep_apply(nr_sensing_params_t *p, nr_sweep_param_t which, double v)
+{
+  const long m = lround(v);
+  switch (which) {
+    case NR_SWEEP_CLUTTER_MODE:
+      p->clutter_mode = (nr_sensing_clutter_t)(m < 0 ? 0 : m > NR_CLUTTER_KERNEL ? NR_CLUTTER_KERNEL : m);
+      break;
+    case NR_SWEEP_MAX_PATHS:
+      p->max_paths = (int)(m < 1 ? 1 : m > NR_CLUTTER_MAX_PATHS ? NR_CLUTTER_MAX_PATHS : m);
+      break;
+    case NR_SWEEP_TREND_DEGREE:
+      p->trend_degree = (int)(m < 0 ? 0 : m > NR_CLUTTER_SLOW_TREND_MAX ? NR_CLUTTER_SLOW_TREND_MAX : m);
+      break;
+    case NR_SWEEP_KERNEL_HALF_SPAN:
+      p->kernel_half_span = (int)(m < 1 ? 1 : m);
+      break;
+    case NR_SWEEP_STATIC_MIN:      p->static_min = v; break;
+    case NR_SWEEP_SNR_MIN:         p->snr_min = v; break;
+    case NR_SWEEP_MIN_SEP_BINS:    p->min_sep_bins = (int)(m < 1 ? 1 : m); break;
+    case NR_SWEEP_LOS_FIRST_DB:    p->los_first_db = v; break;
+    case NR_SWEEP_LOS_NORM:        p->los_norm = (m != 0); break;
+    case NR_SWEEP_LOS_MAX_CORR_DB: p->los_max_corr_db = v; break;
+    case NR_SWEEP_COMB_REMOVE:     p->comb_remove = (m != 0); break;
+    case NR_SWEEP_COMB_HARMONIC:
+      p->comb_harmonic = (int)(m < 1 ? 1 : m > NR_COMB_MAX_HARMONIC ? NR_COMB_MAX_HARMONIC : m);
+      break;
+    case NR_SWEEP_COMB_TDD_MULTIPLE: p->comb_tdd_multiple = (int)(m < 1 ? 1 : m); break;
+    case NR_SWEEP_NONE:
+    default:
+      break;
+  }
+}
+
+int nr_sensing_params_sweep(const nr_sensing_params_t *base,
+                            nr_sweep_param_t which,
+                            double lo,
+                            double hi,
+                            double step,
+                            nr_sensing_params_t sets[NR_SWEEP_MAX_SETS],
+                            char labels[NR_SWEEP_MAX_SETS][48])
+{
+  if (which == NR_SWEEP_NONE || !(step > 0.0) || hi < lo)
+    return 0;
+  const char *nm = nr_sweep_name(which);
+  int n = 0;
+  for (double v = lo; v <= hi + 1e-9 && n < NR_SWEEP_MAX_SETS; v += step) {
+    sets[n] = *base;
+    nr_sweep_apply(&sets[n], which, v);
+    snprintf(labels[n], 48, "%s_%g", nm, v);
+    n++;
+  }
+  return n;
+}
+
 /* The direct path's bin in an energy profile: the earliest local peak within
 NR_SENSING_LOS_FIRST_DB of the strongest, see there. The direct path arrives first,
 it does not have to be the strongest. */
-static int nr_ue_sensing_los_peak(const double *e_prof, int n_bins)
+static int nr_ue_sensing_los_peak(const double *e_prof, int n_bins, double los_first_db)
 {
   int u0 = 0;
   for (int b = 1; b < n_bins; b++)
     if (e_prof[b] > e_prof[u0])
       u0 = b;
-  const double e_min = e_prof[u0] * pow(10.0, -NR_SENSING_LOS_FIRST_DB / 10.0);
+  const double e_min = e_prof[u0] * pow(10.0, -los_first_db / 10.0);
   for (int b = 0; b < u0; b++) {
     const bool peak = (b == 0 || e_prof[b] >= e_prof[b - 1]) && e_prof[b] >= e_prof[b + 1];
     if (peak && e_prof[b] >= e_min)
@@ -871,13 +962,20 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
                                 const nr_sensing_stream_t *stream,
                                 int n_snap_max,
                                 double max_speed_ms,
-                                nr_sensing_clutter_t clutter_mode,
-                                int max_paths,
+                                const nr_sensing_params_t *p,
                                 int n_freq_fixed,
                                 nr_sensing_map_t *map,
                                 nr_sensing_slowtime_t *slow_out)
 {
   if (hist->ring == NULL) return 0;
+
+  /* The active clutter mode and the two caps a field may not exceed, since they size
+  fixed arrays below. Everything else is read straight from p. */
+  const nr_sensing_clutter_t clutter_mode = p->clutter_mode;
+  AssertFatal(p->trend_degree >= 0 && p->trend_degree <= NR_CLUTTER_SLOW_TREND_MAX,
+              "sensing: trend_degree %d out of 0..%d\n", p->trend_degree, NR_CLUTTER_SLOW_TREND_MAX);
+  AssertFatal(p->comb_harmonic >= 1 && p->comb_harmonic <= NR_COMB_MAX_HARMONIC,
+              "sensing: comb_harmonic %d out of 1..%d\n", p->comb_harmonic, NR_COMB_MAX_HARMONIC);
 
   /* The Doppler axis does not depend on the snapshots, so it is known before they are
   gathered, and it has to be: its half width sets criterion 1 of the window, which is
@@ -1166,7 +1264,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
     }
     e_prof[b] = e;
   }
-  const int u0 = nr_ue_sensing_los_peak(e_prof, n_bins);
+  const int u0 = nr_ue_sensing_los_peak(e_prof, n_bins, p->los_first_db);
 
   /* Sub-bin refinement of the direct path. Worth doing rather than reporting the
   integer bin: at 2.44 m/bin the rounding alone is up to 1.2 m of bias, and it lands
@@ -1223,12 +1321,11 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
     c_im[i] = 0.0;
   }
 
-#if NR_CLUTTER_LOS_NORM
-  {
+  if (p->los_norm) {
     /* Same span as a path removal, so the filter sees the same skirt the kernel mode
     would subtract, clipped to the map. */
-    int b_lo = (int)floor(map->bin_los) - NR_CLUTTER_KERNEL_HALF_SPAN;
-    int b_hi = (int)ceil(map->bin_los) + NR_CLUTTER_KERNEL_HALF_SPAN;
+    int b_lo = (int)floor(map->bin_los) - p->kernel_half_span;
+    int b_hi = (int)ceil(map->bin_los) + p->kernel_half_span;
     if (b_lo < 0) b_lo = 0;
     if (b_hi > n_bins - 1) b_hi = n_bins - 1;
     const int span = b_hi - b_lo + 1;
@@ -1270,7 +1367,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
       qsort(sorted, n, sizeof(sorted[0]), nr_ue_sensing_cmp_double);
       const double ref = sorted[n / 2];
 
-      const double corr_max = pow(10.0, NR_CLUTTER_LOS_MAX_CORR_DB / 20.0);
+      const double corr_max = pow(10.0, p->los_max_corr_db / 20.0);
       int n_clamped = 0;
       if (ref > 0.0) {
         for (int i = 0; i < n; i++) {
@@ -1304,7 +1401,6 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
     free(kre);
     free(kim);
   }
-#endif
 
   for (int i = 0; i < n; i++) {
     const cf_t *h = hist->ring[idx[i]].h;
@@ -1316,6 +1412,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
   }
 
   if (clutter_mode == NR_CLUTTER_KERNEL) {
+    int max_paths = p->max_paths;
     if (max_paths < 1)
       max_paths = 1;
     if (max_paths > NR_CLUTTER_MAX_PATHS)
@@ -1324,7 +1421,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
     int n_fit = 0;
 
     // Path 0: the direct path, always, at the refined fractional bin.
-    nr_ue_sensing_remove_path(hist, idx, n, n_bins, map->bin_los, res_re, res_im);
+    nr_ue_sensing_remove_path(hist, idx, n, n_bins, map->bin_los, p->kernel_half_span, res_re, res_im);
     u_fit[n_fit++] = map->bin_los;
 
     /* Further static paths, strongest first, while the strongest peak left in the
@@ -1353,7 +1450,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
       for (int b = 0; b < n_bins; b++) {
         bool near = false;
         for (int l = 0; l < n_fit && !near; l++)
-          near = fabs(b - u_fit[l]) < NR_CLUTTER_MIN_SEP_BINS;
+          near = fabs(b - u_fit[l]) < p->min_sep_bins;
         if (!near && (b_best < 0 || coh[b] > coh[b_best]))
           b_best = b;
       }
@@ -1368,11 +1465,11 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
       const double noise_mean = sorted[n_bins / 2] / n;
 
       const double s_static = inc[b_best] > 0.0 ? coh[b_best] / inc[b_best] : 0.0;
-      if (s_static < NR_CLUTTER_STATIC_MIN || coh[b_best] < NR_CLUTTER_SNR_MIN * noise_mean)
+      if (s_static < p->static_min || coh[b_best] < p->snr_min * noise_mean)
         break;
 
       const double u = b_best + nr_ue_sensing_peak_frac(coh, b_best, n_bins);
-      nr_ue_sensing_remove_path(hist, idx, n, n_bins, u, res_re, res_im);
+      nr_ue_sensing_remove_path(hist, idx, n, n_bins, u, p->kernel_half_span, res_re, res_im);
       u_fit[n_fit++] = u;
       LOG_D(NR_PHY,
             "sensing: static path %d removed at bin %.2f, S %.2f, %.1f dB above noise\n",
@@ -1396,7 +1493,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
 
   The residual holds the result, gain applied, so everything below reads it as is. */
 
-  const int trend_degree = (clutter_mode == NR_CLUTTER_NONE) ? -1 : NR_CLUTTER_SLOW_TREND_DEGREE;
+  const int trend_degree = (clutter_mode == NR_CLUTTER_NONE) ? -1 : p->trend_degree;
   double q[NR_CLUTTER_SLOW_TREND_MAX + 1][NR_SENSING_HISTORY_DEPTH];
   const int n_q = nr_ue_sensing_slow_basis(t, n, trend_degree, q);
 
@@ -1445,9 +1542,8 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
 
   P is n_bins by 2K, a few thousand entries, so the power iteration on it costs
   nothing next to the transform that follows. */
-#if NR_CLUTTER_COMB_REMOVE
-  if (clutter_mode != NR_CLUTTER_NONE && n_q > 0) {
-    const double f0 = 1.0 / (NR_COMB_TDD_MULTIPLE * nr_ue_sensing_tdd_period_s(hist));
+  if (p->comb_remove && clutter_mode != NR_CLUTTER_NONE && n_q > 0) {
+    const double f0 = 1.0 / (p->comb_tdd_multiple * nr_ue_sensing_tdd_period_s(hist));
     const int n_e_max = 2 * NR_COMB_MAX_HARMONIC;
 
     double *e_re = malloc((size_t)n_e_max * n * sizeof(double));
@@ -1458,7 +1554,8 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
     if (e_re == NULL || e_im == NULL || p_re == NULL || p_im == NULL) {
       LOG_E(NR_PHY, "sensing: cannot allocate the comb basis, comb left in\n");
     } else {
-      const int n_e = nr_ue_sensing_comb_basis(t, n, f0, (const double(*)[NR_SENSING_HISTORY_DEPTH])q, n_q, e_re, e_im);
+      const int n_e = nr_ue_sensing_comb_basis(
+          t, n, f0, p->comb_harmonic, (const double(*)[NR_SENSING_HISTORY_DEPTH])q, n_q, e_re, e_im);
 
       if (n_e > 0) {
         // 1. tone content of every range bin
@@ -1488,7 +1585,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
           vi[j] = 0.0;
         }
         double sigma = 0.0;
-        for (int it = 0; it < NR_COMB_POWER_ITERS; it++) {
+        for (int it = 0; it < p->comb_power_iters; it++) {
           double nu = 0.0;
           for (int b = 0; b < n_bins; b++) {
             double sr = 0.0, si = 0.0;
@@ -1550,7 +1647,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
           LOG_D(NR_PHY,
                 "sensing: comb removed at %.1f Hz and %d harmonics, %d basis vectors, rank-1 share %.2f\n",
                 f0,
-                NR_COMB_MAX_HARMONIC,
+                p->comb_harmonic,
                 n_e,
                 (total > 0.0) ? removed / total : 0.0);
         }
@@ -1561,7 +1658,6 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
     free(p_re);
     free(p_im);
   }
-#endif
 
   /*
   Hand the conditioned samples back before they are consumed. This is the last
@@ -1772,6 +1868,72 @@ void nr_ue_sensing_dump_snapshots(const char *path,
         path);
 }
 
+/* As nr_ue_sensing_dump_snapshots(), but for the test_record_samples mode: one file per
+map holding every (chain, layer) the map used, so a Python reprocessor can rebuild the
+whole map offline and sweep any parameter. Each row carries an aarx column and the
+snapshot's own layer, so the reader can group rows back into per-chain, per-layer
+histories. truncate opens the file fresh (first block of a map), else appends; header
+writes the column line (first block only). Returns the number of snapshots written. */
+int nr_ue_sensing_dump_snapshots_tagged(const char *path,
+                                        const nr_sensing_history_t *hist,
+                                        const nr_sensing_stream_t *stream,
+                                        int n_snap_max,
+                                        double max_speed_ms,
+                                        int aarx,
+                                        bool truncate,
+                                        bool header)
+{
+  if (path == NULL || hist->ring == NULL) return 0;
+
+  int idx[NR_SENSING_HISTORY_DEPTH];
+  int n = nr_ue_sensing_gather(hist, stream, n_snap_max, nr_ue_sensing_window_s(hist, max_speed_ms, 0, 0), idx);
+#if NR_SENSING_GROUP_BY_GRANT
+  n = nr_ue_sensing_group_by_grant(hist, idx, n);
+#endif
+  if (n < 1) return 0;
+
+  FILE *f = fopen(path, truncate ? "w" : "a");
+  if (f == NULL) {
+    LOG_E(NR_PHY, "sensing: cannot open sample record file %s\n", path);
+    return 0;
+  }
+
+  const double fs = (double)hist->ofdm_symbol_size * hist->scs_hz;
+  const uint64_t t0 = hist->ring[idx[0]].t_sample;
+
+  if (header)
+    fprintf(f,
+            "# aarx,layer,snap,t_sample,t_rel_s,k_step,k_first,n_pilots,idft_size,n_bins,scs_hz,fs_hz,"
+            "carrier_hz,max_speed_ms,tdd_slots,re[0],im[0],...,re[n_bins-1],im[n_bins-1]\n");
+
+  for (int i = 0; i < n; i++) {
+    const nr_sensing_snapshot_t *s = &hist->ring[idx[i]];
+    fprintf(f,
+            "%d,%d,%d,%lu,%.9f,%d,%d,%d,%d,%d,%d,%.0f,%.0f,%.3f,%d",
+            aarx,
+            s->stream.layer,
+            i,
+            (unsigned long)s->t_sample,
+            (double)(s->t_sample - t0) / fs,
+            s->stream.k_step,
+            s->k_first,
+            s->n_pilots,
+            s->idft_size,
+            s->n_bins,
+            hist->scs_hz,
+            fs,
+            (double)hist->carrier_hz,
+            max_speed_ms,
+            NR_SENSING_TDD_PERIOD_SLOTS);
+    for (int b = 0; b < s->n_bins; b++)
+      fprintf(f, ",%g,%g", crealf(s->h[b]), cimagf(s->h[b]));
+    fprintf(f, "\n");
+  }
+
+  fclose(f);
+  return n;
+}
+
 /* SPATIAL NULL, see nr_ue_sensing_spatial_null() in nr_ue_map.h. */
 
 typedef struct {
@@ -1869,7 +2031,7 @@ bool nr_ue_sensing_spatial_null(const nr_sensing_history_t *h0,
   /* The direct path's mainlobe, the bins the null is fitted on: one direction, the
   gNB's. Fitting on the whole profile instead would null whatever mixture of
   directions holds the most static energy, which is not a direction at all. */
-  const int u0 = nr_ue_sensing_los_peak(e_prof, n_bins);
+  const int u0 = nr_ue_sensing_los_peak(e_prof, n_bins, NR_SENSING_LOS_FIRST_DB);
   const int b_lo = u0 > 0 ? u0 - 1 : 0, b_hi = u0 < n_bins - 1 ? u0 + 1 : n_bins - 1;
   double num_r = 0.0, num_i = 0.0, den = 0.0;
   for (int b = b_lo; b <= b_hi; b++) { // w = <m0, m1> / <m1, m1>

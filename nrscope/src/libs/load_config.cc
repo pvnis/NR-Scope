@@ -278,6 +278,10 @@ int load_config(std::vector<Radio>& radios, std::string file_name)
     the terminal to the "Found DCI" and "hooray" lines. See run_recorder.h. */
   RunRecorder::init(config_yaml[setting_name]["recording_mode"] &&
                     config_yaml[setting_name]["recording_mode"].as<bool>());
+  /* Keep the terminal clean without writing CSVs: recording_mode's quiet terminal for a
+  run that does not want its files (e.g. a sensing-only or sample-recording run). */
+  RunRecorder::set_quiet(config_yaml[setting_name]["quiet"] &&
+                         config_yaml[setting_name]["quiet"].as<bool>());
   RunRecorder::enable_pdcch_candidates(config_yaml[setting_name]["record_pdcch_candidates"] &&
                                        config_yaml[setting_name]["record_pdcch_candidates"].as<bool>());
 
@@ -318,6 +322,23 @@ int load_config(std::vector<Radio>& radios, std::string file_name)
     flag("compensate_window_shifts", &nrscope_sensing_args.compensate_window_shifts);
     flag("spatial_null", &nrscope_sensing_args.spatial_null);
     flag("mirror_reject", &nrscope_sensing_args.mirror_reject);
+
+    /* Parameter sweep (mode b). sweep.param names the clutter field to vary, lo/hi/step
+    its range; empty or absent disables it. See nrscope_sensing_args_t.sweep_param. */
+    if (sn["sweep"]) {
+      const YAML::Node sw = sn["sweep"];
+      if (sw["param"]) {
+        snprintf(nrscope_sensing_args.sweep_param, sizeof(nrscope_sensing_args.sweep_param), "%s",
+                 sw["param"].as<std::string>().c_str());
+      }
+      if (sw["lo"])   nrscope_sensing_args.sweep_lo   = sw["lo"].as<double>();
+      if (sw["hi"])   nrscope_sensing_args.sweep_hi   = sw["hi"].as<double>();
+      if (sw["step"]) nrscope_sensing_args.sweep_step = sw["step"].as<double>();
+    }
+
+    flag("test_record_samples", &nrscope_sensing_args.test_record_samples);
+    if (sn["record_max_files"])
+      nrscope_sensing_args.record_max_files = sn["record_max_files"].as<int>();
   }
 
   if (config_yaml[setting_name]["push_to_google"]) {
