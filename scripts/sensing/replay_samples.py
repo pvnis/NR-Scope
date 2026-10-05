@@ -35,6 +35,9 @@ Examples:
 
   # single reprocess at the defaults, plot the first map
   replay_samples.py --rec '/tmp/map2d.csv.rec.00001.csv'
+
+  # sliding average of 4 consecutive maps (non-coherent), optionally velocity-compensated
+  replay_samples.py --rec '~/runs/run_1/map2d.csv.rec.*.csv' --avg-maps 4 [--vcomp]
 """
 import argparse
 import glob
@@ -306,17 +309,20 @@ def build_map(snaps, prm, n_freq_fixed=0):
 
     return dict(power=power.astype(np.float32), n_bins=n_bins, n_freq=n_freq,
                 f_max=f_max, m_per_bin=m_per_bin, t_span=t_span, carrier=carrier,
-                bin_los=bin_los, n_snap=n, k_step=k_step, layer=s0["layer"])
+                bin_los=bin_los, n_snap=n, k_step=k_step, layer=s0["layer"],
+                t_center=0.5 * (snaps[0]["t_abs"] + snaps[-1]["t_abs"]))
 
 
-def build_averaged(groups, prm, antenna_avg, layer_avg):
-    """Average per-(chain,layer) maps on the first one's grid, as task_map does."""
+def build_averaged(groups, prm, antenna_avg, layer_avg, n_freq_fixed=0):
+    """Average per-(chain,layer) maps on the first one's grid, as task_map does.
+    n_freq_fixed > 0 puts the whole window on that Doppler grid (used to keep every
+    window of a run on one grid, so maps can be averaged across windows)."""
     keys = sorted(groups)
     if not antenna_avg:
         keys = [k for k in keys if k[0] == min(a for a, _ in groups)]
     if not layer_avg:
         keys = [k for k in keys if k[1] == min(l for _, l in keys)]
-    first = build_map(groups[keys[0]], prm, 0)
+    first = build_map(groups[keys[0]], prm, n_freq_fixed)
     if first is None:
         return None
     acc = first["power"].astype(np.float64).copy()
@@ -330,6 +336,52 @@ def build_averaged(groups, prm, antenna_avg, layer_avg):
     first["power"] = (acc / n_comb).astype(np.float32)
     first["n_combined"] = n_comb
     return first
+
+
+def average_maps(ms, K, vcomp):
+    """Sliding, causal non-coherent average of K consecutive window maps (all on one grid).
+
+    Output i is the mean power of maps i-K+1 .. i, so there is one output per input from
+    the K-th on. Averaging power keeps the floor's mean and shrinks its fluctuation, so the
+    noise speckle drops and a target that holds its cell gains margin.
+
+    vcomp: velocity-compensated averaging. Every Doppler column f has a known bistatic
+    path-length rate, dR/dt = -lambda*f (approaching = positive Doppler). An older map j,
+    dt = t_i - t_j earlier, saw that content at path length R + lambda*f*dt, so column f of
+    map j is read shifted by lambda*f*dt/m_per_bin bins before averaging. A mover then stays
+    aligned across the K maps instead of smearing over range. A TDD replica sits in a column
+    whose f is not its true Doppler, so it is shifted by the wrong amount and smears: vcomp
+    also weakens replicas relative to the real peak. Cells read from outside the map are
+    left out of that cell's mean."""
+    if K <= 1:
+        return ms
+    out = []
+    for i in range(K - 1, len(ms)):
+        ref = ms[i]
+        nb, nf = ref["n_bins"], ref["n_freq"]
+        lam = C / ref["carrier"]
+        freqs = -ref["f_max"] + np.arange(nf) * (2.0 * ref["f_max"] / (nf - 1))
+        acc = np.zeros((nb, nf))
+        cnt = np.zeros((nb, nf))
+        b = np.arange(nb, dtype=float)
+        for j in range(i - K + 1, i + 1):
+            P = ms[j]["power"].astype(float)
+            if not vcomp or j == i:
+                acc += P
+                cnt += 1.0
+                continue
+            dt = ref["t_center"] - ms[j]["t_center"]
+            shift = lam * freqs * dt / ref["m_per_bin"]          # bins, per column
+            for f in range(nf):
+                col = np.interp(b + shift[f], b, P[:, f], left=np.nan, right=np.nan)
+                ok = ~np.isnan(col)
+                acc[ok, f] += col[ok]
+                cnt[ok, f] += 1.0
+        avg = dict(ref)
+        avg["power"] = (acc / np.maximum(cnt, 1.0)).astype(np.float32)
+        avg["n_avg"] = K
+        out.append(avg)
+    return out
 
 
 # ---------------------------------------------------------------- io
@@ -354,7 +406,8 @@ def parse_rec(path):
             iq = np.array(vals[15:15 + 2 * n_bins], dtype=np.float64)
             h = iq[0::2] + 1j * iq[1::2]
             groups.setdefault((aarx, layer), []).append(dict(
-                t=float(vals[4]), n_pilots=n_pilots, idft=idft, scs=scs,
+                t=float(vals[4]), t_abs=int(vals[3]) / float(vals[11]),
+                n_pilots=n_pilots, idft=idft, scs=scs,
                 carrier=carrier, k_step=k_step, a_m=a_m, layer=layer, h=h))
     return groups, tdd_slots, max_speed
 
@@ -392,6 +445,11 @@ def main():
     ap.add_argument("--out-dir", default=None, help="write per-set map CSVs here")
     ap.add_argument("--no-antenna-avg", action="store_true")
     ap.add_argument("--no-layer-avg", action="store_true")
+    ap.add_argument("--avg-maps", type=int, default=1,
+                    help="sliding non-coherent average over K consecutive maps (default 1: off)")
+    ap.add_argument("--vcomp", action="store_true",
+                    help="with --avg-maps: shift each Doppler column by its path-length "
+                         "rate before averaging, so movers stay aligned")
     for fld, val in DEFAULTS.items():     # allow overriding any base parameter
         ap.add_argument("--" + fld.replace("_", "-"), type=float, default=None)
     args = ap.parse_args()
@@ -439,26 +497,33 @@ def main():
     print(f"writing maps to {args.out_dir}/ (same pipeline as normal mode, without the "
           f"spatial null and AoA)")
 
+    suffix = ""
+    if args.avg_maps > 1:
+        suffix = f"_avg{args.avg_maps}" + ("_vcomp" if args.vcomp else "")
+
     for label, prm in sets:
-        maps = []
-        fh = None
-        if args.out_dir:
-            fh = open(os.path.join(args.out_dir, f"{label}.csv"), "w")
-        for i, path in enumerate(files):
+        label += suffix
+        # every window on the first window's Doppler grid, so maps can be averaged
+        ms, nf_run = [], 0
+        for path in files:
             groups, _, _ = parse_rec(path)
-            m = build_averaged(groups, prm, not args.no_antenna_avg, not args.no_layer_avg)
+            m = build_averaged(groups, prm, not args.no_antenna_avg, not args.no_layer_avg, nf_run)
             if m is None:
                 continue
-            maps.append(m["power"])
-            if fh:
-                write_map_line(fh, i, m)
-        if fh:
-            fh.close()
-        if not maps:
+            nf_run = nf_run or m["n_freq"]
+            ms.append(m)
+        ms = average_maps(ms, args.avg_maps, args.vcomp)
+        if not ms:
             print(f"{label}: no maps built")
             continue
+        maps = [m["power"] for m in ms]
+        if args.out_dir:
+            with open(os.path.join(args.out_dir, f"{label}.csv"), "w") as fh:
+                for i, m in enumerate(ms):
+                    write_map_line(fh, i, m)
         peaks = np.array([10.0 * math.log10(max(p.max(), 1e-12)) for p in maps])
-        rep = repeatability(maps)
+        # sliding outputs share K-1 of their K maps, so compare only outputs K apart
+        rep = repeatability(maps[::max(1, args.avg_maps)])
         print(f"{label:28s}  maps {len(maps):3d}  peak SNR {peaks.mean():6.1f} +- "
               f"{peaks.std():4.1f} dB   repeatability {rep:.3f}")
     return 0
