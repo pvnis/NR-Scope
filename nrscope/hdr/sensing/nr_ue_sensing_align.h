@@ -18,7 +18,7 @@
  *    scene then exists in two versions. Subtracting the mean cannot remove the difference,
  *    and because it switches on and off in time it spreads over every speed.
  *
- *    Now: for each symbol before the taper and IDFT:
+ * Now: for each symbol before the taper and IDFT:
  *   a. Compare the pilots p_i with a reference R_i of the static scene, trying delays d a
  *      few bins around the last shift found:
  *          c(d) = sum_i p_i conj(R_i) exp(+j 2 pi i d / N)
@@ -119,7 +119,7 @@
 /// fewest pilots shared with the reference for an estimate to be trusted
 #define NR_SENSING_ALIGN_MIN_OVERLAP 64
 /// 1: also divide every aligned symbol by the magnitude of its gain against the reference (see above)
-#define NR_SENSING_ALIGN_AMPLITUDE 0
+#define NR_SENSING_ALIGN_AMPLITUDE 1
 /* Range |g| is clamped to before dividing by it, as a factor on the reference level (0.5 and
 2 are -6 and +6 dB). The fluctuation it corrects is a few tens of percent. A gain outside
 this range with a correlation still above NR_SENSING_ALIGN_MIN_CORR means the scene itself

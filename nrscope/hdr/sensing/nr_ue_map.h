@@ -520,7 +520,7 @@ snapshots a fraction 2*NR_COMB_MAX_HARMONIC/n of any target's energy goes with i
 
 /* Whether to divide each snapshot by its own direct path before anything else.
 
-What it fixes: the clutter stages below all assume a static scatterer gives the same
+What it fixes: the clutter stages all assume a static scatterer gives the same
 value in every snapshot. The kernel fit assumes it literally, holding one complex
 alpha per path across the whole window, and the slow trend assumes it up to a
 quadratic. Anything that multiplies a whole snapshot breaks that assumption without

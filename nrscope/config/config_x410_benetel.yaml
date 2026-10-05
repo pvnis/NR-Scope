@@ -50,10 +50,8 @@ usrp_setting_0:
   
   worker_cpus: [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
   
-  disable_cfo: true # skip CFO compensation in sync; keep false on the bladeRF, its clock drifts too much
-  # Seconds without a decoded DCI before a known RNTI stops being searched. At 5
-  # a few missed DCIs of a 1 Hz ping were enough to drop a UE that was still
-  # active; a released UE is simply searched in vain until this runs out.
+  # skip CFO compensation in sync; keep false on the bladeRF, its clock drifts too much
+  disable_cfo: true
   
   # Time in seconds before removing a RNTI from the list if its idle
   rnti_expiry_s: 30
