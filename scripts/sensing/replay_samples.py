@@ -75,6 +75,8 @@ DEFAULTS = dict(
     comb_harmonic=6,
     comb_tdd_multiple=2,
     comb_power_iters=24,
+    sliding_la_ms=0.0,    # sliding ECA (ACRF-CS) averaging window, ms; 0 = off (slow trend used)
+    sliding_ls_ms=0.5,    # its update block, ms; one slot pushes the block side peaks to 2 kHz
 )
 
 # field -> (lo, hi) hard range, for clamping a swept value (mirrors nr_sweep_apply)
@@ -83,6 +85,7 @@ RANGE = dict(
     kernel_half_span=(1, None), static_min=(0.0, None), snr_min=(0.0, None),
     min_sep_bins=(1, None), los_first_db=(0.0, None), comb_remove=(0, 1),
     comb_harmonic=(1, COMB_MAX_HARMONIC), comb_tdd_multiple=(1, None),
+    sliding_la_ms=(0.0, None), sliding_ls_ms=(0.1, None),
 )
 INT_FIELDS = {"clutter_mode", "max_paths", "trend_degree", "kernel_half_span",
               "min_sep_bins", "comb_remove", "comb_harmonic", "comb_tdd_multiple",
@@ -200,6 +203,41 @@ def remove_path(res, snaps, u, half_span):
             res[i, b_lo:b_hi + 1] -= alpha * Ks[i]
 
 
+def sliding_filter(t, la_s, ls_s):
+    """Sliding ECA in the channel domain (ACRF-CS, Liu et al. 2020; the ECA-S equivalent).
+
+    The slow time is cut into blocks of ls_s seconds. Every sample of a block loses the mean
+    of the samples within +-la_s/2 of the block centre, i.e. the static channel estimated
+    around it, per delay bin. In this domain ECA's "project off the delayed copies of the
+    reference" is exactly that subtraction, since the reference is already divided out.
+
+    Unlike the slow trend, which fits one polynomial over the whole window, this follows a
+    static path that varies during the window. The price is a Doppler notch about 1/la_s
+    wide (la_s 40 ms: ~25 Hz, ~1.1 m/s at 3.45 GHz). The block structure puts side peaks at
+    multiples of 1/ls_s; one slot (0.5 ms) moves them to 2 kHz, off the map. Blocks and
+    windows are in time, not in sample counts, because TDD sampling is not uniform.
+
+    Returns the filter as a function of a slow-time array [n] or [n, k] (axis 0 = time),
+    so the TDD detector can model a target's tone through the same filter."""
+    t = np.asarray(t, dtype=np.float64)
+    ls_s = max(ls_s, 1e-6)
+    la_s = max(la_s, ls_s)                          # the window must cover its own block
+    blk = np.floor((t - t[0]) / ls_s).astype(np.int64)
+    ub = np.unique(blk)
+    centres = t[0] + (ub + 0.5) * ls_s
+    lo = np.searchsorted(t, centres - 0.5 * la_s, side="left")
+    hi = np.searchsorted(t, centres + 0.5 * la_s, side="right")
+    pos = np.searchsorted(ub, blk)
+    s_lo, s_hi = lo[pos], hi[pos]
+
+    def f(v):
+        v = np.asarray(v)
+        cs = np.concatenate([np.zeros((1,) + v.shape[1:], dtype=v.dtype), np.cumsum(v, axis=0)])
+        cnt = np.maximum(s_hi - s_lo, 1).reshape((-1,) + (1,) * (v.ndim - 1))
+        return v - (cs[s_hi] - cs[s_lo]) / cnt
+    return f
+
+
 # ---------------------------------------------------------------- the map
 
 def build_map(snaps, prm, n_freq_fixed=0):
@@ -261,12 +299,20 @@ def build_map(snaps, prm, n_freq_fixed=0):
             remove_path(res, snaps, u, prm["kernel_half_span"])
             u_fit.append(u)
 
-    # gain + slow-trend removal, per bin (always runs; also applies the gain for mode 0/1)
-    trend_degree = -1 if mode == 0 else prm["trend_degree"]
-    Q = slow_basis(t, trend_degree)                 # (n_q, n)
+    # gain, then per-bin static removal: the slow trend (C default) or, when
+    # sliding_la_ms > 0, the sliding ECA in its place (not in the C pipeline yet)
+    slow_f = None
     z = gain[:, None] * res                         # (n, n_bins)
-    for q in Q:
-        z = z - np.outer(q, q @ z)                  # remove projection on q, per bin
+    if mode != 0 and prm.get("sliding_la_ms", 0) > 0:
+        slow_f = sliding_filter(t, prm["sliding_la_ms"] * 1e-3, prm["sliding_ls_ms"] * 1e-3)
+        z = slow_f(z)
+        trend_degree = -1                           # nothing projected; the detector models slow_f
+        Q = slow_basis(t, 0)                        # the comb is kept orthogonal to the mean only
+    else:
+        trend_degree = -1 if mode == 0 else prm["trend_degree"]
+        Q = slow_basis(t, trend_degree)             # (n_q, n)
+        for q in Q:
+            z = z - np.outer(q, q @ z)              # remove projection on q, per bin
     res = z
 
     # rank-1 comb removal
@@ -321,7 +367,7 @@ def build_map(snaps, prm, n_freq_fixed=0):
                 # the conditioned slow-time samples and what the TDD detector needs with
                 # them, as range_doppler hands them back in slow_out
                 res=res, t=t, win_len=n_max, win_start=int(s0["a_m"]), idft=idft0,
-                trend_degree=trend_degree, tdd_period=tdd_period)
+                trend_degree=trend_degree, tdd_period=tdd_period, slow_filter=slow_f)
 
 
 def build_averaged(groups, prm, antenna_avg, layer_avg, n_freq_fixed=0):
@@ -448,7 +494,8 @@ def run_detector(m, mirror, cfg=None):
     obs = tdd.Obs(h=m["res"], t=m["t"], idft_size=m["idft"], win_len=m["win_len"],
                   win_start=m["win_start"], win=hann(m["win_len"]), m_per_bin=m["m_per_bin"],
                   n_freq=m["n_freq"], f_max_hz=m["f_max"], lambda_m=C / m["carrier"],
-                  t_tdd_s=m["tdd_period"], trend_q=slow_basis(m["t"], m["trend_degree"]))
+                  t_tdd_s=m["tdd_period"], trend_q=slow_basis(m["t"], m["trend_degree"]),
+                  slow_filter=m.get("slow_filter"))
     targets, rejected = tdd.detect(obs, cfg)
     if mirror:
         targets, rejected = tdd.mirror_reject(targets, rejected, m["power"], m["f_max"])

@@ -46,7 +46,7 @@ class Obs:
     trend_q: [n_q, n_snap] orthonormal removed subspace or None."""
 
     def __init__(self, h, t, idft_size, win_len, win_start, win, m_per_bin,
-                 n_freq, f_max_hz, lambda_m, t_tdd_s, trend_q):
+                 n_freq, f_max_hz, lambda_m, t_tdd_s, trend_q, slow_filter=None):
         self.h = np.asarray(h, dtype=np.complex64).astype(np.complex128)
         self.t = np.asarray(t, dtype=np.float64)
         self.n_snap, self.n_bins = self.h.shape
@@ -55,6 +55,8 @@ class Obs:
         self.m_per_bin, self.n_freq, self.f_max_hz = m_per_bin, n_freq, f_max_hz
         self.lambda_m, self.t_tdd_s = lambda_m, t_tdd_s
         self.trend_q = trend_q if trend_q is not None and len(trend_q) else None
+        # any other linear slow-time filter the samples went through (e.g. the sliding ECA)
+        self.slow_filter = slow_filter
         self.df = 2.0 * f_max_hz / (n_freq - 1) if n_freq > 1 else 0.0
         self.freqs = -f_max_hz + self.df * np.arange(n_freq)
 
@@ -73,6 +75,8 @@ def filtered_tone(obs, f0_hz):
     if obs.trend_q is not None:
         for q in obs.trend_q:
             d = d - (q @ d) * q
+    if obs.slow_filter is not None:
+        d = obs.slow_filter(d)
     return d
 
 
