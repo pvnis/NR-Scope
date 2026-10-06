@@ -66,12 +66,18 @@ int srsran_ue_sync_nr_init(srsran_ue_sync_nr_t* q, const srsran_ue_sync_nr_args_
     return SRSRAN_ERROR;
   }
 
-  // Allocate temporal buffer pointers
-  q->tmp_buffer = SRSRAN_MEM_ALLOC(cf_t*, q->nof_rx_channels);
+  /* Allocate temporal buffer pointers. SRSRAN_MAX_CHANNELS of them, not
+  nof_rx_channels: this array is handed straight to recv_callback, and a callback that
+  builds an srsran::rf_buffer_t from it reads all SRSRAN_MAX_CHANNELS entries, because
+  that is the width of rf_buffer_t's own array. Sized to nof_rx_channels it was read 16
+  pointers past its end on a four-chain capture. Zeroed so the entries above
+  nof_rx_channels, which ue_sync_nr_recv() never sets, read as "chain not present". */
+  q->tmp_buffer = SRSRAN_MEM_ALLOC(cf_t*, SRSRAN_MAX_CHANNELS);
   if (q->tmp_buffer == NULL) {
     ERROR("Error alloc");
     return SRSRAN_ERROR;
   }
+  memset(q->tmp_buffer, 0, SRSRAN_MAX_CHANNELS * sizeof(cf_t*));
 
   return SRSRAN_SUCCESS;
 }

@@ -54,8 +54,9 @@ Make sure the Doppler axis is fine enough to resolve the targets.
 The maximum doppler f_max is 2v_max/lambda + 1 / TDD. The grid spans [-f_max,f_max]
 so 2f_max. We want 2 grid doppler points per cell, so n_freq = 2 * 2f_max * T_span points.
 So the bin spacing in m/s/bin is (lambda/2) * Delta_f = (lambda/2) 2f_max / (n_freq-1) =~ (lambda/2) 1 / 2T = lambda / 4T = delta_v/2.
-So with delta_v = 0.3m/s it gives 0.15 m/s per bin.
+So with delta_v = 0.3m/s it gives 0.15 m/s per bin. This is just because we are putting 2 grid points per resolution cell !! else it would have been just 0.3m/s/bin.
 So the bin spacing for doppler depends on the time window T. 
+To convert this in Hz per bin we can just use the relation f = 2v/lambda, so delta_f = 2 delta_v / lambda = 2 * 0.3 / 0.087 = 6.9 Hz/bin.
 
 NR_SENSING_MAP_MAX_BINS_FREQ only serves when 4f_max*T_span exceeds this value. If it exceeds it
 then the spacing is coarser than 2 points per cell.
@@ -815,53 +816,99 @@ int nr_ue_sensing_dump_snapshots_tagged(const char *path,
                                         bool truncate,
                                         bool header);
 
-/* SPATIAL NULL toward the gNB with two Rx chains.
+/* SPATIAL NULL toward the gNB, over M Rx chains.
 
-Every path reaches the two chains with a phase (and gain) difference set by the
-direction it comes from. A direction's paths therefore all satisfy h1 = c h0 for one
-complex c, and chain 0 minus w = 1/c times chain 1 cancels that direction while paths
-from other directions, which have their own c, survive with gain |1 - w c'|. Fitted on
-the direct path's mainlobe in the static (slow-time mean) profile:
+Every path reaches the chains with a phase (and gain) difference set by the direction it
+comes from. A direction's paths therefore all satisfy h_a = c_a h_0 for one complex c_a
+per chain, and
 
-    w = <m0, m1> / <m1, m1>  over the bins around the direct path
+    y = h_0 - sum_{a=1}^{M-1} w_a h_a
 
-so the direct path, and any static or moving path arriving from the gNB's direction,
-cancels. Flicker of paths from other directions does not; this is a single null, as two
-chains allow one.
+cancels that direction when sum_a w_a c_a = 1, while paths from other directions, which
+have their own c', survive with gain |1 - sum_a w_a c'_a|. M chains give M-1 weights, so
+M-1 directions can be cancelled at once.
 
-out receives chain 0's history with each snapshot that chain 1 also holds (same symbol:
-same t_sample and layer) replaced by h0 - w h1, and every other snapshot of the stream
-marked with ports 0 so no gather takes it. out owns a new ring and lock, to be freed by
-the caller. res reports the weight and how deep the null went: los_db is the direct
-path's static power after over before, static_db the same over the whole profile.
-Returns false, out untouched, when no snapshot pairs up. */
+The weights are fitted by least squares on the static (slow-time mean) profile m_a[b],
+not on the snapshots: a mover averages out of it over the window, so it cannot pull the
+null towards itself, and only the direct path and the static clutter are left to aim at.
+Minimising sum_{b in B} |m_0[b] - sum_a w_a m_a[b]|^2 gives the normal equations
+
+    G w = p,  G[c][a] = sum_b conj(m_c[b]) m_a[b],  p[c] = sum_b conj(m_c[b]) m_0[b]
+
+which at M = 2 is the scalar w = <m1, m0> / <m1, m1> this started as.
+
+WHICH BINS ARE FITTED ON (B). The direct path's mainlobe always, and at M = 2 that alone:
+spread over the whole profile, a single weight would null whatever mixture of directions
+holds the most static energy, which is not a direction at all. From M = 3 the weights are
+free to take the static clutter as well, so other bins may join B.
+
+They are not chosen by energy, though, but by whether what the bin holds stays put. A bin
+carrying a mover appears in the static profile too, because the slow-time mean does not
+remove a mover, it leaks it: 40 to 50 dB down for a walking pace over a tenth of a second,
+yet carrying the mover's own direction. That leak sits far above the loading below, so
+least squares with a weight to spare would aim one straight at it and cancel the mover
+outright, every snapshot of it, the null being one spatial filter applied to them all. A
+bin's static share separates the two cases: |mean|^2 over mean |h|^2 is near 1 where the
+scene is still and small where the energy is a mover (0.01 for the leak above). Only bins
+above NR_SENSING_NULL_STATIC_MIN join B, which is also why the direct path is pinned into
+it rather than left to qualify on its own.
+
+CONDITIONING. A scene with one static direction makes m_a[b] = c_a s[b] for every chain,
+so G has rank 1 whatever M is, and the M-1 weights are not determined by it. G is
+therefore loaded by NR_SENSING_NULL_LOADING of its mean diagonal before the solve. Where
+the scene really holds M-1 directions the loading is negligible; where it holds fewer,
+the loaded solve returns the smallest weights that still null what is there, rather than
+a large arbitrary vector in the undetermined directions. The null degrades to one
+direction instead of breaking.
+
+h is the chains' histories, chain 0 first, n_ant of them. out receives chain 0's history
+with each snapshot that EVERY other chain also holds (same symbol: same t_sample and
+layer) replaced by y above, and every other snapshot of the stream marked with ports 0 so
+no gather takes it. out owns a new ring and lock, to be freed by the caller. res reports
+the weights and how deep the null went: los_db is the direct path's static power after
+over before, static_db the same over the whole profile. Returns false, out untouched,
+when no snapshot is held by every chain or the loaded system is still singular. */
+
+/// Fraction of its mean diagonal the Gram matrix is loaded by before the solve
+#define NR_SENSING_NULL_LOADING 1e-6
+
+/* Static share a bin needs before a weight may be aimed at it, beyond the direct path's
+mainlobe, which is always fitted on. Half: a bin whose energy is more static than not.
+The two populations are nowhere near the boundary (a still bin sits at 0.9 and up, a
+mover's leak at a few hundredths), so this only has to fall between them. */
+#define NR_SENSING_NULL_STATIC_MIN 0.5
+
 typedef struct {
-  cf_t w;
-  /// the direct path's bin the weight was fitted around
+  /* The weights, w[a - 1] multiplying chain a. n_w = n_ant - 1 of them, so w[0] alone
+  is the scalar of the two-chain null. */
+  cf_t w[NR_SENSING_MAX_RX - 1];
+  int n_w;
+  /// the direct path's bin, which the weights are fitted around at n_w = 1
   int u0;
+  /// bins of the static profile the weights were fitted on
+  int n_fit_bins;
   /// static power around the direct path after the null over before, dB
   double los_db;
   /// static power of the whole profile after over before, dB
   double static_db;
-  /// snapshots of the stream on chain 0, and how many of them chain 1 also held
+  /// snapshots of the stream on chain 0, and how many of them every other chain also held
   int n0;
   int n_pairs;
-  /* Health of the pair, to tell a chain that does not see the scene from a scene that
-  has no single direction to null. p1_db: chain 1's mean power over chain 0's, every bin
-  and paired snapshot, near 0 dB for two like antennas and chains. static0, static1: the
-  share of each chain's power that is static (|slow-time mean|^2 over mean |h|^2),
-  close to 1 for a still scene that stands well above the noise, near 0 for a chain that
-  holds noise only. */
-  double p1_db;
-  double static0;
-  double static1;
+  /* Health per chain, to tell a chain that does not see the scene from a scene that has
+  no single direction to null. p_db[a]: chain a's mean power over chain 0's, every bin and
+  paired snapshot, near 0 dB for like antennas and chains and 0 by construction at a = 0.
+  static_share[a]: the share of that chain's power which is static (|slow-time mean|^2
+  over mean |h|^2), close to 1 for a still scene that stands well above the noise, near 0
+  for a chain that holds noise only. */
+  double p_db[NR_SENSING_MAX_RX];
+  double static_share[NR_SENSING_MAX_RX];
 } nr_sensing_null_t;
 
 /// aarx of a map built from the nulled chains, as -1 marks the average of them
 #define NR_SENSING_AARX_NULL (-2)
 
-bool nr_ue_sensing_spatial_null(const nr_sensing_history_t *h0,
-                                const nr_sensing_history_t *h1,
+bool nr_ue_sensing_spatial_null(const nr_sensing_history_t *h,
+                                int n_ant,
                                 const nr_sensing_stream_t *st,
                                 nr_sensing_history_t *out,
                                 nr_sensing_null_t *res);

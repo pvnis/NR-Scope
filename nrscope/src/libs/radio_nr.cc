@@ -6,9 +6,6 @@
 #include <sched.h>
 #include <semaphore>
 
-#define RING_BUF_SIZE 10
-#define RING_BUF_MODULUS (RING_BUF_SIZE - 1)
-
 static SRSRAN_AGC_CALLBACK(radio_set_rx_gain_wrapper)
 {
   //printf("[AGC gain adj] new rx gain: %f\n", gain_db);
@@ -887,6 +884,9 @@ int Radio::FetchAndResample()
   uint64_t nof_rx_errors   = 0;
 
   bool     in_sync = false;
+  /* Ring entry the current receive is filling, so the subframe it turns out to hold can
+    be recorded against it (see Radio::ring_outcome). */
+  uint32_t produce_idx = 0;
   uint32_t pre_resampling_sf_sz =
       SRSRAN_NOF_SLOTS_PER_SF_NR(task_scheduler_nrscope.task_scheduler_state.args_t.ssb_scs) * pre_resampling_slot_sz;
 
@@ -922,7 +922,8 @@ int Radio::FetchAndResample()
     {
       /* Same ring offset on every chain, so a slot lands at the same index in
         all of them and they stay sample-aligned for the sensing path. */
-      const uint32_t off = in_sync ? pre_resampling_sf_sz * (next_produce_at % RING_BUF_MODULUS + 1) : 0;
+      produce_idx        = in_sync ? (next_produce_at % RING_BUF_MODULUS + 1) : 0;
+      const uint32_t off = produce_idx * pre_resampling_sf_sz;
       cf_t*          ptrs[SRSRAN_MAX_CHANNELS] = {};
       for (uint32_t a = 0; a < nof_antennas; a++) {
         ptrs[a] = rx_buffer[a] + off;
@@ -969,6 +970,10 @@ int Radio::FetchAndResample()
       in_sync = true;
       // std::cout << "System frame idx: " << outcome.sfn << std::endl;
       // std::cout << "Subframe idx: " << outcome.sf_idx << std::endl;
+      /* Stamp the entry with the subframe it holds, before handing it over: the consumer
+        labels its slots from this and not from the shared outcome, which by then may
+        already describe a later subframe. */
+      ring_outcome[produce_idx] = outcome;
       // a new sf data ready; let decoder consume
       next_produce_at++;
       sem_post(&smph_sf_data_prod_cons);
@@ -1019,16 +1024,22 @@ int Radio::DecodeAndProcess()
     sem_wait(&smph_sf_data_prod_cons);
     // std::cout << "current_consume_at: " << (first_time ? 0 :
     //   ((next_consume_at % RING_BUF_MODULUS + 1))) << std::endl;
-    outcome.timestamp = last_rx_time.get(0);
     struct timeval t0, t1;
     gettimeofday(&t0, NULL);
+    /* The entry being drained, and the subframe IT holds. Not the shared outcome: the
+      producer is ahead by as many subframes as it has been given credits for, so that
+      member describes whatever it last received. Labelling these slots from it put the
+      SSB in slot 4 instead of slot 0 on a four-chain capture, and a slot number wrong by
+      any amount scrambles the PDCCH DM-RS to a sequence that correlates with nothing. */
+    const uint32_t                    consume_idx = first_time ? 0 : (next_consume_at % RING_BUF_MODULUS + 1);
+    const srsran_ue_sync_nr_outcome_t sf_outcome  = ring_outcome[consume_idx];
     // consume a sf data
     for (int slot_idx = 0; slot_idx < SRSRAN_NOF_SLOTS_PER_SF_NR(arg_scs.scs); slot_idx++) {
       // std::cout << "slot_idx: " << slot_idx << std::endl;
       srsran_slot_cfg_t slot = {0};
-      slot.idx               = (outcome.sf_idx) * SRSRAN_NSLOTS_PER_FRAME_NR(arg_scs.scs) / 10 + slot_idx;
+      slot.idx               = (sf_outcome.sf_idx) * SRSRAN_NSLOTS_PER_FRAME_NR(arg_scs.scs) / 10 + slot_idx;
 
-      if (slot.idx == 0 && outcome.sfn == 0) {
+      if (slot.idx == 0 && sf_outcome.sfn == 0) {
         /* this is a new round of system frame indexes */
         sf_round++;
       }
@@ -1040,8 +1051,7 @@ int Radio::DecodeAndProcess()
         go around the whole ring and modify this sf again */
       // std::cout << "pre_resampling_sf_sz: " << pre_resampling_sf_sz
       //   << std::endl;
-      const uint32_t consume_off =
-          (first_time ? 0 : ((next_consume_at % RING_BUF_MODULUS + 1) * pre_resampling_sf_sz)) + (slot_idx * slot_sz);
+      const uint32_t consume_off = consume_idx * pre_resampling_sf_sz + (slot_idx * slot_sz);
       for (uint32_t a = 0; a < nof_antennas; a++) {
         srsran_vec_cf_copy(rx_buffer[a], rx_buffer[a] + consume_off, slot_sz);
       }
@@ -1072,11 +1082,11 @@ int Radio::DecodeAndProcess()
         /* If the next result is not set */
         task_scheduler_nrscope.next_result.sf_round = sf_round;
         task_scheduler_nrscope.next_result.slot.idx = slot.idx;
-        if (outcome.sfn == 1023) {
+        if (sf_outcome.sfn == 1023) {
           task_scheduler_nrscope.next_result.outcome.sfn = 0;
           task_scheduler_nrscope.next_result.sf_round++;
         } else {
-          task_scheduler_nrscope.next_result.outcome.sfn = outcome.sfn + 1;
+          task_scheduler_nrscope.next_result.outcome.sfn = sf_outcome.sfn + 1;
         }
         // reinitialize the sem
         if (slot_idx == 0) {
@@ -1096,7 +1106,7 @@ int Radio::DecodeAndProcess()
       }
 
       // Add the data into a circular buffer
-      if (task_scheduler_nrscope.StoreSlotData(sf_round, slot, outcome, rx_buffer) < SRSRAN_SUCCESS) {
+      if (task_scheduler_nrscope.StoreSlotData(sf_round, slot, sf_outcome, rx_buffer) < SRSRAN_SUCCESS) {
         ERROR("Store slot data failed");
         //   /* Push empty slot result to the queue */
         //   SlotResult empty_result = {};

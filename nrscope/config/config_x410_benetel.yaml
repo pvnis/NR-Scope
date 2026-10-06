@@ -24,14 +24,23 @@ usrp_setting_0:
   srsran_srate_hz: 122880000 # the sampling for real signal processing, should be in 5G sampling rate, multiple of 1.92 MHz. 
   nof_carriers: 1 # srsRAN rf setting, always set to be 1 for now.
   
-  # Receive chains captured in parallel, 1 to 4. Only chain 0 is synchronised and
-  # decoded -- SIB, RACH and DCI all read it alone -- so raising this does not
-  # improve sniffing. The extra chains are captured for the sensing path, which
-  # needs a spatial baseline to estimate angle of arrival. The device must expose
-  # that many channels (bladeRF: 2, X410: 4) and they must share a clock, or the
-  # chains will not be phase coherent and the angle estimate is meaningless.
-  # Costs one slot of IQ per chain in every queued slot, see NRSCOPE_SLOT_QUEUE_DEPTH.
-  nof_antennas: 2
+  # Receive chains captured in parallel, 1 to 4, all four supported end to end (the
+  # sensing selftest covers the map, the null and the alignment at four). Only chain 0 is
+  # synchronised and decoded -- SIB, RACH and DCI all read it alone -- so raising this
+  # does not improve sniffing. The extra chains are captured for the sensing path, which
+  # needs a spatial baseline to estimate angle of arrival.
+  #
+  # Before raising this to 4 on the X410, check with uhd_usrp_probe that the loaded FPGA
+  # image exposes four Rx channels: CG_400 has only two. The cost is one slot of IQ per
+  # chain in every queued slot (see NRSCOPE_SLOT_QUEUE_DEPTH: 240 MiB at four chains,
+  # 122.88 Msps), one grid FFT per chain in each worker, and ~15.7 Gbps on the fronthaul.
+  #
+  # The chains must share a clock or they are not phase coherent and the angle estimate
+  # is meaningless. On the X410 chains 2 and 3 sit on the second ZBX daughterboard, whose
+  # LO settles at an arbitrary phase against the first board's on every retune: measure
+  # the per-chain offsets with scripts/sensing/rx_pair_check.py (it prints the
+  # NR_AOA_CAL_DEG line to paste into nr_ue_aoa.h) before trusting any angle.
+  nof_antennas: 4
 
   scs_index: 1 #(0: 15kHz, 1: 30kHz, ..., the u in standard)
   rf_log_level: "info"
@@ -64,14 +73,22 @@ usrp_setting_0:
 log_config: 
 
   # Record MSG4, DCIs in csv files
-  recording_mode: true
+  recording_mode: false
+
+  # Keep the terminal to the same curated lines recording_mode shows -- [status] once a
+  # second, SYNC lost/regained, "Found DCI" and "rrc_setup, hooray" -- without writing the
+  # CSVs. Set it with recording_mode off and the output is identical to a recording run,
+  # which is what you want for a capture whose cost matters (no grant dumps, no JSON, no
+  # msg4_bytes.log). The [status] and SYNC lines print either way; this only silences the
+  # per-grant dumps.
+  quiet: true
 
   # Debug: every PDCCH candidate tried for a known RNTI, with its DM-RS EPRE and
   # correlation and the gate it stopped at, to PDCCH/. Tens of thousands of rows
   # a second: for short diagnostic runs only.
   record_pdcch_candidates: false
 
-  # gargage
+  # garbage
   local_log: true
   push_to_google: false
   google_service_account_credential: "/home/wanhr/Downloads/nsf-2223556-222187-02b924918c95.json"
@@ -92,16 +109,29 @@ sensing:
   layer_avg: true
   random_drop: false
   tdd_detect: true
+
+  # Doppler MUSIC alongside the DFT map, to <dump>.music.csv. Its observations are the
+  # (chain x layer) pairs the map gathered, so the chain count is what makes it worth
+  # running: a rank-1 grant gives a 6-column Gram matrix on two chains and 12 on four,
+  # and only four chains make the NR_MUSIC_MAX_ORDER = 4 model order reachable. Needs
+  # antenna_avg for the chains to reach it at all.
   music: false
   compensate_window_shifts: false  # NR-Scope only; off is OAI's behaviour
-  spatial_null: false  # map from chain 0 minus weighted chain 1, nulling the direct path; needs antenna_avg, 2 chains
+
+  # Map from chain 0 minus the weighted other chains, nulling the direct path's
+  # direction; needs antenna_avg and 2+ chains. M chains give M-1 weights: at 2 the one
+  # weight is fitted on the direct path's mainlobe alone, from 3 up the spare weights
+  # also null the strongest static clutter (bins whose energy is mostly static, so a
+  # mover's bin is never aimed at). Every map logs the weights, the bins fitted on, and
+  # how deep the null went.
+  spatial_null: false
   mirror_reject: true  # set aside a detection with an equally strong mirror at -v (not drawn); false keeps them all
   # Map averaging: each map becomes the power mean of the last avg_maps maps of its stream
   # (1 = off, max 16). Steadies the noise background; 2-4 suits a passing target. Affects the
   # dumped map and, with tdd_detect off, the AoA's own CFAR; NOT the TDD detector, which works
   # on the window's own samples. avg_vcomp shifts older maps' Doppler columns by their range
   # rate so a mover stays in its cell (no measurable gain yet on the lab runs).
-  avg_maps: 1
+  avg_maps: 4
   avg_vcomp: false
 
   # Parameter sweep (mode b): per map, rebuild the clutter removal from the base settings
@@ -112,11 +142,11 @@ sensing:
   #   trend_degree (0..3)  max_paths (1..4)  kernel_half_span (bins)  min_sep_bins
   #   static_min  snr_min (linear)  los_first_db  los_max_corr_db  comb_harmonic (1..6)
   #   comb_tdd_multiple  los_norm (0/1)  comb_remove (0/1)  clutter_mode (0=none,1=mean,2=kernel)
-  sweep:
-    param: clutter_mode
-    lo: 0
-    hi: 2
-    step: 1
+  # sweep:
+  #   param: clutter_mode
+  #   lo: 0
+  #   hi: 2
+  #   step: 1
 
 
   # Record-only mode: for each window, write every (chain, layer) of its raw OFDM-symbol
@@ -125,5 +155,5 @@ sensing:
   # compute is saved). Rebuild the maps and sweep any parameter offline, no recapture:
   #   scripts/sensing/replay_samples.py --rec '/tmp/map2d.csv.rec.*.csv' \
   #       --sweep trend_degree --lo 0 --hi 3 --step 1 --out-dir /tmp/sweep_out
-  test_record_samples: false
-  record_max_files: 100
+  test_record_samples: true
+  record_max_files: 200

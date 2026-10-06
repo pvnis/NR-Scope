@@ -1,6 +1,41 @@
 #include "nrscope/hdr/sibs_decoder.h"
 #include "nrscope/hdr/run_recorder.h"
 
+#include <atomic>
+#include <mutex>
+#include <time.h>
+#include <stdlib.h>
+
+/* WHY THIS SUMMARY EXISTS
+
+A SIB1 blind search that finds nothing used to return silently (the "No DCI found" line
+is behind NRSCOPE_TRACE_PER_SLOT, which at 2000 slots/s cannot be left on). The whole
+sniffer then sits there decoding nothing, because without SIB1 there is no RACH
+configuration, so no TC-RNTI, no Msg4 and no UE DCIs -- and the only outward sign is
+"0 RNTI(s)" in the status line, which looks exactly like a cell with no traffic.
+
+One line a second, from whichever worker gets there first, with the counts and the best
+PDCCH measurement of the window. It separates the cases that need completely different
+answers: no candidate measured at all (nothing in CORESET#0, so the grid or the
+frequency mapping is wrong), candidates with EPRE but a poor correlation (the samples
+reaching the decoder are not the cell's), or a good correlation failing CRC (the
+candidate is there and the payload is being corrupted). */
+static struct {
+  std::mutex mutex;
+  uint64_t   slots;
+  uint64_t   candidates;
+  uint64_t   crc_fail;
+  double     best_epre;
+  double     best_corr;
+  /* Aggregation level and CCE of the best-correlating candidate. The cell's real SIB1
+  PDCCH sits at one fixed (L, ncce) -- L=2, ncce=0 on the Benetel cell -- so a best
+  candidate anywhere else says the search is locking onto something that is not SIB1,
+  which is a different fault from finding the right candidate and failing its CRC. */
+  uint32_t   best_L;
+  uint32_t   best_ncce;
+  uint64_t   last_report;
+} sib_search_stats = {{}, 0, 0, 0, -INFINITY, -INFINITY, 0, 0, 0};
+
 SIBsDecoder::SIBsDecoder(){
   /* NR-Scope fills only some fields of the higher-layer PDSCH config and
     leaves the rest (the NZP/ZP CSI-RS sets among them) as "not configured".
@@ -85,7 +120,14 @@ int SIBsDecoder::SIBDecoderandReceptionInit(WorkState* state,
   }
 
   // task_scheduler_nrscope->sib1_inited = true;
-  std::cout << "SIB Decoder Initialized.." << std::endl;
+  /* Everything that decides WHERE in the grid this decoder looks for CORESET#0. The
+  PDCCH search reports strong EPRE with noise-level correlation both when the samples
+  are wrong and when the mapping is wrong, and these are the mapping: if they are
+  identical across two runs that behave differently, the mapping is exonerated. */
+  std::cout << "SIB Decoder Initialized.. srate=" << arg_scs.srate << " scs=" << (int)arg_scs.scs
+            << " coreset_offset_scs=" << arg_scs.coreset_offset_scs << " coreset_slot=" << arg_scs.coreset_slot
+            << " coreset0_bw=" << dci_cfg.coreset0_bw << " carrier_prb=" << base_carrier.nof_prb
+            << " abs_pdcch_scs=" << cell.abs_pdcch_scs << " pci=" << base_carrier.pci << std::endl;
 
   return SRSRAN_SUCCESS;
 }
@@ -125,6 +167,57 @@ int SIBsDecoder::DecodeandParseSIB1fromSlot(srsran_slot_cfg_t* slot,
   // file_position += ue_dl_sibs.fft[0].sf_sz;
   
   // Check the fft plan and how does it manipulate the buffer
+  /* Diagnostic: the exact time-domain slot this decoder is about to demodulate, as the
+  worker handed it over. Gated on NRSCOPE_DUMP_SIB_SLOTS=<count>, off when unset, so it
+  costs nothing in a normal run.
+
+  It exists because a SIB1 that never decodes cannot be told apart, from the outside,
+  from a cell that is not transmitting one: the PDCCH search reports energy with no
+  correlation either way. Dumping what reaches the FFT settles whether the samples are
+  the cell's and properly aligned (fault downstream, in the mapping or the descrambling)
+  or not (fault upstream, in the chain-0 path through the slot queue).
+
+  File: /tmp/sib_slots.bin, one record per slot: sfn, slot_idx, n_samples as uint32,
+  then n_samples interleaved float re/im. Read it with
+  scripts/benchmark/sib_slot_check.py. */
+  {
+    /* Read once, thread-safely (C++11 guarantees function-local static init), so the
+      count cannot be reset by a race between workers. */
+    static const int dump_total = [] {
+      const char* e = getenv("NRSCOPE_DUMP_SIB_SLOTS");
+      return e != NULL ? atoi(e) : 0;
+    }();
+    static const char* dump_path = [] {
+      const char* p = getenv("NRSCOPE_DUMP_SIB_PATH");
+      return p != NULL ? p : "/tmp/sib_slots.bin";
+    }();
+    static std::atomic<int> dumped{0};
+    static std::mutex       dump_mutex;
+    if (dump_total > 0) {
+      const int mine = dumped.fetch_add(1, std::memory_order_relaxed);
+      if (mine < dump_total) {
+        std::lock_guard<std::mutex> lock(dump_mutex);
+        FILE*                       f = fopen(dump_path, mine == 0 ? "wb" : "ab");
+        if (f == NULL) {
+          if (mine == 0)
+            printf("SIBDecoder: cannot open %s for the slot dump\n", dump_path);
+        } else {
+          /* The FFT's own input pointer and length, so this is exactly the buffer it
+            reads and exactly how much of it, not a guess at either. */
+          const cf_t*    in     = ue_dl_sibs.fft[0].cfg.in_buffer;
+          const uint32_t n      = ue_dl_sibs.fft[0].sf_sz;
+          const uint32_t hdr[3] = {state->sfn, slot->idx, n};
+          fwrite(hdr, sizeof(uint32_t), 3, f);
+          fwrite(in, sizeof(cf_t), n, f);
+          fclose(f);
+          if (mine == 0)
+            printf("SIBDecoder: dumping %d slot(s) of %u samples to %s\n", dump_total, n, dump_path);
+          if (mine == dump_total - 1)
+            printf("SIBDecoder: slot dump complete (%d slots) in %s\n", dump_total, dump_path);
+        }
+      }
+    }
+  }
   srsran_ue_dl_nr_estimate_fft_nrscope(&ue_dl_sibs, slot, arg_scs);
   // Blind search
   int nof_found_dci = srsran_ue_dl_nr_find_dl_dci(&ue_dl_sibs, slot, 0xFFFF, 
@@ -152,6 +245,51 @@ int SIBsDecoder::DecodeandParseSIB1fromSlot(srsran_slot_cfg_t* slot,
   }
   if (nof_found_dci < 1) {
     NRSCOPE_SLOT_TRACE("SIBDecoder -- No DCI found :'(\n");
+    /* Summarise the failure once a second rather than per slot; see sib_search_stats. */
+    bool     report = false;
+    uint64_t slots = 0, candidates = 0, crc_fail = 0;
+    double   best_epre = 0, best_corr = 0;
+    uint32_t best_L = 0, best_ncce = 0;
+    {
+      std::lock_guard<std::mutex> lock(sib_search_stats.mutex);
+      sib_search_stats.slots++;
+      for (uint32_t i = 0; i < ue_dl_sibs.pdcch_info_count; i++) {
+        const srsran_dmrs_pdcch_measure_t& m = ue_dl_sibs.pdcch_info[i].measure;
+        sib_search_stats.candidates++;
+        sib_search_stats.crc_fail += ue_dl_sibs.pdcch_info[i].result.crc ? 0 : 1;
+        if (isnormal(m.norm_corr)) {
+          sib_search_stats.best_epre = SRSRAN_MAX(sib_search_stats.best_epre, m.epre_dBfs);
+          if (m.norm_corr > sib_search_stats.best_corr) {
+            sib_search_stats.best_corr = m.norm_corr;
+            sib_search_stats.best_L    = ue_dl_sibs.pdcch_info[i].dci_ctx.location.L;
+            sib_search_stats.best_ncce = ue_dl_sibs.pdcch_info[i].dci_ctx.location.ncce;
+          }
+        }
+      }
+      const uint64_t now = (uint64_t)time(NULL);
+      if (now != sib_search_stats.last_report) {
+        sib_search_stats.last_report = now;
+        report = true, slots = sib_search_stats.slots, candidates = sib_search_stats.candidates;
+        crc_fail = sib_search_stats.crc_fail;
+        best_epre = sib_search_stats.best_epre, best_corr = sib_search_stats.best_corr;
+        best_L = sib_search_stats.best_L, best_ncce = sib_search_stats.best_ncce;
+        sib_search_stats.slots = sib_search_stats.candidates = sib_search_stats.crc_fail = 0;
+        sib_search_stats.best_epre = sib_search_stats.best_corr = -INFINITY;
+        sib_search_stats.best_L = sib_search_stats.best_ncce = 0;
+      }
+    }
+    if (report) {
+      printf("SIBDecoder: no SIB1 in %lu slot(s), %lu PDCCH candidate(s) measured (%lu CRC fail), "
+             "best EPRE %+.1f dBfs, best corr %.3f at L=%u ncce=%u (threshold %.3f)\n",
+             (unsigned long)slots,
+             (unsigned long)candidates,
+             (unsigned long)crc_fail,
+             best_epre,
+             best_corr,
+             best_L,
+             best_ncce,
+             ue_dl_sibs.pdcch_dmrs_corr_thr);
+    }
     return SRSRAN_ERROR;
   }
 

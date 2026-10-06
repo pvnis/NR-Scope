@@ -85,8 +85,16 @@
 /// An eigenvalue is a signal when it is this far above the noise reference, in dB
 #define NR_MUSIC_EIG_THRESH_DB 3.0
 
-/// Observations (Rx antennas x layers) MUSIC accepts for one map
-#define NR_MUSIC_MAX_OBS 16
+/* Observations (Rx antennas x layers) MUSIC accepts for one map: every captured chain
+against a rank-4 allocation.
+
+The chain count is what makes the stage worth running. The Gram matrix is built from
+L = n_obs * (2 * NR_MUSIC_RANGE_HALF + 1) columns, so a rank-1 grant gives L = 6 on two
+chains and L = 12 on four; the model order is capped at min(L, NR_MUSIC_MAX_ORDER), which
+only four chains actually make reachable, and the eigenvalue test that decides K
+integrates over those columns alone. Note that the antennas only reach here when
+antenna_avg is on: it is what makes the map task gather every chain. */
+#define NR_MUSIC_MAX_OBS (NR_SENSING_MAX_RX * 4)
 
 /// Ceiling on the pseudo-spectrum, 60 dB above its floor
 #define NR_MUSIC_PSEUDO_MAX 1e6

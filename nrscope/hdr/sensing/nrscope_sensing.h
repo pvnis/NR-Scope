@@ -73,10 +73,12 @@ typedef struct {
   /* NR-Scope only, off: undo the receive window's moves (from the timing tracking)
   before the alignment, instead of leaving the alignment to find them as in OAI. */
   bool compensate_window_shifts;
-  /* NR-Scope only, off: build the map from chain 0 minus a weighted chain 1, the weight
-  chosen so the direct path cancels (a spatial null toward the gNB), instead of averaging
-  the chains' maps. The AoA and the direct-path bin still come from the raw chains. Needs
-  antenna_avg and two chains. See nr_ue_sensing_spatial_null(). */
+  /* NR-Scope only, off: build the map from chain 0 minus the weighted sum of the other
+  chains, the weights chosen so the direct path cancels (a spatial null toward the gNB),
+  instead of averaging the chains' maps. M chains give M-1 weights, so from three chains
+  up the spare ones also take the strongest static clutter. The AoA and the direct-path
+  bin still come from the raw chains. Needs antenna_avg and at least two chains. See
+  nr_ue_sensing_spatial_null(). */
   bool spatial_null;
   /* NR-Scope only, on: set aside as uncertain (verdict 3, not drawn, not localised) a
   detection whose mirror at -v on the same range is within NR_TDD_MIRROR_DB of it. Off

@@ -121,10 +121,21 @@ typedef struct {
   int k_step;
 } pilot_lattice_t;
 
+/* Receive chains the sensing pipeline handles, which every per-chain array here is
+sized by. Four, because that is what the X410 exposes and what the sniffer captures
+(NRSCOPE_MAX_RX_ANTENNAS in nrscope_def.h, clamped against this one in
+nrscope_sensing_get()). The sensing side is the binding limit of the two: a chain the
+capture delivers but this does not cover is simply never gathered.
+
+Defined here, in the lowest header of the sensing library, because both the map
+(nr_ue_map.h, the spatial null's weights) and the spatial stage (nr_ue_aoa.h, where it
+is NR_AOA_MAX_ANT) size arrays by it, and the map header is included by the other. */
+#define NR_SENSING_MAX_RX 4
+
 /* Distinct measurement streams one history is expected to hold at a time. Four is
 the realistic set today, rank 1 DM-RS plus the two layers of rank 2 and a spare;
 eight leaves room for a rank change to be seen before the older stream ages out.
-This is the number of distinct (ports, layer, k_step, k_offset) counters 
+This is the number of distinct (ports, layer, k_step, k_offset) counters
 */
 #define NR_SENSING_MAX_STREAMS 8
 

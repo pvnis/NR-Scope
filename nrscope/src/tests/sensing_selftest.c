@@ -587,6 +587,9 @@ static void test_glue(void)
   const float    t_amp   = 0.3f;  // target amplitude against the direct path
   const char*    dir     = "sensing_selftest_out";
 
+  /* Every chain the sensing library handles, which is what the X410 captures. */
+  enum { N_ANT = NR_SENSING_MAX_RX };
+
   /* the Benetel config's options. symbols is only the cost cap, left at the history
     depth so the window alone decides what a map holds: at 0.30 m/s that is 0.145 s,
     which at 4400 reference symbols/s is about 640 of them. Short windows do not work
@@ -598,7 +601,7 @@ static void test_glue(void)
   nrscope_sensing_args.max_speed_ms   = 10.0; // 0.30 m/s needs 0.145 s, feasible up to ~10 m/s
   nrscope_sensing_args.clutter_kernel = true;
   nrscope_sensing_args.tdd_detect     = true;
-  nrscope_sensing_args.antenna_avg    = true; // two chains, one map per layer averaged over them
+  nrscope_sensing_args.antenna_avg    = true; // one map per layer, averaged over the chains
   snprintf(nrscope_sensing_args.dump, sizeof(nrscope_sensing_args.dump), "%s/map2d.csv", dir);
   nr_sensing_tdd_period_slots = 10; // 7 D, 1 S, 2 U: the Benetel cell, as SIB1 sets it
   char rm[128];
@@ -606,7 +609,7 @@ static void test_glue(void)
   if (system(rm) != 0) {
     printf("  could not clear %s\n", dir);
   }
-  nrscope_sensing_t*         s  = nrscope_sensing_get(3450000000ULL, 122.88e6, 4096, 30000, 2);
+  nrscope_sensing_t*         s  = nrscope_sensing_get(3450000000ULL, 122.88e6, 4096, 30000, N_ANT);
   nrscope_sensing_scratch_t* sc = nrscope_sensing_scratch_alloc(n_sc);
   if (s == NULL || sc == NULL) {
     printf("  could not create the context\n");
@@ -621,26 +624,38 @@ static void test_glue(void)
   srsran_dmrs_sch_init(&dmrs, false);
   srsran_dmrs_sch_set_carrier(&dmrs, &carrier);
 
-  static cf_t tx[273 * SRSRAN_NRE * SRSRAN_NSYMB_PER_SLOT_NR], rx[273 * SRSRAN_NRE * SRSRAN_NSYMB_PER_SLOT_NR];
-  /* Chain 1 sees the same scene through a fixed 50 degree offset, as a cable or LO
-    path would give it: same delays and Dopplers, so its map matches chain 0's. */
-  const cf_t        cable   = cexpf(I * (float)(50.0 * M_PI / 180.0));
-  int               pushed1 = 0;
-  /* Chain 1 of a slot is handed over LAG downlink slots after its chain 0, as a dozen
-    parallel workers deliver them: when a slot's last chain triggers a map, chain 0's
-    ring already holds several newer slots than chain 1's. One slot late is not
-    enough to show it, as both windows then often hold the same count. */
-  enum { LAG = 7 };
-  static cf_t rx1q[LAG][273 * SRSRAN_NRE * SRSRAN_NSYMB_PER_SLOT_NR];
-  struct {
+  static cf_t tx[273 * SRSRAN_NRE * SRSRAN_NSYMB_PER_SLOT_NR];
+  static cf_t rx[273 * SRSRAN_NRE * SRSRAN_NSYMB_PER_SLOT_NR];
+  /* Each chain sees the same scene through a fixed phase offset, as a cable or an LO
+    path would give it: same delays and Dopplers, so every chain's map matches chain 0's
+    and the average of them is still the one map the checks below expect. */
+  const cf_t cable[N_ANT] = {
+      1.0f,
+      cexpf(I * (float)(50.0 * M_PI / 180.0)),
+      cexpf(I * (float)(-110.0 * M_PI / 180.0)),
+      cexpf(I * (float)(155.0 * M_PI / 180.0)),
+  };
+  /* A slot's chains do not arrive together: a dozen parallel workers decode slots at
+    once, so when a slot's last chain triggers a map, chain 0's ring already holds
+    several newer slots and the chains sit at different depths. Each chain is therefore
+    handed its slots LAG[a] downlink slots late, chain 3 last of all, which is both what
+    the sniffer guarantees (chain order within a slot) and what stresses the window
+    agreement across four rings. One slot of lag is not enough to show it: the windows
+    then often hold the same count anyway. */
+  const int LAG[N_ANT] = {0, 3, 5, 7};
+  enum { QD = 16 }; // deeper than the largest lag, so a pending slot is never overwritten
+  static cf_t q_rx[QD][273 * SRSRAN_NRE * SRSRAN_NSYMB_PER_SLOT_NR];
+  static cf_t rx_a[273 * SRSRAN_NRE * SRSRAN_NSYMB_PER_SLOT_NR];
+  static struct {
     srsran_sch_cfg_nr_t cfg;
     uint32_t            sfn, slot_idx;
     int64_t             shift;
-  } pend[LAG];
-  int pend_n = 0, pend_head = 0;
+  } q_meta[QD];
+  int n_dl = 0;            // downlink slots enqueued so far
+  int next[N_ANT] = {0};   // the next slot each chain still owes
+  int pushed[N_ANT] = {0};
   const nr_dmrs_placement_t place = {0, 0, 0};
   const cf_t a[2] = {1.0f, 0.6f - 0.4f * I};
-  int pushed = 0;
   for (int sl = 0; sl < 1800; sl++) {
     const int phase = sl % 10; // D D D D D D D S U U
     if (phase >= 8) {
@@ -681,32 +696,49 @@ static void test_glue(void)
         rx[l * n_sc + k] = h * x * (a[0] + a[1] * w1);
       }
     }
-    const int n = nrscope_sensing_process_grant(s, sc, 0, rx, n_sc, &place, &cfg, 2, 1, sfn, slot_idx, shift);
-    pushed += n > 0 ? n : 0;
-    if (pend_n == LAG) { // the oldest pending slot's chain 1
-      const int n1 = nrscope_sensing_process_grant(s, sc, 1, rx1q[pend_head], n_sc, &place, &pend[pend_head].cfg, 2, 1,
-                                                   pend[pend_head].sfn, pend[pend_head].slot_idx, pend[pend_head].shift);
-      pushed1 += n1 > 0 ? n1 : 0;
-      pend_head = (pend_head + 1) % LAG;
-      pend_n--;
+    // enqueue this slot, then hand every chain the slots its lag has made due
+    const int qi = n_dl % QD;
+    memcpy(q_rx[qi], rx, sizeof(rx));
+    q_meta[qi].cfg = cfg, q_meta[qi].sfn = sfn, q_meta[qi].slot_idx = slot_idx, q_meta[qi].shift = shift;
+    n_dl++;
+    for (int c = 0; c < N_ANT; c++) {
+      while (next[c] <= n_dl - 1 - LAG[c]) {
+        const int j = next[c] % QD;
+        for (uint32_t i = 0; i < n_sc * SRSRAN_NSYMB_PER_SLOT_NR; i++) {
+          rx_a[i] = cable[c] * q_rx[j][i];
+        }
+        const int n = nrscope_sensing_process_grant(s, sc, c, rx_a, n_sc, &place, &q_meta[j].cfg, 2, 1,
+                                                    q_meta[j].sfn, q_meta[j].slot_idx, q_meta[j].shift);
+        pushed[c] += n > 0 ? n : 0;
+        next[c]++;
+      }
     }
-    const int q = (pend_head + pend_n) % LAG;
-    for (uint32_t i = 0; i < n_sc * SRSRAN_NSYMB_PER_SLOT_NR; i++) {
-      rx1q[q][i] = cable * rx[i];
-    }
-    pend[q].cfg = cfg, pend[q].sfn = sfn, pend[q].slot_idx = slot_idx, pend[q].shift = shift;
-    pend_n++;
   }
-  for (; pend_n > 0; pend_n--, pend_head = (pend_head + 1) % LAG) {
-    const int n1 = nrscope_sensing_process_grant(s, sc, 1, rx1q[pend_head], n_sc, &place, &pend[pend_head].cfg, 2, 1,
-                                                 pend[pend_head].sfn, pend[pend_head].slot_idx, pend[pend_head].shift);
-    pushed1 += n1 > 0 ? n1 : 0;
+  /* Flush chain by chain, which keeps every slot's chains in chain order: each one's
+    remaining slots are all later than any slot already delivered on it. */
+  for (int c = 1; c < N_ANT; c++) {
+    while (next[c] < n_dl) {
+      const int j = next[c] % QD;
+      for (uint32_t i = 0; i < n_sc * SRSRAN_NSYMB_PER_SLOT_NR; i++) {
+        rx_a[i] = cable[c] * q_rx[j][i];
+      }
+      const int n = nrscope_sensing_process_grant(s, sc, c, rx_a, n_sc, &place, &q_meta[j].cfg, 2, 1,
+                                                  q_meta[j].sfn, q_meta[j].slot_idx, q_meta[j].shift);
+      pushed[c] += n > 0 ? n : 0;
+      next[c]++;
+    }
   }
   srsran_dmrs_sch_free(&dmrs);
   /* 1800 slots, 0.9 s: 1260 full downlink (3 DM-RS symbols), 180 special (1), 360
     uplink; 2 layers. 22 symbols per 5 ms TDD period, i.e. 4400 per second per layer. */
-  check(pushed == 7920, "snapshots pushed, every DM-RS symbol", pushed, 7920, 0);
-  check(pushed1 == 7920, "snapshots pushed on chain 1", pushed1, 7920, 0);
+  check(pushed[0] == 7920, "snapshots pushed, every DM-RS symbol", pushed[0], 7920, 0);
+  {
+    int same = 0;
+    for (int c = 1; c < N_ANT; c++) {
+      same += (pushed[c] == pushed[0]);
+    }
+    check(same == N_ANT - 1, "chains pushing as many as chain 0", same, N_ANT - 1, 0);
+  }
 
   nrscope_sensing_wait_maps(s);
 
@@ -786,7 +818,7 @@ static void test_glue(void)
       const int    n_bins = (int)v[12], n_freq = (int)v[13];
       snap_min            = (int)v[7] < snap_min ? (int)v[7] : snap_min;
       maps_avg += ((int)v[2] == -1); // aarx -1: averaged over the chains
-      maps_aoa += ((int)v[15] > 0);  // n_aoa: the AoA ran on equal windows of both chains
+      maps_aoa += ((int)v[15] > 0);  // n_aoa: the AoA ran on equal windows of every chain
       const double f_max  = v[10];
       int          best_i = 0;
       double       best   = -1;
@@ -812,13 +844,13 @@ static void test_glue(void)
     back to back. The trigger is the window, so neither the cadence nor the span
     depends on how many symbols the traffic offered. */
   check(n_maps == 12, "maps built (6 per layer)", n_maps, 12, 0);
-  // one map per layer per window, each over both chains, not one per chain
-  check(maps_avg == n_maps, "maps averaged over the 2 chains", maps_avg, n_maps, 0);
+  // one map per layer per window, each over every chain, not one per chain
+  check(maps_avg == n_maps, "maps averaged over the 4 chains", maps_avg, n_maps, 0);
   check(maps_aoa == n_maps, "maps with angles of arrival", maps_aoa, n_maps, 0);
   check(maps_ok == n_maps, "maps peaking at the target", maps_ok, n_maps, 0);
   /* The scene is exactly what the pipeline models, so nothing should warn. A map
     averaged from fewer chains than captured, for one, shows up only as a warning:
-    two identical chains give the same map whether one or both went into it. */
+    identical chains give the same map whether one or all of them went into it. */
   check(nr_sensing_log_warnings() == warnings_before, "warnings logged", nr_sensing_log_warnings() - warnings_before,
         0, 0);
   /* One history per layer, so each map holds everything its own layer collected in
@@ -827,93 +859,321 @@ static void test_glue(void)
   nrscope_sensing_scratch_free(sc);
 }
 
-/* Two receive chains of the same symbols get the same alignment, in the order the
- * sniffer feeds them: all of chain 0's DM-RS symbols of a slot, then chain 1's. The
- * correction is common to the chains (one LO, one sample clock); giving chain 1 its
- * own would remove the phase between the chains, which is what the AoA reads. Chain
- * 1 carries a fixed 50 degree offset, as a cable would, so a correction computed on
- * its own symbols would differ from chain 0's by exactly that. OAI remembered only the
- * last symbol, which here would leave two of every three to be recomputed. */
-/* The spatial null across two chains. The direct path reaches chain 1 through one
- * complex factor and a mover from another direction through a different one, as two
- * antennas give paths from two directions. Chain 0 minus w chain 1 has to cancel the
- * first and keep the second, at the gain |1 - c_tgt / c_los| the geometry leaves it.
- * Chain 1 misses one symbol, which must be left out rather than paired with another. */
-static void test_spatial_null(void)
+/* THE SPATIAL NULL, see nr_ue_sensing_spatial_null().
+ *
+ * A direction reaches the chains through one complex factor each, so a scene is written
+ * here as a list of paths, each with its own factor per chain. The null has to cancel
+ * the directions it was aimed at and leave the others standing at the gain the geometry
+ * gives them, whether it has one weight to spend or three.
+ */
+typedef struct {
+  /// delay bin the path lands on
+  int bin;
+  /// amplitude on chain 0
+  double amp;
+  /// Doppler in Hz; 0 for a path of the static scene
+  double f_hz;
+  /// the factor each chain receives it through, c[0] = 1: what a direction is to the null
+  cf_t c[NR_SENSING_MAX_RX];
+} null_path_t;
+
+/// Snapshot spacing of the synthetic scenes, in samples of the 122.88 MHz clock
+#define NULL_DT_SAMPLES 21900
+
+/* n_ant histories of n snapshots of the scene. drop[a] is one snapshot index chain a is
+to miss (-1 for none), so the pairing has something to reject: a symbol one chain lacks
+must be left out of the null everywhere, not paired with a neighbour. Returns false if a
+history could not be allocated. */
+static bool null_scene(nr_sensing_history_t* h,
+                       int                   n_ant,
+                       int                   n,
+                       const nr_sensing_stream_t* st,
+                       const null_path_t*    path,
+                       int                   n_path,
+                       const int*            drop)
+{
+  for (int a = 0; a < n_ant; a++) {
+    if (!nr_ue_sensing_history_init(&h[a], n, 30000, 4096, 3450000000ULL)) {
+      for (int i = 0; i < a; i++) {
+        nr_ue_sensing_history_free(&h[i]);
+      }
+      return false;
+    }
+  }
+  for (int a = 0; a < n_ant; a++) {
+    int k = 0;
+    for (int i = 0; i < n; i++) {
+      if (drop != NULL && drop[a] == i) {
+        continue;
+      }
+      nr_sensing_snapshot_t e = {.t_sample  = 1000 + (uint64_t)i * NULL_DT_SAMPLES,
+                                 .stream    = *st,
+                                 .n_pilots  = 1638,
+                                 .idft_size = 2048,
+                                 .k_first   = 0,
+                                 .n_bins    = NR_SENSING_MAP_MAX_BINS_RANGE};
+      for (int p = 0; p < n_path; p++) {
+        const double t  = (double)i * NULL_DT_SAMPLES / 122.88e6;
+        const cf_t   ph = cexpf(I * (float)(2.0 * M_PI * path[p].f_hz * t));
+        e.h[path[p].bin] += (float)path[p].amp * path[p].c[a] * ph;
+      }
+      h[a].ring[k++] = e;
+    }
+    h[a].count = k, h[a].head = k % n;
+  }
+  return true;
+}
+
+/// Mean |out| / |h0| at one bin over the snapshots the null kept, i.e. what it left there
+static double null_gain(const nr_sensing_history_t* out, const nr_sensing_history_t* h0, int bin, int n_keep)
+{
+  double g = 0.0;
+  for (int i = 0; i < h0->count; i++) {
+    if (out->ring[i].stream.ports == 0) {
+      continue; // left out of the null
+    }
+    const double d = cabsf(h0->ring[i].h[bin]);
+    g += d > 0.0 ? cabsf(out->ring[i].h[bin]) / d / n_keep : 0.0;
+  }
+  return g;
+}
+
+/// sum_a w_a c_a, the factor a direction with per-chain factors c keeps through the null
+static cf_t null_response(const nr_sensing_null_t* r, const cf_t* c)
+{
+  cf_t v = 0.0f;
+  for (int a = 0; a < r->n_w; a++) {
+    v += r->w[a] * c[a + 1];
+  }
+  return v;
+}
+
+/* Two chains: the one weight of the original null, fitted on the direct path's mainlobe.
+ * The direct path reaches chain 1 through one complex factor and a mover from another
+ * direction through a different one, as two antennas give paths from two directions.
+ * Chain 0 minus w chain 1 has to cancel the first and keep the second, at the gain
+ * |1 - c_tgt / c_los| the geometry leaves it. Chain 1 misses one symbol, which must be
+ * left out rather than paired with another. */
+static void test_spatial_null_pair(void)
 {
   printf("\nSpatial null across two chains\n");
-  enum { N = 400, LOS = 5, TGT = 20, DROP = 123 };
+  enum { N = 400, LOS = 5, TGT = 20, DROP = 123, N_ANT = 2 };
   const nr_sensing_stream_t st    = {.ports = 0x1, .layer = 0, .k_step = 2, .k_offset = 0};
   const cf_t                c_los = 0.8f * cexpf(I * 1.0f);  // chain 1 / chain 0 for the gNB's direction
   const cf_t                c_tgt = 0.8f * cexpf(-I * 0.7f); // and for the mover's
-  nr_sensing_history_t      h0, h1, out;
-  if (!nr_ue_sensing_history_init(&h0, N, 30000, 4096, 3450000000ULL) ||
-      !nr_ue_sensing_history_init(&h1, N, 30000, 4096, 3450000000ULL)) {
+  const null_path_t         scene[] = {
+      {.bin = LOS, .amp = 1.0, .f_hz = 0.0, .c = {1.0f, c_los}},
+      {.bin = TGT, .amp = 0.05, .f_hz = 40.0, .c = {1.0f, c_tgt}},
+  };
+  const int            drop[N_ANT] = {-1, DROP};
+  nr_sensing_history_t h[N_ANT], out;
+  if (!null_scene(h, N_ANT, N, &st, scene, 2, drop)) {
     printf("  could not allocate the histories\n");
     failures++;
     return;
   }
-  int n1 = 0;
-  for (int i = 0; i < N; i++) {
-    nr_sensing_snapshot_t e = {.t_sample = 1000 + (uint64_t)i * 21900, .stream = st, .n_pilots = 1638,
-                               .idft_size = 2048, .k_first = 0, .n_bins = NR_SENSING_MAP_MAX_BINS_RANGE};
-    const cf_t los = 1.0f, tgt = 0.05f * cexpf(I * (float)(2.0 * M_PI * 40.0 * i * 21900 / 122.88e6));
-    nr_sensing_snapshot_t e1 = e;
-    e.h[LOS] = los, e.h[TGT] = tgt;
-    e1.h[LOS] = c_los * los, e1.h[TGT] = c_tgt * tgt;
-    h0.ring[i] = e;
-    if (i != DROP)
-      h1.ring[n1++] = e1;
-  }
-  h0.count = N, h0.head = 0;
-  h1.count = n1, h1.head = n1 % N;
 
   nr_sensing_null_t r;
-  const bool        ok = nr_ue_sensing_spatial_null(&h0, &h1, &st, &out, &r);
+  const bool        ok = nr_ue_sensing_spatial_null(h, N_ANT, &st, &out, &r);
   check(ok, "null built", ok, 1, 0);
   if (ok) {
-    double tgt_ratio = 0.0, los_left = 0.0;
-    for (int i = 0; i < N; i++) {
-      if (i == DROP)
-        continue;
-      tgt_ratio += cabsf(out.ring[i].h[TGT]) / cabsf(h0.ring[i].h[TGT]) / (N - 1);
-      los_left += cabsf(out.ring[i].h[LOS]) / (N - 1);
-    }
-    const double want = cabsf(1.0f - c_tgt / c_los);
+    const double tgt_ratio = null_gain(&out, &h[0], TGT, N - 1);
+    const double los_left  = null_gain(&out, &h[0], LOS, N - 1);
+    const double want      = cabsf(1.0f - c_tgt / c_los);
+    check(r.n_w == 1, "weights for two chains", r.n_w, 1, 0);
     check(r.n_pairs == N - 1, "symbols paired across the chains", r.n_pairs, N - 1, 0);
     check(out.ring[DROP].stream.ports == 0, "unpaired symbol left out", out.ring[DROP].stream.ports, 0, 0);
     check(r.u0 == LOS, "null fitted at the direct path", r.u0, LOS, 0);
+    // one weight is fitted on the direct path's mainlobe alone, three bins of it
+    check(r.n_fit_bins == 3, "bins fitted on", r.n_fit_bins, 3, 0);
     check(r.los_db < -60.0, "direct path static power after null (dB)", r.los_db, -60, 0);
     check(los_left < 1e-4, "direct path left per symbol", los_left, 0, 1e-4);
     check(fabs(tgt_ratio - want) < 1e-3, "mover gain through the null", tgt_ratio, want, 1e-3);
     // chain 1 holds the scene at |c| = 0.8 of chain 0's, -1.9 dB
-    check(fabs(r.p1_db - 20.0 * log10(0.8)) < 0.1, "rx1 power against rx0 (dB)", r.p1_db, 20.0 * log10(0.8), 0.1);
-    check(r.static0 > 0.99 && r.static1 > 0.99, "static share of a still direct path", r.static1, 1, 0.01);
+    check(fabs(r.p_db[1] - 20.0 * log10(0.8)) < 0.1, "rx1 power against rx0 (dB)", r.p_db[1], 20.0 * log10(0.8), 0.1);
+    check(r.static_share[0] > 0.99 && r.static_share[1] > 0.99, "static share of a still direct path",
+          r.static_share[1], 1, 0.01);
     free(out.ring);
     pthread_mutex_destroy(&out.lock);
   }
-  nr_ue_sensing_history_free(&h0);
-  nr_ue_sensing_history_free(&h1);
+  for (int a = 0; a < N_ANT; a++) {
+    nr_ue_sensing_history_free(&h[a]);
+  }
 }
 
+/* Four chains over a scene with one static direction. Three weights then have more
+ * freedom than the scene determines, and the loaded solve has to answer with the
+ * smallest weights that still null the direct path, w_a = conj(c_a) / |c|^2, rather than
+ * a large arbitrary vector in the directions the scene says nothing about.
+ *
+ * The mover is the thing to watch. Its bin carries the leak the slow-time mean leaves of
+ * it, 40 dB down but with the mover's own direction, and a spare weight aimed at that
+ * leak would cancel the mover outright. The static-share gate has to keep that bin out
+ * of the fit, which the bin count reports, and the mover has to come through at the gain
+ * the geometry gives it. Each chain misses a different symbol, so a symbol is only
+ * nulled where all four hold it. */
+static void test_spatial_null_quad(void)
+{
+  printf("\nSpatial null across four chains, one static direction\n");
+  enum { N = 400, LOS = 5, TGT = 20, N_ANT = NR_SENSING_MAX_RX };
+  const nr_sensing_stream_t st = {.ports = 0x2, .layer = 0, .k_step = 2, .k_offset = 0};
+  // the gNB's direction, and the mover's: one complex factor per chain, chain 0 at 1
+  const cf_t c_los[N_ANT] = {1.0f, 0.90f * cexpf(I * 1.0f), 0.85f * cexpf(I * 2.0f), 0.80f * cexpf(-I * 1.5f)};
+  const cf_t c_tgt[N_ANT] = {1.0f, 0.80f * cexpf(-I * 0.7f), 0.90f * cexpf(I * 0.3f), 0.70f * cexpf(-I * 2.2f)};
+  const null_path_t scene[] = {
+      {.bin = LOS, .amp = 1.0, .f_hz = 0.0, .c = {c_los[0], c_los[1], c_los[2], c_los[3]}},
+      {.bin = TGT, .amp = 0.05, .f_hz = 40.0, .c = {c_tgt[0], c_tgt[1], c_tgt[2], c_tgt[3]}},
+  };
+  const int            drop[N_ANT] = {-1, 123, 200, 310};
+  nr_sensing_history_t h[N_ANT], out;
+  if (!null_scene(h, N_ANT, N, &st, scene, 2, drop)) {
+    printf("  could not allocate the histories\n");
+    failures++;
+    return;
+  }
+
+  nr_sensing_null_t r;
+  const bool        ok = nr_ue_sensing_spatial_null(h, N_ANT, &st, &out, &r);
+  check(ok, "null built", ok, 1, 0);
+  if (ok) {
+    check(r.n_w == N_ANT - 1, "weights for four chains", r.n_w, N_ANT - 1, 0);
+    // one symbol fewer per chain that dropped one, none of them shared
+    check(r.n_pairs == N - 3, "symbols held by every chain", r.n_pairs, N - 3, 0);
+    int left_out = 0;
+    for (int a = 1; a < N_ANT; a++) {
+      left_out += (out.ring[drop[a]].stream.ports == 0);
+    }
+    check(left_out == N_ANT - 1, "symbols a chain missed, left out", left_out, N_ANT - 1, 0);
+    check(r.u0 == LOS, "direct path found", r.u0, LOS, 0);
+    /* The mover's bin must not be fitted on: only the direct path's mainlobe qualifies,
+      and the empty bins and the mover's are below the static-share gate. */
+    check(r.n_fit_bins == 3, "bins fitted on, the mover's excluded", r.n_fit_bins, 3, 0);
+
+    // the smallest weights that null the direct path: w_a = conj(c_a) / |c|^2
+    double c2 = 0.0;
+    for (int a = 1; a < N_ANT; a++) {
+      c2 += (double)(crealf(c_los[a]) * crealf(c_los[a]) + cimagf(c_los[a]) * cimagf(c_los[a]));
+    }
+    double w_err = 0.0;
+    for (int a = 1; a < N_ANT; a++) {
+      w_err += cabsf(r.w[a - 1] - conjf(c_los[a]) / (float)c2);
+    }
+    check(w_err < 1e-5, "weights against the minimum-norm null", w_err, 0, 1e-5);
+    check(cabsf(1.0f - null_response(&r, c_los)) < 1e-5, "direct path's direction cancelled",
+          cabsf(1.0f - null_response(&r, c_los)), 0, 1e-5);
+
+    const double tgt_ratio = null_gain(&out, &h[0], TGT, r.n_pairs);
+    const double los_left  = null_gain(&out, &h[0], LOS, r.n_pairs);
+    const double want      = cabsf(1.0f - null_response(&r, c_tgt));
+    check(r.los_db < -60.0, "direct path static power after null (dB)", r.los_db, -60, 0);
+    check(los_left < 1e-4, "direct path left per symbol", los_left, 0, 1e-4);
+    check(fabs(tgt_ratio - want) < 1e-3, "mover gain through the null", tgt_ratio, want, 1e-3);
+    check(tgt_ratio > 0.2, "mover not nulled with the direct path", tgt_ratio, 1, 0.8);
+    free(out.ring);
+    pthread_mutex_destroy(&out.lock);
+  }
+  for (int a = 0; a < N_ANT; a++) {
+    nr_ue_sensing_history_free(&h[a]);
+  }
+}
+
+/* Four chains over a scene with two static directions: the direct path and a static
+ * reflector 7 bins behind it, from somewhere else. This is what the extra chains are
+ * for. Three weights can cancel both, and the same scene on two chains cannot: its one
+ * weight nulls the direct path and leaves the reflector standing, which the second half
+ * of this test measures, so the gain is read off rather than asserted in the abstract.
+ * The mover, from a third direction, has to survive either way. */
+static void test_spatial_null_quad_clutter(void)
+{
+  printf("\nSpatial null across four chains, two static directions\n");
+  enum { N = 400, LOS = 5, CLT = 12, TGT = 20, N_ANT = NR_SENSING_MAX_RX };
+  const nr_sensing_stream_t st = {.ports = 0x4, .layer = 0, .k_step = 2, .k_offset = 0};
+  const cf_t c_los[N_ANT] = {1.0f, 0.90f * cexpf(I * 1.0f), 0.85f * cexpf(I * 2.0f), 0.80f * cexpf(-I * 1.5f)};
+  const cf_t c_clt[N_ANT] = {1.0f, 0.70f * cexpf(-I * 0.5f), 0.60f * cexpf(I * 1.2f), 0.75f * cexpf(I * 2.5f)};
+  const cf_t c_tgt[N_ANT] = {1.0f, 0.80f * cexpf(-I * 0.7f), 0.90f * cexpf(I * 0.3f), 0.70f * cexpf(-I * 2.2f)};
+  const null_path_t scene[] = {
+      {.bin = LOS, .amp = 1.0, .f_hz = 0.0, .c = {c_los[0], c_los[1], c_los[2], c_los[3]}},
+      {.bin = CLT, .amp = 0.3, .f_hz = 0.0, .c = {c_clt[0], c_clt[1], c_clt[2], c_clt[3]}},
+      {.bin = TGT, .amp = 0.05, .f_hz = 40.0, .c = {c_tgt[0], c_tgt[1], c_tgt[2], c_tgt[3]}},
+  };
+  nr_sensing_history_t h[N_ANT], out;
+  if (!null_scene(h, N_ANT, N, &st, scene, 3, NULL)) {
+    printf("  could not allocate the histories\n");
+    failures++;
+    return;
+  }
+
+  nr_sensing_null_t r;
+  if (nr_ue_sensing_spatial_null(h, N_ANT, &st, &out, &r)) {
+    check(r.u0 == LOS, "direct path found", r.u0, LOS, 0);
+    /* The reflector's bin is static, so it joins the direct path's mainlobe in the fit;
+      the mover's bin still does not. */
+    check(r.n_fit_bins == 4, "bins fitted on, the reflector's included", r.n_fit_bins, 4, 0);
+    check(cabsf(1.0f - null_response(&r, c_los)) < 1e-4, "direct path's direction cancelled",
+          cabsf(1.0f - null_response(&r, c_los)), 0, 1e-4);
+    check(cabsf(1.0f - null_response(&r, c_clt)) < 1e-4, "reflector's direction cancelled too",
+          cabsf(1.0f - null_response(&r, c_clt)), 0, 1e-4);
+    const double los_left = null_gain(&out, &h[0], LOS, r.n_pairs);
+    const double clt_left = null_gain(&out, &h[0], CLT, r.n_pairs);
+    const double tgt_left = null_gain(&out, &h[0], TGT, r.n_pairs);
+    const double want     = cabsf(1.0f - null_response(&r, c_tgt));
+    check(los_left < 1e-4, "direct path left per symbol", los_left, 0, 1e-4);
+    check(clt_left < 1e-4, "reflector left per symbol", clt_left, 0, 1e-4);
+    check(r.static_db < -40.0, "static scene after the null (dB)", r.static_db, -40, 0);
+    check(fabs(tgt_left - want) < 1e-3, "mover gain through the null", tgt_left, want, 1e-3);
+    check(tgt_left > 0.2, "mover not nulled with the static scene", tgt_left, 1, 0.8);
+    free(out.ring);
+    pthread_mutex_destroy(&out.lock);
+  } else {
+    printf("  four-chain null not built\n");
+    failures++;
+  }
+
+  /* The same scene, two chains. One weight nulls the direct path and can do nothing
+    about the reflector, which is the whole reason for the other two chains. */
+  if (nr_ue_sensing_spatial_null(h, 2, &st, &out, &r)) {
+    const double los_left = null_gain(&out, &h[0], LOS, r.n_pairs);
+    const double clt_left = null_gain(&out, &h[0], CLT, r.n_pairs);
+    check(los_left < 1e-4, "two chains: direct path left", los_left, 0, 1e-4);
+    check(clt_left > 0.1, "two chains: reflector still standing", clt_left, 1, 0.9);
+    free(out.ring);
+    pthread_mutex_destroy(&out.lock);
+  } else {
+    printf("  two-chain null not built\n");
+    failures++;
+  }
+  for (int a = 0; a < N_ANT; a++) {
+    nr_ue_sensing_history_free(&h[a]);
+  }
+}
+
+/* Every receive chain of the same symbols gets the same alignment, in the order the
+ * sniffer feeds them: all of chain 0's DM-RS symbols of a slot, then chain 1's, and so
+ * on. The correction is common to the chains (one LO, one sample clock); giving a chain
+ * its own would remove the phase between the chains, which is what the AoA reads. Each
+ * chain behind chain 0 carries a fixed offset here, as a cable would, so a correction
+ * computed on its own symbols would differ from chain 0's by exactly that offset. OAI
+ * remembered only the last symbol, which here would leave two of every three to be
+ * recomputed. */
 static void test_align_chains(void)
 {
-  printf("\nAlignment across two chains, chain 0's symbols first\n");
-  enum { NP = 819, KS = 4 }; // rank 2 lattice over the full carrier
-  const pilot_lattice_t     lat   = {.n = NP, .n_lattice = NP, .k_first = 0, .k_step = KS};
-  const nr_sensing_stream_t st    = {.ports = 0x8, .layer = 0}; // a key no other test uses
-  const cf_t                cable = cexpf(I * (float)(50.0 * M_PI / 180.0));
+  printf("\nAlignment across four chains, chain 0's symbols first\n");
+  enum { NP = 819, KS = 4, N_ANT = NR_SENSING_MAX_RX }; // rank 2 lattice over the full carrier
+  const pilot_lattice_t     lat = {.n = NP, .n_lattice = NP, .k_first = 0, .k_step = KS};
+  const nr_sensing_stream_t st  = {.ports = 0x8, .layer = 0}; // a key no other test uses
+  const double              offset_deg[N_ANT] = {0.0, 50.0, -110.0, 155.0};
   static cf_t               p[NP];
   int                       same = 0, total = 0;
   for (int slot = 0; slot < 8; slot++) {
     nr_sensing_align_t r0[3];
     uint64_t           t[3];
-    for (int c = 0; c < 2; c++) {
+    for (int c = 0; c < N_ANT; c++) {
+      const cf_t cable = cexpf(I * (float)(offset_deg[c] * M_PI / 180.0));
       for (int m = 0; m < 3; m++) {
         t[m]              = 1000000 + (uint64_t)slot * 61440 + (uint64_t)m * 4 * 4384;
         const float drift = 0.2f * (float)(slot * 3 + m); // common phase drift, as the LO gives
         for (int k = 0; k < NP; k++) {
-          p[k] = (c ? cable : 1.0f) * cexpf(I * (drift - (float)(2.0 * M_PI * 23 * k / (4096 / KS))));
+          p[k] = cable * cexpf(I * (drift - (float)(2.0 * M_PI * 23 * k / (4096 / KS))));
         }
         nr_sensing_align_t r;
         nr_ue_sensing_align_symbol(t[m], st, &lat, p, &r);
@@ -926,7 +1186,7 @@ static void test_align_chains(void)
       }
     }
   }
-  check(same == total, "chain 1 symbols given chain 0's correction", same, total, 0);
+  check(same == total, "chains given chain 0's correction", same, total, 0);
 }
 
 /* The delay transform must be safe to call from several workers at once, as the
@@ -1037,7 +1297,9 @@ int main(void)
 
   test_glue();
   test_align_chains();
-  test_spatial_null();
+  test_spatial_null_pair();
+  test_spatial_null_quad();
+  test_spatial_null_quad_clutter();
   test_idft_threads();
 
   nr_ue_sensing_idft_free();

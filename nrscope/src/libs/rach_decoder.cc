@@ -305,6 +305,9 @@ static void log_msg4_bytes(uint32_t       slot_idx,
                            const uint8_t* payload,
                            uint32_t       nof_bytes)
 {
+  /* Skipped under recording_mode, whose msg4 CSV carries the same bytes. log_config.quiet
+  deliberately does NOT skip it: quiet only silences the terminal, and this file is the
+  only record a non-recording run keeps of a Msg4 that failed to decode. */
   if (RunRecorder::enabled()) {
     return;
   }
@@ -492,7 +495,10 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
 
     char dci_str[512] = {};
     srsran_dci_dl_nr_to_str(&(ue_dl_rach.dci), &dci_rach[dci_id], dci_str, (uint32_t)sizeof(dci_str));
-    if (RunRecorder::enabled()) printf("RACHDecoder -- Found DCI: %s\n", dci_str);
+    /* One of the two lines the curated terminal keeps, so it has to follow the same
+      condition as the dumps it replaces: on whenever the verbose output is off,
+      whether that is recording_mode or log_config.quiet. */
+    if (!RunRecorder::verbose()) printf("RACHDecoder -- Found DCI: %s\n", dci_str);
 
     if (pdsch_cfg.grant.tb[0].tbs / 8 < 40) {
       if (RunRecorder::verbose()) ERROR("Too short for RRC Setup");

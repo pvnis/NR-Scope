@@ -31,8 +31,8 @@
 
 #include "nrscope/hdr/sensing/nr_ue_map.h"
 
-/// Rx antennas the spatial stage handles
-#define NR_AOA_MAX_ANT 4
+/// Rx antennas the spatial stage handles, the sensing library's chain ceiling
+#define NR_AOA_MAX_ANT NR_SENSING_MAX_RX
 
 /* Element spacing of the receive ULA, in wavelengths, and the per-chain phase
 offsets removed before the steering vector is applied, in degrees.

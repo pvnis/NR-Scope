@@ -1953,107 +1953,243 @@ static bool null_stream_match(const nr_sensing_snapshot_t *e, const nr_sensing_s
   return e->stream.ports == st->ports && e->stream.k_step == st->k_step && e->stream.k_offset == st->k_offset;
 }
 
-bool nr_ue_sensing_spatial_null(const nr_sensing_history_t *h0,
-                                const nr_sensing_history_t *h1,
+/* Solve the m x m complex system A x = b, m <= NR_SENSING_MAX_RX - 1, by Gaussian
+elimination with partial pivoting on the column's largest magnitude. A is (ar, ai) in row
+major order and b is (br, bi); both are overwritten, and on success x is left in b. At
+this size a direct elimination is exact enough and keeps the sensing library free of any
+LAPACK dependency, as the MUSIC stage's Jacobi does. Returns false when a pivot vanishes,
+i.e. the (already loaded) system is singular to working precision. */
+static bool null_solve(double *ar, double *ai, double *br, double *bi, int m)
+{
+  for (int c = 0; c < m; c++) {
+    int pivot = c;
+    double best = ar[c * m + c] * ar[c * m + c] + ai[c * m + c] * ai[c * m + c];
+    for (int r = c + 1; r < m; r++) {
+      const double v = ar[r * m + c] * ar[r * m + c] + ai[r * m + c] * ai[r * m + c];
+      if (v > best) {
+        best = v, pivot = r;
+      }
+    }
+    if (!(best > 0.0))
+      return false;
+    if (pivot != c) {
+      for (int j = 0; j < m; j++) {
+        double t = ar[c * m + j];
+        ar[c * m + j] = ar[pivot * m + j], ar[pivot * m + j] = t;
+        t = ai[c * m + j];
+        ai[c * m + j] = ai[pivot * m + j], ai[pivot * m + j] = t;
+      }
+      double t = br[c];
+      br[c] = br[pivot], br[pivot] = t;
+      t = bi[c];
+      bi[c] = bi[pivot], bi[pivot] = t;
+    }
+    const double dr = ar[c * m + c], di = ai[c * m + c], dd = dr * dr + di * di;
+    for (int r = c + 1; r < m; r++) {
+      // f = A[r][c] / A[c][c], then row r -= f * row c
+      const double xr = ar[r * m + c], xi = ai[r * m + c];
+      const double fr = (xr * dr + xi * di) / dd, fi = (xi * dr - xr * di) / dd;
+      for (int j = c; j < m; j++) {
+        const double cr = ar[c * m + j], ci = ai[c * m + j];
+        ar[r * m + j] -= fr * cr - fi * ci;
+        ai[r * m + j] -= fr * ci + fi * cr;
+      }
+      br[r] -= fr * br[c] - fi * bi[c];
+      bi[r] -= fr * bi[c] + fi * br[c];
+    }
+  }
+  for (int r = m - 1; r >= 0; r--) { // back substitution, b[j > r] already holds x[j]
+    double sr = br[r], si = bi[r];
+    for (int j = r + 1; j < m; j++) {
+      sr -= ar[r * m + j] * br[j] - ai[r * m + j] * bi[j];
+      si -= ar[r * m + j] * bi[j] + ai[r * m + j] * br[j];
+    }
+    const double dr = ar[r * m + r], di = ai[r * m + r], dd = dr * dr + di * di;
+    if (!(dd > 0.0))
+      return false;
+    br[r] = (sr * dr + si * di) / dd;
+    bi[r] = (si * dr - sr * di) / dd;
+  }
+  return true;
+}
+
+bool nr_ue_sensing_spatial_null(const nr_sensing_history_t *h,
+                                int n_ant,
                                 const nr_sensing_stream_t *st,
                                 nr_sensing_history_t *out,
                                 nr_sensing_null_t *res)
 {
   memset(res, 0, sizeof(*res));
-  if (h0->ring == NULL || h1->ring == NULL || h0->count <= 0)
+  if (n_ant < 2 || n_ant > NR_SENSING_MAX_RX || h[0].count <= 0)
     return false;
-
-  /* Chain 1's snapshots of this measurement, by symbol: time and layer identify a
-  symbol on every chain alike (the chains are sample aligned), the same key the map
-  task matches chains with. */
-  null_key_t *k1 = malloc_or_fail((size_t)(h1->count > 0 ? h1->count : 1) * sizeof(*k1));
-  int n1 = 0;
-  for (int k = 0; k < h1->count; k++) {
-    const nr_sensing_snapshot_t *e = &h1->ring[k];
-    if (null_stream_match(e, st))
-      k1[n1++] = (null_key_t){.key = (e->t_sample << 8) | e->stream.layer, .idx = k};
+  for (int a = 0; a < n_ant; a++) {
+    if (h[a].ring == NULL)
+      return false;
   }
-  qsort(k1, (size_t)n1, sizeof(*k1), null_key_cmp);
+  const int m = n_ant - 1; // weights, one per chain behind chain 0
+  res->n_w = m;
 
-  // pair[k] is chain 1's ring index of chain 0's snapshot k, -1 when it has none
-  int *pair = malloc_or_fail((size_t)h0->count * sizeof(*pair));
+  /* Every chain behind chain 0, its snapshots of this measurement by symbol: time and
+  layer identify a symbol on every chain alike (the chains are sample aligned), the same
+  key the map task matches chains with. */
+  null_key_t *keys[NR_SENSING_MAX_RX] = {NULL};
+  int n_keys[NR_SENSING_MAX_RX] = {0};
+  for (int a = 1; a < n_ant; a++) {
+    keys[a] = malloc_or_fail((size_t)(h[a].count > 0 ? h[a].count : 1) * sizeof(*keys[a]));
+    int n = 0;
+    for (int k = 0; k < h[a].count; k++) {
+      const nr_sensing_snapshot_t *e = &h[a].ring[k];
+      if (null_stream_match(e, st))
+        keys[a][n++] = (null_key_t){.key = (e->t_sample << 8) | e->stream.layer, .idx = k};
+    }
+    qsort(keys[a], (size_t)n, sizeof(*keys[a]), null_key_cmp);
+    n_keys[a] = n;
+  }
+
+  /* pair[k * m + a - 1] is chain a's ring index of chain 0's snapshot k, set only when
+  EVERY chain behind chain 0 holds that symbol: one null over M chains needs all of them
+  at the same instant, where the two-chain null needed a single partner. paired[k] says
+  the row came out complete. */
+  int *pair = malloc_or_fail((size_t)h[0].count * (size_t)m * sizeof(*pair));
+  bool *paired = calloc_or_fail((size_t)h[0].count, sizeof(*paired));
   int n_bins = 0;
-  for (int k = 0; k < h0->count; k++) {
-    const nr_sensing_snapshot_t *e = &h0->ring[k];
-    pair[k] = -1;
+  for (int k = 0; k < h[0].count; k++) {
+    const nr_sensing_snapshot_t *e = &h[0].ring[k];
     if (!null_stream_match(e, st))
       continue;
     res->n0++;
     const null_key_t want = {.key = (e->t_sample << 8) | e->stream.layer};
-    const null_key_t *hit = bsearch(&want, k1, (size_t)n1, sizeof(*k1), null_key_cmp);
-    if (hit != NULL && h1->ring[hit->idx].n_bins == e->n_bins) {
-      pair[k] = hit->idx;
+    bool everywhere = true;
+    for (int a = 1; a < n_ant && everywhere; a++) {
+      const null_key_t *hit = bsearch(&want, keys[a], (size_t)n_keys[a], sizeof(*keys[a]), null_key_cmp);
+      everywhere = hit != NULL && h[a].ring[hit->idx].n_bins == e->n_bins;
+      if (everywhere)
+        pair[k * m + a - 1] = hit->idx;
+    }
+    if (everywhere) {
+      paired[k] = true;
       res->n_pairs++;
       n_bins = e->n_bins;
     }
   }
-  free(k1);
+  for (int a = 1; a < n_ant; a++)
+    free(keys[a]);
   if (res->n_pairs == 0 || n_bins <= 0) {
     free(pair);
+    free(paired);
     return false;
   }
 
-  /* The static scene of each chain: the slow-time mean per bin. The weight is fitted on
-  it rather than on the snapshots, so a target, which averages out over the window,
+  /* The static scene of each chain: the slow-time mean per bin, kept as a sum over the
+  paired snapshots (the weights are a ratio of such sums, so the 1/n cancels). The fit is
+  on this rather than on the snapshots, so a target, which averages out over the window,
   does not pull the null towards itself. */
-  double m0r[NR_SENSING_MAP_MAX_BINS_RANGE] = {0}, m0i[NR_SENSING_MAP_MAX_BINS_RANGE] = {0};
-  double m1r[NR_SENSING_MAP_MAX_BINS_RANGE] = {0}, m1i[NR_SENSING_MAP_MAX_BINS_RANGE] = {0};
-  double e_prof[NR_SENSING_MAP_MAX_BINS_RANGE] = {0};
-  double e1 = 0.0; // chain 1's energy, every bin
-  for (int k = 0; k < h0->count; k++) {
-    if (pair[k] < 0)
+  double mr[NR_SENSING_MAX_RX][NR_SENSING_MAP_MAX_BINS_RANGE] = {{0}};
+  double mi[NR_SENSING_MAX_RX][NR_SENSING_MAP_MAX_BINS_RANGE] = {{0}};
+  double e_prof[NR_SENSING_MAP_MAX_BINS_RANGE] = {0}; // chain 0's energy per bin
+  double e_tot[NR_SENSING_MAX_RX] = {0};
+  for (int k = 0; k < h[0].count; k++) {
+    if (!paired[k])
       continue;
-    const cf_t *a = h0->ring[k].h, *c = h1->ring[pair[k]].h;
-    for (int b = 0; b < n_bins; b++) {
-      m0r[b] += crealf(a[b]), m0i[b] += cimagf(a[b]);
-      m1r[b] += crealf(c[b]), m1i[b] += cimagf(c[b]);
-      e_prof[b] += (double)crealf(a[b]) * crealf(a[b]) + (double)cimagf(a[b]) * cimagf(a[b]);
-      e1 += (double)crealf(c[b]) * crealf(c[b]) + (double)cimagf(c[b]) * cimagf(c[b]);
+    for (int a = 0; a < n_ant; a++) {
+      const cf_t *x = a == 0 ? h[0].ring[k].h : h[a].ring[pair[k * m + a - 1]].h;
+      for (int b = 0; b < n_bins; b++) {
+        const double xr = crealf(x[b]), xi = cimagf(x[b]);
+        mr[a][b] += xr, mi[a][b] += xi;
+        e_tot[a] += xr * xr + xi * xi;
+        if (a == 0)
+          e_prof[b] += xr * xr + xi * xi;
+      }
     }
   }
-  {
-    double e0 = 0.0, s0 = 0.0, s1 = 0.0;
+  for (int a = 0; a < n_ant; a++) {
     const double np = res->n_pairs;
-    for (int b = 0; b < n_bins; b++) {
-      e0 += e_prof[b];
-      s0 += (m0r[b] * m0r[b] + m0i[b] * m0i[b]) / np; // |mean|^2 * n, as the energies are sums over n
-      s1 += (m1r[b] * m1r[b] + m1i[b] * m1i[b]) / np;
-    }
-    res->p1_db = (e0 > 0.0 && e1 > 0.0) ? 10.0 * log10(e1 / e0) : -99.0;
-    res->static0 = e0 > 0.0 ? s0 / e0 : 0.0;
-    res->static1 = e1 > 0.0 ? s1 / e1 : 0.0;
+    double s = 0.0;
+    for (int b = 0; b < n_bins; b++)
+      s += (mr[a][b] * mr[a][b] + mi[a][b] * mi[a][b]) / np; // |mean|^2 * n, as e_tot sums over n
+    res->p_db[a] = (e_tot[0] > 0.0 && e_tot[a] > 0.0) ? 10.0 * log10(e_tot[a] / e_tot[0]) : -99.0;
+    res->static_share[a] = e_tot[a] > 0.0 ? s / e_tot[a] : 0.0;
   }
 
-  /* The direct path's mainlobe, the bins the null is fitted on: one direction, the
-  gNB's. Fitting on the whole profile instead would null whatever mixture of
-  directions holds the most static energy, which is not a direction at all. */
+  /* The bins the weights are fitted on. The direct path's mainlobe always, and that
+  alone when there is one weight: spread over the whole profile, one weight would null
+  the mixture of directions holding the most static energy, which is not a direction at
+  all. From two weights up that trade is gone and the spare weights are free to take the
+  static clutter as well, so other bins may join.
+
+  Which ones is not a question of energy but of whether what the bin holds stays put. A
+  bin carrying a mover is in the static profile too: the slow-time mean does not kill a
+  mover, it leaks it, at 40-50 dB down for a walking pace over a tenth of a second but
+  with the mover's own direction. That leak is far above the loading, so least squares
+  with a weight to spare would aim one at it and cancel the mover outright, snapshots and
+  all, since the null is one spatial filter applied to every snapshot alike. The bin's
+  static share tells the two apart: |mean|^2 over mean |h|^2 is near 1 for a bin that
+  holds a still scene and small for one whose energy is a mover, 0.01 for the leak above.
+  Only bins above NR_SENSING_NULL_STATIC_MIN are fitted on. */
   const int u0 = nr_ue_sensing_los_peak(e_prof, n_bins, NR_SENSING_LOS_FIRST_DB);
   const int b_lo = u0 > 0 ? u0 - 1 : 0, b_hi = u0 < n_bins - 1 ? u0 + 1 : n_bins - 1;
-  double num_r = 0.0, num_i = 0.0, den = 0.0;
-  for (int b = b_lo; b <= b_hi; b++) { // w = <m0, m1> / <m1, m1>
-    num_r += m0r[b] * m1r[b] + m0i[b] * m1i[b];
-    num_i += m0i[b] * m1r[b] - m0r[b] * m1i[b];
-    den += m1r[b] * m1r[b] + m1i[b] * m1i[b];
+  res->u0 = u0;
+  int fit[NR_SENSING_MAP_MAX_BINS_RANGE];
+  int n_fit = 0;
+  for (int b = 0; b < n_bins; b++) {
+    const bool los = b >= b_lo && b <= b_hi;
+    const double share =
+        e_prof[b] > 0.0 ? (mr[0][b] * mr[0][b] + mi[0][b] * mi[0][b]) / (res->n_pairs * e_prof[b]) : 0.0;
+    if (los || (m > 1 && share >= NR_SENSING_NULL_STATIC_MIN))
+      fit[n_fit++] = b;
   }
-  if (!(den > 0.0)) {
+  res->n_fit_bins = n_fit;
+
+  /* G w = p over the fit bins, with G[c][a] = <m_c, m_a> and p[c] = <m_c, m_0> under the
+  inner product <x, y> = sum_b conj(x[b]) y[b], both indexed from chain 1. At m = 1 this
+  is the scalar w = <m_1, m_0> / <m_1, m_1> the two-chain null used. */
+  double gr[(NR_SENSING_MAX_RX - 1) * (NR_SENSING_MAX_RX - 1)] = {0};
+  double gi[(NR_SENSING_MAX_RX - 1) * (NR_SENSING_MAX_RX - 1)] = {0};
+  double pr[NR_SENSING_MAX_RX - 1] = {0}, pi[NR_SENSING_MAX_RX - 1] = {0};
+  for (int c = 1; c < n_ant; c++) {
+    for (int i = 0; i < n_fit; i++) {
+      const int b = fit[i];
+      pr[c - 1] += mr[c][b] * mr[0][b] + mi[c][b] * mi[0][b];
+      pi[c - 1] += mr[c][b] * mi[0][b] - mi[c][b] * mr[0][b];
+      for (int a = 1; a < n_ant; a++) {
+        gr[(c - 1) * m + a - 1] += mr[c][b] * mr[a][b] + mi[c][b] * mi[a][b];
+        gi[(c - 1) * m + a - 1] += mr[c][b] * mi[a][b] - mi[c][b] * mr[a][b];
+      }
+    }
+  }
+  /* Diagonal loading. One static direction leaves G of rank 1 however many chains there
+  are, and then the weights are not determined by it; loaded, the solve returns the
+  smallest weights that still null what is there instead of an arbitrary large vector in
+  the directions the scene says nothing about. */
+  double trace = 0.0;
+  for (int a = 0; a < m; a++)
+    trace += gr[a * m + a];
+  if (!(trace > 0.0)) {
     free(pair);
+    free(paired);
     return false;
   }
-  const double wr = num_r / den, wi = num_i / den;
-  res->w = (float)wr + I * (float)wi;
-  res->u0 = u0;
+  const double load = NR_SENSING_NULL_LOADING * trace / m;
+  for (int a = 0; a < m; a++)
+    gr[a * m + a] += load;
+
+  if (!null_solve(gr, gi, pr, pi, m)) { // the solution lands in (pr, pi)
+    free(pair);
+    free(paired);
+    return false;
+  }
+  for (int a = 0; a < m; a++)
+    res->w[a] = (float)pr[a] + I * (float)pi[a];
 
   // what the null does to each chain-0 static bin, before and after
   double los_before = 0.0, los_after = 0.0, all_before = 0.0, all_after = 0.0;
   for (int b = 0; b < n_bins; b++) {
-    const double rr = m0r[b] - (wr * m1r[b] - wi * m1i[b]);
-    const double ri = m0i[b] - (wr * m1i[b] + wi * m1r[b]);
-    const double p0 = m0r[b] * m0r[b] + m0i[b] * m0i[b], p1 = rr * rr + ri * ri;
+    double rr = mr[0][b], ri = mi[0][b];
+    for (int a = 1; a < n_ant; a++) {
+      rr -= pr[a - 1] * mr[a][b] - pi[a - 1] * mi[a][b];
+      ri -= pr[a - 1] * mi[a][b] + pi[a - 1] * mr[a][b];
+    }
+    const double p0 = mr[0][b] * mr[0][b] + mi[0][b] * mi[0][b], p1 = rr * rr + ri * ri;
     all_before += p0, all_after += p1;
     if (b >= b_lo && b <= b_hi)
       los_before += p0, los_after += p1;
@@ -2061,24 +2197,27 @@ bool nr_ue_sensing_spatial_null(const nr_sensing_history_t *h0,
   res->los_db = (los_before > 0.0 && los_after > 0.0) ? 10.0 * log10(los_after / los_before) : -99.0;
   res->static_db = (all_before > 0.0 && all_after > 0.0) ? 10.0 * log10(all_after / all_before) : -99.0;
 
-  /* The nulled history: chain 0's, every paired snapshot replaced by h0 - w h1, every
-  unpaired one marked with ports 0 so no gather takes it. */
-  *out = *h0;
-  out->ring = malloc_or_fail((size_t)h0->depth * sizeof(*out->ring));
-  memcpy(out->ring, h0->ring, (size_t)h0->depth * sizeof(*out->ring));
+  /* The nulled history: chain 0's, every fully paired snapshot replaced by
+  h_0 - sum_a w_a h_a, every other one marked with ports 0 so no gather takes it. */
+  *out = h[0];
+  out->ring = malloc_or_fail((size_t)h[0].depth * sizeof(*out->ring));
+  memcpy(out->ring, h[0].ring, (size_t)h[0].depth * sizeof(*out->ring));
   pthread_mutex_init(&out->lock, NULL);
-  const cf_t w = res->w;
-  for (int k = 0; k < h0->count; k++) {
+  for (int k = 0; k < h[0].count; k++) {
     nr_sensing_snapshot_t *e = &out->ring[k];
-    if (pair[k] < 0) {
+    if (!paired[k]) {
       if (null_stream_match(e, st))
         e->stream.ports = 0;
       continue;
     }
-    const cf_t *c = h1->ring[pair[k]].h;
-    for (int b = 0; b < n_bins; b++)
-      e->h[b] -= w * c[b];
+    for (int a = 1; a < n_ant; a++) {
+      const cf_t *x = h[a].ring[pair[k * m + a - 1]].h;
+      const cf_t w = res->w[a - 1];
+      for (int b = 0; b < n_bins; b++)
+        e->h[b] -= w * x[b];
+    }
   }
   free(pair);
+  free(paired);
   return true;
 }

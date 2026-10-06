@@ -22,6 +22,12 @@
 
 #define TARGET_STOPBAND_SUPPRESSION_DB 60.0f;
 
+/* Subframes in each chain's receive ring. Index 0 is the staging area the
+synchroniser lands in and the consumer copies a slot out of; the producer writes
+in-sync subframes at 1 .. RING_BUF_MODULUS. */
+#define RING_BUF_SIZE 10
+#define RING_BUF_MODULUS (RING_BUF_SIZE - 1)
+
 class Radio
 {
 public:
@@ -38,6 +44,20 @@ public:
     are captured so the sensing path has a spatial baseline. Entries at or above
     nof_antennas are null. */
   cf_t*    rx_buffer[NRSCOPE_MAX_RX_ANTENNAS];
+  /* Which subframe each ring entry holds, recorded by the producer as it fills the
+    entry and read by the consumer from the entry it is draining.
+
+    It has to travel with the entry rather than in one shared variable. The producer
+    runs ahead of the consumer -- a receive failure or a lost subframe posts
+    smph_sf_data_finished back to the producer, so each one permanently buys it another
+    subframe of lead -- and a single `outcome` member then describes the subframe the
+    producer last received, not the one the consumer is draining. The consumer labels
+    its slots from it, and the PDCCH DM-RS is scrambled by the slot number, so a stale
+    label leaves every candidate measurable but uncorrelatable: strong EPRE, correlation
+    at the noise floor, nothing ever decoding. It showed up as SIB1 never decoding on a
+    four-chain capture, where the consumer's extra per-chain copying widened the lead
+    to two subframes. */
+  srsran_ue_sync_nr_outcome_t ring_outcome[RING_BUF_SIZE];
   cf_t*    pre_resampling_rx_buffer;
   uint32_t slot_sz;
   uint32_t pre_resampling_slot_sz;

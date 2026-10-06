@@ -466,7 +466,15 @@ Doppler of its column (dR/dt = -lambda*f). Each column of the older map is read 
 that many bins, linearly interpolated, so the mover stays in its cell; cells read from
 outside the map are left out of that cell's mean. */
 
-#define NR_SENSING_AVG_KEYS 16
+/* Streams the averager keeps a ring for, one per (aarx, stream) pair in flight.
+
+With antenna_avg on a stream has a single aarx (-1, or -2 for the nulled map), but with it
+off every captured chain dumps its own maps and each needs its own ring, so the worst case
+is every chain against every stream and that is what this is sized for. The fixed 16 it
+replaces covered only four streams on four chains; past that a map is left unaveraged and
+warns, which is easy to miss. The rings themselves are allocated on first use, so an
+unused key costs a few hundred bytes. */
+#define NR_SENSING_AVG_KEYS (NR_SENSING_MAX_RX * NR_SENSING_MAX_STREAMS)
 
 typedef struct {
   double t_center; // s, middle of the window
@@ -752,8 +760,9 @@ static void nr_ue_sensing_map_task(void *arg)
   int n_combined = 0;
   int n = 0;
 
-  /* Runtime parameter spatial_null: the map from chain 0 minus w times chain 1, w
-  cancelling the direct path's direction, instead of the average of the chains' maps;
+  /* Runtime parameter spatial_null: the map from chain 0 minus the weighted sum of the
+  other chains, the weights cancelling the direct path's direction and, from three chains
+  up, the strongest static clutter with it, instead of the average of the chains' maps;
   see nr_ue_sensing_spatial_null(). Built as a one-chain task on the nulled history, so
   it goes through the same clutter removal and transform as any map, and its slow-time
   samples are what the detector runs on (det below). The raw chains are still
@@ -768,8 +777,8 @@ static void nr_ue_sensing_map_task(void *arg)
     tn = malloc_or_fail(sizeof(*tn) + sizeof(tn->snap[0]));
     memcpy(tn, t, sizeof(*t));
     tn->n_ant = 1;
-    if (!nr_ue_sensing_spatial_null(&t->snap[0], &t->snap[1], &t->stream, &tn->snap[0], &null_res)) {
-      LOG_W(NR_PHY, "sensing: spatial null found no symbol on both chains, map averaged instead\n");
+    if (!nr_ue_sensing_spatial_null(t->snap, t->n_ant, &t->stream, &tn->snap[0], &null_res)) {
+      LOG_W(NR_PHY, "sensing: spatial null found no symbol on every chain, map averaged instead\n");
       free(tn);
       tn = NULL;
     }
@@ -787,19 +796,29 @@ static void nr_ue_sensing_map_task(void *arg)
       if (nr_ue_sensing_task_map(t, &base_params, avg_nf, raw, slow, n_slow, &n_combined, obs) > 0)
         t->map.bin_los = raw->bin_los;
       free(raw);
+      /* One weight per chain behind chain 0, and one power-and-static-share pair per
+        chain, so a chain that does not see the scene can be told from a scene with no
+        single direction to null whatever the chain count is. */
+      char w_str[160] = {0}, rx_str[256] = {0};
+      for (int a = 0, off = 0; a < null_res.n_w && off < (int)sizeof(w_str); a++)
+        off += snprintf(w_str + off, sizeof(w_str) - off, "%s%.3f%+.3fj",
+                        a > 0 ? " " : "", crealf(null_res.w[a]), cimagf(null_res.w[a]));
+      for (int a = 0, off = 0; a < t->n_ant && off < (int)sizeof(rx_str); a++)
+        off += snprintf(rx_str + off, sizeof(rx_str) - off, " rx%d %+.1f dB static %.2f;",
+                        a, null_res.p_db[a], null_res.static_share[a]);
       LOG_I(NR_PHY,
-            "sensing: spatial null w %.3f%+.3fj at bin %d: direct path %.1f dB, static scene %.1f dB, "
-            "%d of %d symbols on both chains. rx1 %+.1f dB against rx0, static share rx0 %.2f rx1 %.2f\n",
-            crealf(null_res.w),
-            cimagf(null_res.w),
+            "sensing: spatial null over %d chains, w [%s] fitted on %d bins around bin %d: "
+            "direct path %.1f dB, static scene %.1f dB, %d of %d symbols on every chain."
+            " Against rx0:%s\n",
+            t->n_ant,
+            w_str,
+            null_res.n_fit_bins,
             null_res.u0,
             null_res.los_db,
             null_res.static_db,
             null_res.n_pairs,
             null_res.n0,
-            null_res.p1_db,
-            null_res.static0,
-            null_res.static1);
+            rx_str);
     }
   } else {
     n = nr_ue_sensing_task_map(t, &base_params, avg_nf, &t->map, slow, n_slow, &n_combined, obs);
