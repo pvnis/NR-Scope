@@ -339,6 +339,15 @@ int load_config(std::vector<Radio>& radios, std::string file_name)
     flag("test_record_samples", &nrscope_sensing_args.test_record_samples);
     if (sn["record_max_files"])
       nrscope_sensing_args.record_max_files = sn["record_max_files"].as<int>();
+    if (sn["avg_maps"]) {
+      nrscope_sensing_args.avg_maps = sn["avg_maps"].as<int>();
+      if (nrscope_sensing_args.avg_maps < 1 || nrscope_sensing_args.avg_maps > NR_SENSING_AVG_MAX) {
+        std::cerr << "sensing: avg_maps must be 1.." << NR_SENSING_AVG_MAX << ", got "
+                  << nrscope_sensing_args.avg_maps << std::endl;
+        exit(EXIT_FAILURE);
+      }
+    }
+    flag("avg_vcomp", &nrscope_sensing_args.avg_vcomp);
   }
 
   if (config_yaml[setting_name]["push_to_google"]) {

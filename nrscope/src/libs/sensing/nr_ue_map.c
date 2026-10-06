@@ -1140,6 +1140,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
   map->m_per_bin = m_per_bin;
   map->f_max_hz = f_max;
   map->t_span_s = t_span;
+  map->t_start_s = (double)first->t_sample / fs;
   map->carrier_hz = (double)hist->carrier_hz;
 
   double t[NR_SENSING_HISTORY_DEPTH];

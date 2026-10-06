@@ -38,6 +38,7 @@ void nrscope_sensing_default_args(nrscope_sensing_args_t* args)
   args->clutter_removal = true;
   args->mirror_reject   = true;
   args->record_max_files = 100;
+  args->avg_maps         = 1;
 }
 
 struct nrscope_sensing_scratch_s {
@@ -349,6 +350,7 @@ Split out so --sensing-clutter-compare can build the same map twice from the sam
 snapshots, once per max_paths. */
 static int nr_ue_sensing_task_map(const nr_sensing_map_task_t *t,
                                   const nr_sensing_params_t *p,
+                                  int n_freq_first,
                                   nr_sensing_map_t *map,
                                   nr_sensing_slowtime_t *slow,
                                   int n_slow,
@@ -364,7 +366,7 @@ static int nr_ue_sensing_task_map(const nr_sensing_map_task_t *t,
                                       t->args->symbols,
                                       t->args->max_speed_ms,
                                       p,
-                                      0, // the first chain sizes the grid every other map is built on
+                                      n_freq_first, // 0: the first chain sizes the grid every other map is built on
                                       map,
                                       obs != NULL ? &obs[0] : (n_slow > 0 ? &slow[0] : NULL));
   if (obs != NULL && n > 0 && n_slow > 0)
@@ -443,6 +445,189 @@ static int nr_ue_sensing_task_map(const nr_sensing_map_task_t *t,
   if (n_combined_out != NULL)
     *n_combined_out = n_combined;
   return n;
+}
+
+/* MAP AVERAGING (sensing.avg_maps)
+
+Sliding non-coherent average of the last avg_maps maps of one stream. Every map is
+normalised to its own noise floor (noise_ref), so averaging power keeps the floor's mean
+at 1 and shrinks its fluctuation: the random noise peaks drop and a target that holds its
+cell gains margin. Measured offline on a lab run (replay_samples.py --avg-maps): background
+repeatability 0.75 alone, 0.86 over 2 maps, 0.93 over 4.
+
+Maps are averaged by time, not by arrival: the map threads finish windows in either order,
+so a map is averaged with the most recent older maps of its stream that lie within
+avg_maps windows of it. The ring keeps raw maps only, never averaged ones, so the average
+does not compound. A stream's maps are all built on its first map's Doppler grid while this
+is on (nr_ue_sensing_avg_grid()), which is what lets them be summed cell by cell.
+
+avg_vcomp: an older map, dt earlier, saw a mover at path length R + lambda*f*dt, f the
+Doppler of its column (dR/dt = -lambda*f). Each column of the older map is read shifted by
+that many bins, linearly interpolated, so the mover stays in its cell; cells read from
+outside the map are left out of that cell's mean. */
+
+#define NR_SENSING_AVG_KEYS 16
+
+typedef struct {
+  double t_center; // s, middle of the window
+  float *power;    // n_bins * n_freq on the key's grid, raw
+} avg_entry_t;
+
+typedef struct {
+  bool used;
+  nr_sensing_stream_t stream;
+  int aarx;
+  int n_bins, n_freq; // the key's grid, n_freq 0 until its first map
+  double f_max_hz;
+  int n, head;        // the last NR_SENSING_AVG_MAX raw maps, head the next slot
+  avg_entry_t ring[NR_SENSING_AVG_MAX];
+} avg_state_t;
+
+static avg_state_t avg_states[NR_SENSING_AVG_KEYS];
+static pthread_mutex_t avg_lock = PTHREAD_MUTEX_INITIALIZER;
+
+// The key's state, claimed on first use; NULL when the table is full. avg_lock held.
+static avg_state_t *avg_state(const nr_sensing_stream_t *st, int aarx)
+{
+  avg_state_t *free_slot = NULL;
+  for (int i = 0; i < NR_SENSING_AVG_KEYS; i++) {
+    avg_state_t *a = &avg_states[i];
+    if (a->used && a->aarx == aarx && nr_ue_sensing_stream_eq(&a->stream, st))
+      return a;
+    if (!a->used && free_slot == NULL)
+      free_slot = a;
+  }
+  if (free_slot != NULL) {
+    memset(free_slot, 0, sizeof(*free_slot));
+    free_slot->used = true;
+    free_slot->stream = *st;
+    free_slot->aarx = aarx;
+  }
+  return free_slot;
+}
+
+/// Doppler grid a stream's next map is to be built on: 0 (its own) when off or before its first map.
+static int nr_ue_sensing_avg_grid(const nrscope_sensing_args_t *args, const nr_sensing_stream_t *st, int aarx)
+{
+  if (args->avg_maps <= 1)
+    return 0;
+  pthread_mutex_lock(&avg_lock);
+  const avg_state_t *a = avg_state(st, aarx);
+  const int nf = a != NULL ? a->n_freq : 0;
+  pthread_mutex_unlock(&avg_lock);
+  return nf;
+}
+
+/* Keep map's raw power in its stream's ring and replace map->power by the mean of it and
+the most recent older maps of the stream, avg_maps in all at most. Returns how many maps
+went into the mean (1: nothing to average with yet). */
+static int nr_ue_sensing_avg_apply(const nrscope_sensing_args_t *args,
+                                   const nr_sensing_stream_t *st,
+                                   int aarx,
+                                   nr_sensing_map_t *map)
+{
+  if (args->avg_maps <= 1)
+    return 1;
+  const int nb = map->n_bins, nf = map->n_freq, n_cells = nb * nf;
+  const double t_now = map->t_start_s + 0.5 * map->t_span_s;
+
+  pthread_mutex_lock(&avg_lock);
+  avg_state_t *a = avg_state(st, aarx);
+  if (a == NULL) {
+    pthread_mutex_unlock(&avg_lock);
+    LOG_W(NR_PHY, "sensing: more than %d streams to average, map left unaveraged\n", NR_SENSING_AVG_KEYS);
+    return 1;
+  }
+  if (a->n_freq == 0 || a->n_bins != nb || a->n_freq != nf || a->f_max_hz != map->f_max_hz) {
+    // first map of the stream, or the axis changed: restart on this map's grid
+    for (int i = 0; i < NR_SENSING_AVG_MAX; i++) {
+      free(a->ring[i].power);
+      a->ring[i].power = NULL;
+    }
+    a->n = a->head = 0;
+    a->n_bins = nb;
+    a->n_freq = nf;
+    a->f_max_hz = map->f_max_hz;
+    LOG_I(NR_PHY,
+          "sensing: averaging maps of ports 0x%x layer %d over %d windows%s, on a %d x %d grid\n",
+          st->ports, st->layer, args->avg_maps, args->avg_vcomp ? ", velocity compensated" : "", nb, nf);
+  }
+
+  // the most recent older maps, at most avg_maps - 1, within that many windows of this one
+  const double horizon = (args->avg_maps - 1) * 1.5 * map->t_span_s;
+  // the slot this map goes into, never a candidate: when the ring is full it holds a map
+  // that is about to be overwritten
+  const int self = a->head;
+  int sel[NR_SENSING_AVG_MAX];
+  int n_sel = 0;
+  for (int k = 0; k < a->n; k++) {
+    if (k == self)
+      continue;
+    const double dt = t_now - a->ring[k].t_center;
+    if (dt > 0.0 && dt <= horizon)
+      sel[n_sel++] = k;
+  }
+  for (int i = 0; i < n_sel; i++) // newest first
+    for (int j = i + 1; j < n_sel; j++)
+      if (a->ring[sel[j]].t_center > a->ring[sel[i]].t_center) {
+        const int tmp = sel[i];
+        sel[i] = sel[j];
+        sel[j] = tmp;
+      }
+  if (n_sel > args->avg_maps - 1)
+    n_sel = args->avg_maps - 1;
+
+  // the raw map goes into the ring whatever happens below
+  avg_entry_t *e = &a->ring[self];
+  if (e->power == NULL)
+    e->power = malloc_or_fail((size_t)n_cells * sizeof(float));
+  memcpy(e->power, map->power, (size_t)n_cells * sizeof(float));
+  e->t_center = t_now;
+  a->head = (a->head + 1) % NR_SENSING_AVG_MAX;
+  if (a->n < NR_SENSING_AVG_MAX)
+    a->n++;
+
+  if (n_sel > 0) {
+    double *acc = malloc_or_fail((size_t)n_cells * sizeof(double));
+    float *cnt = malloc_or_fail((size_t)n_cells * sizeof(float));
+    for (int c = 0; c < n_cells; c++) {
+      acc[c] = a->ring[self].power[c];
+      cnt[c] = 1.0f;
+    }
+    const double lambda = C_M_PER_S / map->carrier_hz;
+    const double df = nf > 1 ? 2.0 * map->f_max_hz / (nf - 1) : 0.0;
+    for (int s = 0; s < n_sel; s++) {
+      const avg_entry_t *o = &a->ring[sel[s]];
+      if (!args->avg_vcomp) {
+        for (int c = 0; c < n_cells; c++) {
+          acc[c] += o->power[c];
+          cnt[c] += 1.0f;
+        }
+        continue;
+      }
+      const double dt = t_now - o->t_center;
+      for (int f = 0; f < nf; f++) {
+        const double shift = lambda * (-map->f_max_hz + f * df) * dt / map->m_per_bin; // bins
+        for (int b = 0; b < nb; b++) {
+          const double x = b + shift;
+          if (x < 0.0 || x > nb - 1)
+            continue;
+          const int b0 = (int)floor(x);
+          const double w = x - b0;
+          const double v = (b0 >= nb - 1) ? o->power[b0 * nf + f]
+                                          : (1.0 - w) * o->power[b0 * nf + f] + w * o->power[(b0 + 1) * nf + f];
+          acc[b * nf + f] += v;
+          cnt[b * nf + f] += 1.0f;
+        }
+      }
+    }
+    for (int c = 0; c < n_cells; c++)
+      map->power[c] = (float)(acc[c] / cnt[c]);
+    free(acc);
+    free(cnt);
+  }
+  pthread_mutex_unlock(&avg_lock);
+  return 1 + n_sel;
 }
 
 static void nr_ue_sensing_map_task(void *arg)
@@ -589,14 +774,17 @@ static void nr_ue_sensing_map_task(void *arg)
       tn = NULL;
     }
   }
+  /* sensing.avg_maps: build on the stream's averaging grid; see nr_ue_sensing_avg_apply(). */
+  const int avg_aarx = tn != NULL ? NR_SENSING_AARX_NULL : t->aarx;
+  const int avg_nf = nr_ue_sensing_avg_grid(t->args, &t->stream, avg_aarx);
   if (tn != NULL) {
     slow_null.t_s = malloc_or_fail((size_t)tn->snap[0].depth * sizeof(*slow_null.t_s));
     slow_null.h_re = malloc_or_fail((size_t)tn->snap[0].depth * NR_SENSING_MAP_MAX_BINS_RANGE * sizeof(*slow_null.h_re));
     slow_null.h_im = malloc_or_fail((size_t)tn->snap[0].depth * NR_SENSING_MAP_MAX_BINS_RANGE * sizeof(*slow_null.h_im));
-    n = nr_ue_sensing_task_map(tn, &base_params, &t->map, &slow_null, 1, NULL, NULL);
+    n = nr_ue_sensing_task_map(tn, &base_params, avg_nf, &t->map, &slow_null, 1, NULL, NULL);
     if (n > 0) {
       nr_sensing_map_t *raw = malloc_or_fail(sizeof(*raw));
-      if (nr_ue_sensing_task_map(t, &base_params, raw, slow, n_slow, &n_combined, obs) > 0)
+      if (nr_ue_sensing_task_map(t, &base_params, avg_nf, raw, slow, n_slow, &n_combined, obs) > 0)
         t->map.bin_los = raw->bin_los;
       free(raw);
       LOG_I(NR_PHY,
@@ -614,10 +802,17 @@ static void nr_ue_sensing_map_task(void *arg)
             null_res.static1);
     }
   } else {
-    n = nr_ue_sensing_task_map(t, &base_params, &t->map, slow, n_slow, &n_combined, obs);
+    n = nr_ue_sensing_task_map(t, &base_params, avg_nf, &t->map, slow, n_slow, &n_combined, obs);
   }
   // the slow-time samples the map was built from, which the detector has to see too
   const nr_sensing_slowtime_t *det = tn != NULL ? &slow_null : &slow[0];
+
+  /* sensing.avg_maps: the map from here on is the mean over the stream's last maps. The
+  TDD detector reads det, this window's slow-time samples, so it is not affected; the dump
+  and, with tdd_detect off, the AoA's own CFAR are. */
+  const int n_avg = n > 0 ? nr_ue_sensing_avg_apply(t->args, &t->stream, avg_aarx, &t->map) : 1;
+  if (n_avg > 1)
+    LOG_D(NR_PHY, "sensing: map %d.%d averaged over %d maps\n", t->frame, t->slot, n_avg);
 
   nr_sensing_marker_t markers[NR_TDD_MAX_TARGETS + NR_TDD_MAX_REJECTED];
   int n_markers = 0;
@@ -898,7 +1093,7 @@ static void nr_ue_sensing_map_task(void *arg)
       nr_sensing_params_t p_l1 = base_params;
       p_l1.max_paths = 1;
       nr_sensing_map_t *map_l1 = malloc_or_fail(sizeof(*map_l1));
-      if (nr_ue_sensing_task_map(t, &p_l1, map_l1, NULL, 0, NULL, NULL) > 0) {
+      if (nr_ue_sensing_task_map(t, &p_l1, 0, map_l1, NULL, 0, NULL, NULL) > 0) {
         char l1_path[512];
         snprintf(l1_path, sizeof(l1_path), "%s.L1.csv", t->args->dump);
         nr_ue_sensing_dump_map(l1_path, t->frame, t->slot, t->aarx, map_l1, NULL, 0, NULL, 0);
@@ -922,7 +1117,7 @@ static void nr_ue_sensing_map_task(void *arg)
                                                    t->args->sweep_hi, t->args->sweep_step, sets, labels);
         nr_sensing_map_t *map_s = malloc_or_fail(sizeof(*map_s));
         for (int sp = 0; sp < n_sets; sp++) {
-          if (nr_ue_sensing_task_map(ts, &sets[sp], map_s, NULL, 0, NULL, NULL) <= 0)
+          if (nr_ue_sensing_task_map(ts, &sets[sp], 0, map_s, NULL, 0, NULL, NULL) <= 0)
             continue;
           /* The map is normalised to its own noise floor, so the peak value is its SNR. */
           double peak = 0.0;

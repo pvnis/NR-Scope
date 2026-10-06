@@ -100,7 +100,19 @@ typedef struct {
   rebuilds the maps offline and sweeps any parameter without a rebuild or recapture. */
   bool   test_record_samples;
   int    record_max_files;
+  /* avg_maps: sliding non-coherent average of the last avg_maps maps of the same stream
+  (1 = off, at most NR_SENSING_AVG_MAX). Each map is still built from its own window;
+  the dumped map, and the AoA's own CFAR when tdd_detect is off, see the average. The
+  TDD detector works on the window's slow-time samples and is not affected. Maps of a
+  stream are all built on the first one's Doppler grid while this is on.
+  avg_vcomp: shift every Doppler column of an older map by its path-length rate
+  (lambda * f * dt) before averaging, so a mover stays in its cell. */
+  int    avg_maps;
+  bool   avg_vcomp;
 } nrscope_sensing_args_t;
+
+/// Most maps avg_maps may average over
+#define NR_SENSING_AVG_MAX 16
 
 void nrscope_sensing_default_args(nrscope_sensing_args_t* args);
 

@@ -96,6 +96,13 @@ sensing:
   compensate_window_shifts: false  # NR-Scope only; off is OAI's behaviour
   spatial_null: false  # map from chain 0 minus weighted chain 1, nulling the direct path; needs antenna_avg, 2 chains
   mirror_reject: true  # set aside a detection with an equally strong mirror at -v (not drawn); false keeps them all
+  # Map averaging: each map becomes the power mean of the last avg_maps maps of its stream
+  # (1 = off, max 16). Steadies the noise background; 2-4 suits a passing target. Affects the
+  # dumped map and, with tdd_detect off, the AoA's own CFAR; NOT the TDD detector, which works
+  # on the window's own samples. avg_vcomp shifts older maps' Doppler columns by their range
+  # rate so a mover stays in its cell (no measurable gain yet on the lab runs).
+  avg_maps: 1
+  avg_vcomp: false
 
   # Parameter sweep (mode b): per map, rebuild the clutter removal from the base settings
   # above with ONE field varied from lo to hi in step, each written to its own dump

@@ -19,8 +19,13 @@ antenna- and layer-averaged clutter-removed range-Doppler map. To compare it aga
 live map2d.csv, run the normal pipeline with spatial_null: false (the AoA only adds the
 marker/angle payload, it does not change the power map).
 
+The TDD detector and the +-v mirror rejection run as with tdd_detect and mirror_reject
+on (tdd_detect.py, a port of nr_ue_tdd_detect.c): on the window's rx0 conditioned samples,
+markers written into each map line and every marker to <label>.targets.csv. Disable with
+--no-tdd-detect / --no-mirror-reject.
+
 NOT ported (use the live pipeline, or extend here): the spatial null across chains,
-the TDD detector, AoA/MUSIC, and alignment (alignment is applied in the capture path
+AoA/MUSIC, and alignment (alignment is applied in the capture path
 before these samples are stored, so it cannot be swept from a recording).
 
 Each produced map is written one line per input file to <out>/<label>.csv (default
@@ -46,6 +51,8 @@ import os
 import sys
 
 import numpy as np
+
+import tdd_detect as tdd
 
 C = 299792458.0
 MAX_BINS_FREQ = 2048
@@ -310,7 +317,11 @@ def build_map(snaps, prm, n_freq_fixed=0):
     return dict(power=power.astype(np.float32), n_bins=n_bins, n_freq=n_freq,
                 f_max=f_max, m_per_bin=m_per_bin, t_span=t_span, carrier=carrier,
                 bin_los=bin_los, n_snap=n, k_step=k_step, layer=s0["layer"],
-                t_center=0.5 * (snaps[0]["t_abs"] + snaps[-1]["t_abs"]))
+                t_center=0.5 * (snaps[0]["t_abs"] + snaps[-1]["t_abs"]),
+                # the conditioned slow-time samples and what the TDD detector needs with
+                # them, as range_doppler hands them back in slow_out
+                res=res, t=t, win_len=n_max, win_start=int(s0["a_m"]), idft=idft0,
+                trend_degree=trend_degree, tdd_period=tdd_period)
 
 
 def build_averaged(groups, prm, antenna_avg, layer_avg, n_freq_fixed=0):
@@ -339,34 +350,37 @@ def build_averaged(groups, prm, antenna_avg, layer_avg, n_freq_fixed=0):
 
 
 def average_maps(ms, K, vcomp):
-    """Sliding, causal non-coherent average of K consecutive window maps (all on one grid).
+    """Non-coherent average of each map with the most recent older maps, K in all at most,
+    exactly as nr_ue_sensing_avg_apply() in the C pipeline (sensing.avg_maps).
 
-    Output i is the mean power of maps i-K+1 .. i, so there is one output per input from
-    the K-th on. Averaging power keeps the floor's mean and shrinks its fluctuation, so the
-    noise speckle drops and a target that holds its cell gains margin.
+    Output i is window i: the first maps of a run average over 1, 2, ... maps until K are
+    available. Older maps are picked by time, within (K-1)*1.5 window spans, so a dropped
+    window shortens the average instead of reaching further back. Averaging power keeps the
+    floor's mean and shrinks its fluctuation, so the noise speckle drops and a target that
+    holds its cell gains margin.
 
     vcomp: velocity-compensated averaging. Every Doppler column f has a known bistatic
     path-length rate, dR/dt = -lambda*f (approaching = positive Doppler). An older map j,
     dt = t_i - t_j earlier, saw that content at path length R + lambda*f*dt, so column f of
     map j is read shifted by lambda*f*dt/m_per_bin bins before averaging. A mover then stays
-    aligned across the K maps instead of smearing over range. A TDD replica sits in a column
-    whose f is not its true Doppler, so it is shifted by the wrong amount and smears: vcomp
-    also weakens replicas relative to the real peak. Cells read from outside the map are
-    left out of that cell's mean."""
+    aligned across the K maps instead of smearing over range. Cells read from outside the
+    map are left out of that cell's mean."""
     if K <= 1:
         return ms
     out = []
-    for i in range(K - 1, len(ms)):
-        ref = ms[i]
+    for i, ref in enumerate(ms):
         nb, nf = ref["n_bins"], ref["n_freq"]
+        horizon = (K - 1) * 1.5 * ref["t_span"]
+        older = [j for j in range(i) if 0.0 < ref["t_center"] - ms[j]["t_center"] <= horizon]
+        older = sorted(older, key=lambda j: -ms[j]["t_center"])[:K - 1]
         lam = C / ref["carrier"]
         freqs = -ref["f_max"] + np.arange(nf) * (2.0 * ref["f_max"] / (nf - 1))
-        acc = np.zeros((nb, nf))
-        cnt = np.zeros((nb, nf))
+        acc = ref["power"].astype(float).copy()
+        cnt = np.ones((nb, nf))
         b = np.arange(nb, dtype=float)
-        for j in range(i - K + 1, i + 1):
+        for j in older:
             P = ms[j]["power"].astype(float)
-            if not vcomp or j == i:
+            if not vcomp:
                 acc += P
                 cnt += 1.0
                 continue
@@ -378,8 +392,8 @@ def average_maps(ms, K, vcomp):
                 acc[ok, f] += col[ok]
                 cnt[ok, f] += 1.0
         avg = dict(ref)
-        avg["power"] = (acc / np.maximum(cnt, 1.0)).astype(np.float32)
-        avg["n_avg"] = K
+        avg["power"] = (acc / cnt).astype(np.float32)
+        avg["n_avg"] = 1 + len(older)
         out.append(avg)
     return out
 
@@ -414,12 +428,44 @@ def parse_rec(path):
 
 def write_map_line(fh, idx, m):
     """One line in nr_ue_sensing_dump_map() format, for plot_range_doppler.py."""
+    markers = m.get("markers", [])
     hdr = [idx, 0, 0, 0, m["layer"], m["k_step"], 0, m["n_snap"],
            m["t_span"], m["m_per_bin"], m["f_max"], m["carrier"],
-           m["n_bins"], m["n_freq"], 0, 0, m["bin_los"]]
+           m["n_bins"], m["n_freq"], len(markers), 0, m["bin_los"]]
     power = m["power"].reshape(-1)  # row-major b outer, f inner
+    # markers, 4 numbers each, as the C writes them: range_m, speed_ms, snr_dB, verdict
+    mk = [x for t in markers for x in (t["range_m"], t["speed_ms"], t["snr_dB"], t["verdict"])]
     fh.write(",".join(f"{x:g}" for x in hdr) + "," +
-             ",".join(f"{x:g}" for x in power) + "\n")
+             ",".join(f"{x:g}" for x in list(power) + mk) + "\n")
+
+
+# ---------------------------------------------------------------- detection
+
+def run_detector(m, mirror, cfg=None):
+    """The TDD detector on the window's rx0 conditioned samples, on the map's own Doppler
+    grid, then the mirror rejection on the (possibly averaged) map, as map_task does with
+    tdd_detect and mirror_reject on. Attaches m["markers"]: targets first, then rejections."""
+    obs = tdd.Obs(h=m["res"], t=m["t"], idft_size=m["idft"], win_len=m["win_len"],
+                  win_start=m["win_start"], win=hann(m["win_len"]), m_per_bin=m["m_per_bin"],
+                  n_freq=m["n_freq"], f_max_hz=m["f_max"], lambda_m=C / m["carrier"],
+                  t_tdd_s=m["tdd_period"], trend_q=slow_basis(m["t"], m["trend_degree"]))
+    targets, rejected = tdd.detect(obs, cfg)
+    if mirror:
+        targets, rejected = tdd.mirror_reject(targets, rejected, m["power"], m["f_max"])
+    m["markers"] = targets + rejected
+
+
+def write_targets(path, ms):
+    """Every marker of every map, one per line, for persistence analysis."""
+    names = {tdd.VERDICT_TARGET: "target", tdd.VERDICT_REPLICA: "replica",
+             tdd.VERDICT_DUPLICATE: "duplicate", tdd.VERDICT_UNCERTAIN: "uncertain"}
+    with open(path, "w") as fh:
+        fh.write("map,t_s,verdict,bin,range_m,f_hz,speed_ms,snr_dB\n")
+        t0 = ms[0]["t_center"]
+        for i, m in enumerate(ms):
+            for t in m["markers"]:
+                fh.write(f"{i},{m['t_center'] - t0:.3f},{names[t['verdict']]},{t['bin']:.2f},"
+                         f"{t['range_m']:.2f},{t['f_hz']:.1f},{t['speed_ms']:.2f},{t['snr_dB']:.1f}\n")
 
 
 # ---------------------------------------------------------------- driver
@@ -447,6 +493,14 @@ def main():
     ap.add_argument("--no-layer-avg", action="store_true")
     ap.add_argument("--avg-maps", type=int, default=1,
                     help="sliding non-coherent average over K consecutive maps (default 1: off)")
+    ap.add_argument("--no-tdd-detect", action="store_true",
+                    help="skip the TDD detector (on by default, as tdd_detect: true)")
+    ap.add_argument("--tdd-pfa", type=float, default=None,
+                    help="detector CFAR false-alarm rate per cell (C default 1e-6)")
+    ap.add_argument("--tdd-gamma", type=float, default=None,
+                    help="detector replica power-drop requirement, Eq. (23) (C default 0.2)")
+    ap.add_argument("--no-mirror-reject", action="store_true",
+                    help="keep targets with an equally strong mirror at -v (mirror_reject: false)")
     ap.add_argument("--vcomp", action="store_true",
                     help="with --avg-maps: shift each Doppler column by its path-length "
                          "rate before averaging, so movers stay aligned")
@@ -516,16 +570,33 @@ def main():
         if not ms:
             print(f"{label}: no maps built")
             continue
+        if not args.no_tdd_detect:
+            cfg = tdd.cfg_default()
+            if args.tdd_pfa is not None:
+                cfg["pfa"] = args.tdd_pfa
+            if args.tdd_gamma is not None:
+                cfg["gamma"] = args.tdd_gamma
+            for m in ms:
+                run_detector(m, not args.no_mirror_reject, cfg)
         maps = [m["power"] for m in ms]
         if args.out_dir:
             with open(os.path.join(args.out_dir, f"{label}.csv"), "w") as fh:
                 for i, m in enumerate(ms):
                     write_map_line(fh, i, m)
+            if not args.no_tdd_detect:
+                write_targets(os.path.join(args.out_dir, f"{label}.targets.csv"), ms)
         peaks = np.array([10.0 * math.log10(max(p.max(), 1e-12)) for p in maps])
         # sliding outputs share K-1 of their K maps, so compare only outputs K apart
         rep = repeatability(maps[::max(1, args.avg_maps)])
-        print(f"{label:28s}  maps {len(maps):3d}  peak SNR {peaks.mean():6.1f} +- "
-              f"{peaks.std():4.1f} dB   repeatability {rep:.3f}")
+        line = (f"{label:28s}  maps {len(maps):3d}  peak SNR {peaks.mean():6.1f} +- "
+                f"{peaks.std():4.1f} dB   repeatability {rep:.3f}")
+        if not args.no_tdd_detect:
+            n_t = np.array([sum(t["verdict"] == tdd.VERDICT_TARGET for t in m["markers"]) for m in ms])
+            n_u = sum(sum(t["verdict"] == tdd.VERDICT_UNCERTAIN for t in m["markers"]) for m in ms)
+            n_r = sum(sum(t["verdict"] == tdd.VERDICT_REPLICA for t in m["markers"]) for m in ms)
+            line += (f"   targets/map {n_t.mean():.2f} (maps with one: {np.mean(n_t > 0)*100:.0f}%)"
+                     f"  replicas {n_r}  uncertain {n_u}")
+        print(line)
     return 0
 
 

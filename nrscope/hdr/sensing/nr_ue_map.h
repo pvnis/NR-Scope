@@ -233,6 +233,9 @@ typedef struct {
   double f_max_hz;
   /// observation span in seconds
   double t_span_s;
+  /* Absolute time of the window's first snapshot, s, on the capture's sample clock.
+  Lets maps of consecutive windows be placed on one time axis (map averaging). */
+  double t_start_s;
   double carrier_hz;
   /* Level power[] was divided by: the median cell of this map, which is the noise
   floor since noise holds the large majority of the cells and the median ignores the
