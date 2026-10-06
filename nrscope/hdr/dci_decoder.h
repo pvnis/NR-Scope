@@ -63,6 +63,9 @@ public:
   uint32_t                      bwp_start_crb  = 0;
   uint32_t                      crb_offset     = 0;
   int64_t                       dmrs_grid_slot = -1;
+  /* OFDM symbols of the current slot already demodulated into the grid, per chain: grants
+    only need their DM-RS symbols, so the grid is filled lazily (cleared on a new slot). */
+  uint32_t dmrs_grid_done[SRSRAN_MAX_PORTS] = {};
   // Sensing on the same grid, when the yaml's sensing block enables it
   struct nrscope_sensing_s*         sensing         = nullptr;
   struct nrscope_sensing_scratch_s* sensing_scratch = nullptr;

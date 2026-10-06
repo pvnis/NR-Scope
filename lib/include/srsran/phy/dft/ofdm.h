@@ -72,6 +72,12 @@ typedef struct SRSRAN_API {
   srsran_ofdm_cfg_t cfg;
   srsran_dft_plan_t fft_plan;
   srsran_dft_plan_t fft_plan_sf[2];
+  /* Single-symbol raw transform and the slot geometry the batched fft_plan_sf uses, for
+    srsran_ofdm_rx_sf_nrscope_symbols(): symbol i of the slot starts at
+    in_buffer + sym_first - window_offset_n + i * sym_dist. 30 kHz NR-Scope path only. */
+  srsran_dft_plan_t fft_plan_sym;
+  int32_t           sym_first;
+  uint32_t          sym_dist;
   uint32_t          max_prb;
   uint32_t          nof_symbols;
   uint32_t          nof_guards;
@@ -147,6 +153,14 @@ SRSRAN_API int srsran_ofdm_rx_set_prb(srsran_ofdm_t* q, srsran_cp_t cp, uint32_t
 SRSRAN_API void srsran_ofdm_rx_free(srsran_ofdm_t* q);
 
 SRSRAN_API void srsran_ofdm_rx_sf(srsran_ofdm_t* q);
+/* As srsran_ofdm_rx_sf_nrscope(), but only for the OFDM symbols set in sym_mask (bit i =
+ * symbol i of the slot); the others are left as they were in the output. Same transform and
+ * the same per-symbol post-processing, so a symbol comes out as the batched path gives it.
+ * Falls back to the whole slot where only the batched path exists (15 kHz) or a frequency
+ * shift is configured. Returns the mask of the symbols actually computed. */
+SRSRAN_API uint32_t srsran_ofdm_rx_sf_nrscope_symbols(srsran_ofdm_t* q, int scs_idx, int coreset_offset_scs,
+                                                      uint32_t sym_mask);
+
 SRSRAN_API void srsran_ofdm_rx_sf_nrscope(srsran_ofdm_t* q, int scs_idx, int coreset_offset_scs);
 
 

@@ -361,6 +361,32 @@ void srsran_ue_dl_nr_estimate_fft_nrscope(srsran_ue_dl_nr_t* q,
   }
 }
 
+void srsran_ue_dl_nr_estimate_fft_nrscope_symbols(srsran_ue_dl_nr_t*            q,
+                                                  srsran_slot_cfg_t*            slot_cfg,
+                                                  srsran_ue_dl_nr_sratescs_info arg_scs,
+                                                  const uint32_t*               sym_mask,
+                                                  uint32_t*                     done)
+{
+  if (q == NULL || slot_cfg == NULL || sym_mask == NULL || done == NULL) {
+    return;
+  }
+  for (uint32_t i = 0; i < SRSRAN_UE_DL_NR_MAX_NOF_CORESET; i++) {
+    if (q->cfg.coreset_present[i]) {
+      srsran_ue_dl_nr_estimate_fft_nrscope(q, slot_cfg, arg_scs);
+      for (uint32_t a = 0; a < q->nof_rx_antennas; a++) {
+        done[a] = 0xffffffffu;
+      }
+      return;
+    }
+  }
+  for (uint32_t a = 0; a < q->nof_rx_antennas; a++) {
+    const uint32_t missing = sym_mask[a] & ~done[a];
+    if (missing) {
+      done[a] |= srsran_ofdm_rx_sf_nrscope_symbols(&q->fft[a], (int)arg_scs.scs, arg_scs.coreset_offset_scs, missing);
+    }
+  }
+}
+
 static int ue_dl_nr_find_dci_ncce(srsran_ue_dl_nr_t*     q,
                                   srsran_dci_msg_nr_t*   dci_msg,
                                   srsran_pdcch_nr_res_t* pdcch_res,

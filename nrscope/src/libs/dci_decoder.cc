@@ -1390,12 +1390,31 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
           DmrsCheckResult dmrs_res;
           if (dmrs_check_ready && pdsch_cfg.grant.k == 0) {
             const int64_t slot_key = (int64_t)state->sfn * 1000 + slot->idx;
+            uint32_t      dmrs_symbols[SRSRAN_DMRS_SCH_MAX_SYMBOLS] = {};
+            const int nof_dmrs = srsran_dmrs_sch_get_symbols_idx(&pdsch_cfg.dmrs, &pdsch_cfg.grant, dmrs_symbols);
+
+            /* Demodulate only what this grant's readers use. Sensing reads the DM-RS symbols
+              of every chain (3 of the 14 here), so the other symbols were transformed for
+              nothing, on every chain, in every slot with a grant. The DM-RS check (recording
+              mode) also reads the grant's data symbols as a control, on chain 0, so chain 0
+              keeps the whole slot then. Symbols already done for an earlier grant of the same
+              slot are not redone. */
             if (dmrs_grid_slot != slot_key) {
-              srsran_ue_dl_nr_estimate_fft_nrscope(&ue_dl_grid, slot, arg_scs_grid);
+              memset(dmrs_grid_done, 0, sizeof(dmrs_grid_done));
               dmrs_grid_slot = slot_key;
             }
-            uint32_t  dmrs_symbols[SRSRAN_DMRS_SCH_MAX_SYMBOLS] = {};
-            const int nof_dmrs = srsran_dmrs_sch_get_symbols_idx(&pdsch_cfg.dmrs, &pdsch_cfg.grant, dmrs_symbols);
+            uint32_t dmrs_mask = 0;
+            for (int i = 0; i < nof_dmrs; i++) {
+              dmrs_mask |= 1u << dmrs_symbols[i];
+            }
+            uint32_t need[SRSRAN_MAX_PORTS] = {};
+            for (uint32_t a = 0; a < ue_dl_grid.nof_rx_antennas && a < SRSRAN_MAX_PORTS; a++) {
+              need[a] = dmrs_mask;
+            }
+            if (RunRecorder::enabled()) {
+              need[0] = 0xffffffffu;
+            }
+            srsran_ue_dl_nr_estimate_fft_nrscope_symbols(&ue_dl_grid, slot, arg_scs_grid, need, dmrs_grid_done);
             uint32_t  n_id     = state->cs_ret.ssb_res.N_id;
             if (!pdsch_cfg.grant.n_scid && pdsch_cfg.dmrs.scrambling_id0_present) {
               n_id = pdsch_cfg.dmrs.scrambling_id0;

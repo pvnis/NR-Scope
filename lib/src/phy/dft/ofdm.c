@@ -507,6 +507,20 @@ static int ofdm_init_nr_nrscope_30khz(srsran_ofdm_t* q, srsran_ofdm_cfg_t* cfg, 
       }
     }
   }
+
+  /* Single-symbol path (srsran_ofdm_rx_sf_nrscope_symbols): a raw transform of one symbol and
+    the geometry fft_plan_sf[0] reads the slot with, so a symbol can be demodulated alone. */
+  if (dir == SRSRAN_DFT_FORWARD) {
+    q->sym_first = cp1;
+    q->sym_dist  = symbol_sz + cp2;
+    if (q->fft_plan_sym.size && q->fft_plan_sym.size != (int)symbol_sz) {
+      srsran_dft_plan_free(&q->fft_plan_sym);
+    }
+    if (!q->fft_plan_sym.size && srsran_dft_plan_c(&q->fft_plan_sym, symbol_sz, SRSRAN_DFT_FORWARD) < 0) {
+      ERROR("Creating the single-symbol DFT plan; the whole slot will be demodulated instead");
+      q->fft_plan_sym.size = 0;
+    }
+  }
 #endif
 
   // What does the mirror do?
@@ -803,6 +817,9 @@ void srsran_ofdm_set_non_mbsfn_region(srsran_ofdm_t* q, uint8_t non_mbsfn_region
 void srsran_ofdm_free_(srsran_ofdm_t* q)
 {
   srsran_dft_plan_free(&q->fft_plan);
+  if (q->fft_plan_sym.size) {
+    srsran_dft_plan_free(&q->fft_plan_sym);
+  }
 
 #ifndef AVOID_GURU
   for (int slot = 0; slot < 2; slot++) {
@@ -1308,99 +1325,61 @@ static void ofdm_rx_slot_nrscope_15khz(srsran_ofdm_t* q, int slot_in_sf, int cor
 }
 
 // slot_in_sf is always 0 since we input each slot into it
+/* What the 30 kHz NR-Scope demodulator does to one OFDM symbol once it has been
+ * transformed into tmp (symbol_sz bins): the frequency-domain window offset, the shift that
+ * centres the carrier or CORESET (coreset_offset_scs) into output (nof_re bins), and the
+ * per-symbol phase compensation with the normalisation. Shared by the batched path and by
+ * srsran_ofdm_rx_sf_nrscope_symbols() so both give the same symbol. */
+static void ofdm_rx_symbol_post_nrscope_30khz(srsran_ofdm_t* q,
+                                              int            slot_in_sf,
+                                              uint32_t       i,
+                                              cf_t*          tmp,
+                                              cf_t*          output,
+                                              int            coreset_offset_scs)
+{
+  const uint32_t symbol_sz = q->cfg.symbol_sz;
+  const uint32_t nof_re    = q->nof_re;
+  const float    norm      = 1.0f / sqrtf(q->fft_plan.size);
+  const uint32_t dc        = (q->fft_plan.dc) ? 1 : 0;
+
+  // Apply frequency domain window offset
+  if (q->window_offset_n) {
+    srsran_vec_prod_ccc(tmp, q->window_offset_buffer, tmp, symbol_sz);
+  }
+
+  // FFT shift: the centre of the carrier (or CORESET 0) is not on the radio's centre frequency,
+  // coreset_offset_scs = (radio centre - wanted centre) / scs
+  if ((nof_re / 2 + coreset_offset_scs) > nof_re) {
+    memcpy(output, tmp + symbol_sz - (nof_re / 2 + coreset_offset_scs), sizeof(cf_t) * nof_re);
+  } else {
+    memcpy(output, tmp + symbol_sz - (nof_re / 2 + coreset_offset_scs), sizeof(cf_t) * (nof_re / 2 + coreset_offset_scs));
+    memcpy(output + (nof_re / 2 + coreset_offset_scs), &tmp[dc], sizeof(cf_t) * (nof_re / 2 - coreset_offset_scs));
+  }
+
+  // Phase compensation and normalisation
+  if (isnormal(q->cfg.phase_compensation_hz)) {
+    cf_t phase_compensation = conjf(q->phase_compensation[slot_in_sf * q->nof_symbols + i]);
+    if (q->fft_plan.norm) {
+      phase_compensation *= norm;
+    }
+    srsran_vec_sc_prod_ccc(output, phase_compensation, output, nof_re);
+  } else if (q->fft_plan.norm) {
+    srsran_vec_sc_prod_cfc(output, norm, output, nof_re);
+  }
+}
+
 static void ofdm_rx_slot_nrscope_30khz(srsran_ofdm_t* q, int slot_in_sf, int coreset_offset_scs, int scs_idx)
 {
 #ifdef AVOID_GURU
   srsran_ofdm_rx_slot_ng(
       q, q->cfg.in_buffer + slot_in_sf * q->slot_sz, q->cfg.out_buffer + slot_in_sf * q->nof_re * q->nof_symbols);
 #else
-  uint32_t nof_symbols = q->nof_symbols;
-  uint32_t nof_re = q->nof_re;
-  cf_t* output = q->cfg.out_buffer + slot_in_sf * nof_re * nof_symbols;  // time-freq domain: subcarrier x symbol
-  // printf("nof_symbols: %d\n", nof_symbols);
-  // printf("nof_re: %d\n", nof_re);
-  // printf("slot_in_sf * nof_re * nof_symbols: %d\n", slot_in_sf * q->slot_sz);
-
-  uint32_t symbol_sz = q->cfg.symbol_sz;
-  float norm = 1.0f / sqrtf(q->fft_plan.size);
-  cf_t* tmp = q->tmp; // where the dft results store
-  uint32_t dc = (q->fft_plan.dc) ? 1 : 0;
-  // printf("symbol_sz: %d\n", symbol_sz);
-  // printf("nof_re: %d\n", nof_re);
-
-  // printf("fft-input:");
-  // srsran_vec_fprint_c(stdout, q->cfg.in_buffer, 11520);
   srsran_dft_run_guru_c(&q->fft_plan_sf[slot_in_sf]);
-  // printf("fft-output:");
-  // srsran_vec_fprint_c(stdout, tmp, (symbol_sz) * 7);
-  uint32_t re_count = 0;
-  for (int i = 0; i < q->nof_symbols; i++) {
-    // Apply frequency domain window offset
-    if (q->window_offset_n) {
-      srsran_vec_prod_ccc(tmp, q->window_offset_buffer, tmp, symbol_sz);
-
-      // if(scs_idx == 0 && i > 6) {
-      //   srsran_vec_prod_ccc(tmp, &q->window_offset_buffer[symbol_sz], tmp, symbol_sz);
-      // }
-      // printf("q->window_offset_buffer:");
-      // srsran_vec_fprint_c(stdout, q->window_offset_buffer, symbol_sz);
-    }
-
-
-    // Perform FFT shift
-    // the position of CORESET 0's center is not on current radio's center frequency
-    // coreset_offset_scs = (ssb_center_freq - coreset_center_freq) / scs, all in hz
-    if ((nof_re / 2 + coreset_offset_scs) > nof_re) {
-      memcpy(output, tmp + symbol_sz - (nof_re / 2 + coreset_offset_scs), sizeof(cf_t) * nof_re);
-    } else {
-      memcpy(output, tmp + symbol_sz - (nof_re / 2 + coreset_offset_scs), sizeof(cf_t) * (nof_re / 2 + coreset_offset_scs));
-      memcpy(output + (nof_re / 2 + coreset_offset_scs), &tmp[dc], sizeof(cf_t) * (nof_re / 2 - coreset_offset_scs));
-    }
-    
-    // memcpy(output, tmp + symbol_sz - nof_re / 2, sizeof(cf_t) * nof_re / 2);
-    // memcpy(output + nof_re / 2, &tmp[dc], sizeof(cf_t) * nof_re / 2);
-
-    // if(i == 2 || i == 7 || i == 11){
-    //   printf("fft-output symbol %d:", i);
-    //   srsran_vec_fprint_c(stdout, output, symbol_sz);
-    // }
-
-    // Normalize output
-    // q->cfg.phase_compensation_hz = 0;
-    if (isnormal(q->cfg.phase_compensation_hz)) {
-      // Get phase compensation
-      cf_t phase_compensation = conjf(q->phase_compensation[slot_in_sf * q->nof_symbols + i]);
-
-      // printf("phase_compensation: %f+%fi\n", creal(phase_compensation), cimag(phase_compensation));
-
-      // Apply normalization
-      if (q->fft_plan.norm) {
-        phase_compensation *= norm;
-      }
-
-      // Apply correction
-      srsran_vec_sc_prod_ccc(output, phase_compensation, output, nof_re);
-    } else if (q->fft_plan.norm) {
-      srsran_vec_sc_prod_cfc(output, norm, output, nof_re);
-    }
-    // printf("re_idx %u, output: ", re_count);
-    // srsran_vec_fprint_c(stdout, output, nof_re);
-
-    // FILE *fp;
-    // fp = fopen("SIB_debug.txt", "a");
-    // fwrite(output, sizeof(cf_t), nof_re, fp);
-    // fclose(fp);
-
-    // if(i == 2 || i == 7 || i == 11){
-    //   printf("fft-output symbol %d:", i);
-    //   srsran_vec_fprint_c(stdout, output, symbol_sz);
-    // }
-    
-    tmp += symbol_sz;
-    output += nof_re;
-    re_count += nof_re;
+  cf_t* output = q->cfg.out_buffer + slot_in_sf * q->nof_re * q->nof_symbols; // subcarrier x symbol
+  for (uint32_t i = 0; i < q->nof_symbols; i++) {
+    ofdm_rx_symbol_post_nrscope_30khz(
+        q, slot_in_sf, i, q->tmp + i * q->cfg.symbol_sz, output + i * q->nof_re, coreset_offset_scs);
   }
-
 #endif
   // printf("original symbols:");
   // srsran_vec_fprint_c(stdout, &q->cfg.out_buffer[nof_re * 2], nof_re);
@@ -1452,6 +1431,34 @@ void srsran_ofdm_rx_sf(srsran_ofdm_t* q)
     ofdm_rx_slot_mbsfn(q, q->cfg.in_buffer, q->cfg.out_buffer);
     ofdm_rx_slot(q, 1);
   }
+}
+
+uint32_t srsran_ofdm_rx_sf_nrscope_symbols(srsran_ofdm_t* q, int scs_idx, int coreset_offset_scs, uint32_t sym_mask)
+{
+  const uint32_t all = (q->nof_symbols >= 32) ? 0xffffffffu : ((1u << q->nof_symbols) - 1u);
+  sym_mask &= all;
+  if (sym_mask == 0) {
+    return 0;
+  }
+  /* The whole slot when only the batched path exists, when every symbol is wanted anyway (one
+    batched transform is cheaper than 14 single ones), or when a frequency shift is set: that
+    shift rotates the whole input buffer in place, so applying it per call would apply it twice
+    to a slot demodulated in two calls. */
+  if (scs_idx != 1 || q->fft_plan_sym.size == 0 || sym_mask == all || isnormal(q->cfg.freq_shift_f)) {
+    srsran_ofdm_rx_sf_nrscope(q, scs_idx, coreset_offset_scs);
+    return all;
+  }
+  cf_t* output = q->cfg.out_buffer; // 30 kHz: one slot, slot_in_sf 0
+  for (uint32_t i = 0; i < q->nof_symbols; i++) {
+    if (!(sym_mask & (1u << i))) {
+      continue;
+    }
+    const cf_t* in = q->cfg.in_buffer + q->sym_first - (int32_t)q->window_offset_n + (int64_t)i * q->sym_dist;
+    cf_t*       tmp = q->tmp + i * q->cfg.symbol_sz;
+    srsran_dft_run_c(&q->fft_plan_sym, in, tmp);
+    ofdm_rx_symbol_post_nrscope_30khz(q, 0, i, tmp, output + i * q->nof_re, coreset_offset_scs);
+  }
+  return sym_mask;
 }
 
 void srsran_ofdm_rx_sf_nrscope(srsran_ofdm_t* q, int scs_idx, int coreset_offset_scs)

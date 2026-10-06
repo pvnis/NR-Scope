@@ -116,6 +116,17 @@ SRSRAN_API void srsran_ue_dl_nr_free(srsran_ue_dl_nr_t* q);
 SRSRAN_API void srsran_ue_dl_nr_estimate_fft(srsran_ue_dl_nr_t* q, const srsran_slot_cfg_t* slot_cfg);
 SRSRAN_API void srsran_ue_dl_nr_estimate_fft_nrscope(srsran_ue_dl_nr_t* q, srsran_slot_cfg_t* slot_cfg, srsran_ue_dl_nr_sratescs_info arg_scs);
 
+/* As srsran_ue_dl_nr_estimate_fft_nrscope(), but demodulating on each receive chain only the
+ * OFDM symbols in sym_mask[chain] that are not yet in done[chain], then adding them to it.
+ * Meant for a grid that only some symbols of are read (the PDSCH DM-RS for sensing): the
+ * caller clears done[] when a new slot starts. With CORESETs configured it demodulates the
+ * whole slot, since their channel estimate reads it. */
+SRSRAN_API void srsran_ue_dl_nr_estimate_fft_nrscope_symbols(srsran_ue_dl_nr_t*            q,
+                                                             srsran_slot_cfg_t*            slot_cfg,
+                                                             srsran_ue_dl_nr_sratescs_info arg_scs,
+                                                             const uint32_t*               sym_mask,
+                                                             uint32_t*                     done);
+
 
 SRSRAN_API int srsran_ue_dl_nr_find_dl_dci(srsran_ue_dl_nr_t*       q,
                                            const srsran_slot_cfg_t* slot_cfg,
