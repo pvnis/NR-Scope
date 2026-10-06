@@ -818,6 +818,13 @@ int Radio::SyncandDownlinkInit()
     SSB on the first channel and applies the resulting timing and CFO to the
     whole buffer, which is what keeps the chains sample-aligned with each other. */
   ue_sync_nr_args.nof_rx_channels = nof_antennas;
+  /* Only chain 0 is CFO-rotated here, on the capture thread: sync and every decoder read it.
+    The other chains only feed sensing, so each worker rotates its slot of them with the
+    rotation this subframe got (outcome.cfo_applied_norm), in parallel and only for slots
+    that carry downlink. That rotation is a full read-modify-write of every sample, ~26 us
+    per chain per ms on this machine and twice that on cold memory, and it was all on the
+    one thread whose delay overflows the radio. */
+  ue_sync_nr_args.nof_cfo_channels = 1;
   ue_sync_nr_args.disable_cfo     = disable_cfo;
   ue_sync_nr_args.pbch_dmrs_thr   = 0.5;
   ue_sync_nr_args.cfo_alpha       = 0.1;

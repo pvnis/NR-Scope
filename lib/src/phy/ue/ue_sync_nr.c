@@ -50,6 +50,9 @@ int srsran_ue_sync_nr_init(srsran_ue_sync_nr_t* q, const srsran_ue_sync_nr_args_
   q->recv_obj        = args->recv_obj;
   q->recv_callback   = args->recv_callback;
   q->nof_rx_channels = args->nof_rx_channels == 0 ? 1 : args->nof_rx_channels;
+  q->nof_cfo_channels = (args->nof_cfo_channels == 0 || args->nof_cfo_channels > q->nof_rx_channels)
+                            ? q->nof_rx_channels
+                            : args->nof_cfo_channels;
   q->disable_cfo     = args->disable_cfo;
   q->cfo_alpha       = isnormal(args->cfo_alpha) ? args->cfo_alpha : UE_SYNC_NR_DEFAULT_CFO_ALPHA;
   q->window_shift_total = 0;
@@ -296,10 +299,11 @@ static int ue_sync_nr_recv(srsran_ue_sync_nr_t* q, cf_t** buffer, srsran_timesta
     return SRSRAN_ERROR;
   }
 
-  // Compensate CFO
-  for (uint32_t chan = 0; chan < q->nof_rx_channels; chan++) {
+  // Compensate CFO, on the first nof_cfo_channels; the caller rotates the others with cfo_applied_norm
+  q->cfo_applied_norm = q->disable_cfo ? 0.0f : (float)(-q->cfo_hz / q->srate_hz);
+  for (uint32_t chan = 0; chan < q->nof_cfo_channels; chan++) {
     if (buffer[chan] != 0 && !q->disable_cfo) {
-      srsran_vec_apply_cfo(buffer[chan], -q->cfo_hz / q->srate_hz, buffer[chan], (int)q->sf_sz);
+      srsran_vec_apply_cfo(buffer[chan], q->cfo_applied_norm, buffer[chan], (int)q->sf_sz);
       // printf("q->cfo_hz: %f\n", q->cfo_hz);
       // printf("ue_sync_nr.c q->sf_sz: %u\n", q->sf_sz);
     }
@@ -371,6 +375,7 @@ int srsran_ue_sync_nr_zerocopy(srsran_ue_sync_nr_t* q, cf_t** buffer, srsran_ue_
   outcome->sf_idx   = q->sf_idx;
   outcome->sfn      = q->sfn;
   outcome->cfo_hz   = q->cfo_hz;
+  outcome->cfo_applied_norm = q->cfo_applied_norm;
   outcome->delay_us = q->avg_delay_us;
   outcome->window_shift_total = q->window_shift_total;
 
@@ -504,6 +509,7 @@ int srsran_ue_sync_nr_zerocopy_twinrx_nrscope(srsran_ue_sync_nr_t* q, cf_t** buf
   outcome->sf_idx   = q->sf_idx;
   outcome->sfn      = q->sfn;
   outcome->cfo_hz   = q->cfo_hz;
+  outcome->cfo_applied_norm = q->cfo_applied_norm;
   outcome->delay_us = q->avg_delay_us;
   outcome->window_shift_total = q->window_shift_total;
 
@@ -570,10 +576,11 @@ static int ue_sync_nr_recv_nrscope(srsran_ue_sync_nr_t* q,
   srsran_vec_cf_copy(uplink_buffer, buffer[0], nof_samples);
   pthread_mutex_unlock(&lock);
 
-  // Compensate CFO
-  for (uint32_t chan = 0; chan < q->nof_rx_channels; chan++) {
+  // Compensate CFO, on the first nof_cfo_channels; the caller rotates the others with cfo_applied_norm
+  q->cfo_applied_norm = q->disable_cfo ? 0.0f : (float)(-q->cfo_hz / q->srate_hz);
+  for (uint32_t chan = 0; chan < q->nof_cfo_channels; chan++) {
     if (buffer[chan] != 0 && !q->disable_cfo) {
-      srsran_vec_apply_cfo(buffer[chan], -q->cfo_hz / q->srate_hz, buffer[chan], (int)q->sf_sz);
+      srsran_vec_apply_cfo(buffer[chan], q->cfo_applied_norm, buffer[chan], (int)q->sf_sz);
     }
   }
 
@@ -647,6 +654,7 @@ int srsran_ue_sync_nr_zerocopy_nrscope(srsran_ue_sync_nr_t* q,
   outcome->sf_idx   = q->sf_idx;
   outcome->sfn      = q->sfn;
   outcome->cfo_hz   = q->cfo_hz;
+  outcome->cfo_applied_norm = q->cfo_applied_norm;
   outcome->delay_us = q->avg_delay_us;
   outcome->window_shift_total = q->window_shift_total;
 

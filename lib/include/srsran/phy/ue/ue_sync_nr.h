@@ -49,6 +49,8 @@ typedef struct SRSRAN_API {
   double                      max_srate_hz;    ///< Maximum sampling rate in Hz, set to zero to use default
   srsran_subcarrier_spacing_t min_scs;         ///< Minimum subcarrier spacing
   uint32_t                    nof_rx_channels; ///< Number of receive channels, set to 0 for 1
+  uint32_t nof_cfo_channels; ///< Channels the sync rotates for CFO, the first ones (0: all). The others are
+                             ///< left to the caller, with the rotation reported in cfo_applied_norm
 
   // Enable/Disable features
   bool disable_cfo; ///< Set to true for disabling the CFO compensation close loop
@@ -88,6 +90,8 @@ typedef struct SRSRAN_API {
 
   // Initialised arguments
   uint32_t nof_rx_channels;                     ///< Number of receive channels
+  uint32_t nof_cfo_channels;                    ///< Channels rotated here for CFO, the first ones
+  float    cfo_applied_norm;                    ///< Rotation applied to the last subframe, cycles per sample
   bool     disable_cfo;                         ///< Set to true for disabling the CFO compensation close loop
   float    cfo_alpha;                           ///< Exponential Moving Average (EMA) alpha coefficient for CFO
   void*    recv_obj;                            ///< Receive object
@@ -135,6 +139,11 @@ typedef struct SRSRAN_API {
   float              cfo_hz;    ///< Current CFO in Hz
   float              delay_us;  ///< Current average delay in microseconds
   int64_t            window_shift_total; ///< Samples the window has moved since start, including this subframe
+  /* CFO rotation applied to this subframe's samples, in cycles per sample, as passed to
+    srsran_vec_apply_cfo() from the subframe's first sample. Not cfo_hz: the tracking
+    updates cfo_hz after the rotation, so it can be one update ahead. Channels at or above
+    nof_cfo_channels were not rotated and need exactly this to match channel 0. */
+  float              cfo_applied_norm;
 } srsran_ue_sync_nr_outcome_t;
 
 SRSRAN_API int prepare_resampler(resampler_kit * q, float resample_ratio, uint32_t pre_resample_sf_sz, uint32_t resample_worker_num);

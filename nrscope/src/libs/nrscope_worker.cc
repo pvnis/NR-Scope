@@ -1,5 +1,6 @@
 #include "nrscope/hdr/nrscope_worker.h"
 #include <chrono>
+#include <cmath>
 #include <semaphore>
 
 extern "C" int nr_sensing_tdd_period_slots; // nrscope/hdr/sensing/nr_ue_sensing.h
@@ -359,6 +360,28 @@ void NRScopeWorker::Run()
       decoders, their FFTs included. The slot still yields a result, empty, so
       the scheduler's per-slot bookkeeping is unchanged. */
     const bool uplink_only = slot_is_uplink_only(worker_state, outcome.sfn, slot.idx);
+
+    /* CFO of chains 1.. (see nof_cfo_channels in radio_nr.cc): the sync rotated chain 0 of
+      this subframe by cfo_applied_norm cycles per sample from its first sample. This slot is
+      the k-th of the subframe, so rotate it the same way and carry the phase the subframe had
+      reached at its start, exp(j 2 pi f k slot_sz), to match chain 0 sample for sample.
+      Nothing reads these chains in an uplink-only slot. */
+    if (worker_state.nof_antennas > 1 && !uplink_only && outcome.cfo_applied_norm != 0.0f) {
+      const float    f = outcome.cfo_applied_norm;
+      const uint32_t k = slot.idx % SRSRAN_NOF_SLOTS_PER_SF_NR(worker_state.args_t.ssb_scs);
+      const double   turns = (double)f * (double)k * (double)worker_state.slot_sz;
+      const double   ph    = 2.0 * M_PI * (turns - std::trunc(turns));
+      cf_t           c;
+      __real__ c = (float)std::cos(ph);
+      __imag__ c = (float)std::sin(ph);
+      for (uint32_t a = 1; a < worker_state.nof_antennas; a++) {
+        if (rx_buffer[a] == nullptr)
+          continue;
+        srsran_vec_apply_cfo(rx_buffer[a], f, rx_buffer[a], (int)worker_state.slot_sz);
+        if (k > 0)
+          srsran_vec_sc_prod_ccc(rx_buffer[a], c, rx_buffer[a], worker_state.slot_sz);
+      }
+    }
 
     std::thread sibs_thread;
     /* If sib1 is not found, we run the sibs_thread; if it's found, we skip. */
