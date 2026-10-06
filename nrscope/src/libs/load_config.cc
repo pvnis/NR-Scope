@@ -348,6 +348,8 @@ int load_config(std::vector<Radio>& radios, std::string file_name)
       }
     }
     flag("avg_vcomp", &nrscope_sensing_args.avg_vcomp);
+    if (sn["map_max_gap_ms"])
+      nrscope_sensing_args.map_max_gap_ms = sn["map_max_gap_ms"].as<double>();
   }
 
   if (config_yaml[setting_name]["push_to_google"]) {

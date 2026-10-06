@@ -39,6 +39,7 @@ void nrscope_sensing_default_args(nrscope_sensing_args_t* args)
   args->mirror_reject   = true;
   args->record_max_files = 100;
   args->avg_maps         = 1;
+  args->map_max_gap_ms   = 20.0;
 }
 
 struct nrscope_sensing_scratch_s {
@@ -90,6 +91,8 @@ struct nrscope_sensing_s {
       granted inside it. */
     bool                 armed;
     uint64_t             t_map_end;
+    /* Newest snapshot time seen on this stream, to spot a hole in the capture. */
+    uint64_t             t_last;
   } hist[NR_AOA_MAX_ANT][NR_SENSING_MAX_STREAMS];
   pthread_mutex_t        hist_lock; // creation only; each history has its own lock
   /* Receive chains feeding the rings, 1 .. NR_AOA_MAX_ANT. The chain indexes the
@@ -122,6 +125,9 @@ struct nrscope_sensing_s {
 
 static void* map_thread(void* arg);
 
+// map windows restarted because a stream's snapshots jumped by more than map_max_gap_ms
+static uint64_t nof_gap_restarts = 0;
+
 /* True when this stream's window is complete, i.e. its newest snapshot is a full
    window past where the last map ended, and claims the window so that only one worker
    builds that map. The window is nr_ue_sensing_window_s(), the same call the transform
@@ -143,6 +149,7 @@ static bool map_due(nrscope_sensing_t* s, const nr_sensing_history_t* hist, int 
   }
 
   const int64_t window_samples = (int64_t)(window_s * fs);
+  const int64_t gap_samples    = s->args.map_max_gap_ms > 0.0 ? (int64_t)(s->args.map_max_gap_ms * 1e-3 * fs) : 0;
 
   bool due = false;
   pthread_mutex_lock(&s->hist_lock);
@@ -154,10 +161,26 @@ static bool map_due(nrscope_sensing_t* s, const nr_sensing_history_t* hist, int 
       // the first snapshot of this stream opens the first window
       s->hist[aarx][i].armed     = true;
       s->hist[aarx][i].t_map_end = t_now;
+      s->hist[aarx][i].t_last    = t_now;
+    } else if (gap_samples > 0 && t_now > s->hist[aarx][i].t_last
+               && (int64_t)(t_now - s->hist[aarx][i].t_last) > gap_samples) {
+      /* A hole in the capture: the samples between were lost upstream, not just
+      unscheduled. The window that was filling would end up with a gap of that size in
+      it, or, as the 4-chain outages showed, with only the few snapshots on one side of
+      it. Start the next window after the gap instead. */
+      const double gap_ms = (double)(t_now - s->hist[aarx][i].t_last) / fs * 1e3;
+      s->hist[aarx][i].t_map_end = t_now;
+      s->hist[aarx][i].t_last    = t_now;
+      const uint64_t n = __sync_add_and_fetch(&nof_gap_restarts, 1);
+      if (n == 1 || n % 50 == 0)
+        LOG_W(NR_PHY, "sensing: %lu map window(s) restarted after a capture gap (latest %.0f ms on rx%d)\n",
+              (unsigned long)n, gap_ms, aarx);
     } else if ((int64_t)(t_now - s->hist[aarx][i].t_map_end) >= window_samples) {
       s->hist[aarx][i].t_map_end = t_now;
       due                        = true;
     }
+    if (t_now > s->hist[aarx][i].t_last)
+      s->hist[aarx][i].t_last = t_now;
     break;
   }
   pthread_mutex_unlock(&s->hist_lock);

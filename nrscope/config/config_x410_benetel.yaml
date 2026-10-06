@@ -133,6 +133,9 @@ sensing:
   # rate so a mover stays in its cell (no measurable gain yet on the lab runs).
   avg_maps: 1
   avg_vcomp: false
+  # A jump of more than this between a stream's snapshots means samples were lost upstream:
+  # the filling window is dropped and the next starts after the gap (0 = off).
+  map_max_gap_ms: 20
 
   # Parameter sweep (mode b): per map, rebuild the clutter removal from the base settings
   # above with ONE field varied from lo to hi in step, each written to its own dump

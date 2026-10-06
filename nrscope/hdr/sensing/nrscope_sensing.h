@@ -111,6 +111,11 @@ typedef struct {
   (lambda * f * dt) before averaging, so a mover stays in its cell. */
   int    avg_maps;
   bool   avg_vcomp;
+  /* map_max_gap_ms: a stream whose snapshots jump by more than this lost samples upstream
+  (capture outage, overflow). The window that was filling is discarded and the next one
+  starts after the gap, so a map is only built from a window without a hole and short
+  maps from a few snapshots cannot happen. 0 disables it. */
+  double map_max_gap_ms;
 } nrscope_sensing_args_t;
 
 /// Most maps avg_maps may average over
