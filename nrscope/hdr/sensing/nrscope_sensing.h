@@ -58,44 +58,22 @@ typedef struct {
   bool clutter_removal;
   /// --sensing-clutter-kernel: remove it with each snapshot's point spread function instead
   bool clutter_kernel;
-  /// --sensing-clutter-compare: also dump the map with only the direct path removed
-  bool clutter_compare;
   /// --sensing-antenna-avg: one map averaged over the Rx antennas, and the AoA
   bool antenna_avg;
   /// --sensing-layer-avg: one map averaged over the layers
   bool layer_avg;
-  /// --sensing-random-drop: break up the periodicity of the slow-time sampling
-  bool random_drop;
   /// --sensing-tdd-detect: run the TDD detector on each map
   bool tdd_detect;
   /// --sensing-music: also build each map with Doppler MUSIC
   bool music;
-  /* NR-Scope only, off: build the map from chain 0 minus the weighted sum of the other
-  chains, the weights chosen so the direct path cancels (a spatial null toward the gNB),
-  instead of averaging the chains' maps. M chains give M-1 weights, so from three chains
-  up the spare ones also take the strongest static clutter. The AoA and the direct-path
-  bin still come from the raw chains. Needs antenna_avg and at least two chains. See
-  nr_ue_sensing_spatial_null(). */
-  bool spatial_null;
   /* NR-Scope only, on: set aside as uncertain (verdict 3, not drawn, not localised) a
   detection whose mirror at -v on the same range is within NR_TDD_MIRROR_DB of it. Off
   keeps every detection the TDD detector accepts. */
   bool mirror_reject;
-  /* Parameter sweep (mode b): per map, re-run the clutter removal from copies of the
-  base parameters with one field varied from sweep_lo to sweep_hi in sweep_step, each
-  dumped to <dump>.<field>_<value>.csv. sweep_param is the field name
-  (nr_sweep_param_from_str: "trend_degree", "max_paths", "kernel_half_span",
-  "static_min", "snr_min", "min_sep_bins", "los_first_db", "los_norm", "los_max_corr_db",
-  "comb_remove", "comb_harmonic", "comb_tdd_multiple", "clutter_mode"); empty or "none"
-  disables it. The main map/detector/AoA pipeline is unchanged. */
-  char   sweep_param[32];
-  double sweep_lo;
-  double sweep_hi;
-  double sweep_step;
   /* test_record_samples: record-only mode. Write one file per window holding every
   (chain, layer) of its slow-time samples to <dump>.rec.<NNNNN>.csv, up to
-  record_max_files, and skip the whole live map pipeline (range_doppler, spatial null,
-  detector, AoA, map dump). A Python reprocessor (scripts/sensing/replay_samples.py)
+  record_max_files, and skip the whole live map pipeline (range_doppler, detector, AoA,
+  map dump). A Python reprocessor (scripts/sensing/replay_samples.py)
   rebuilds the maps offline and sweeps any parameter without a rebuild or recapture. */
   bool   test_record_samples;
   int    record_max_files;

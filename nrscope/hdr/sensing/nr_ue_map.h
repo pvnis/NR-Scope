@@ -596,8 +596,8 @@ holds, and limiting it keeps the cost of a path independent of the map size. */
  compile-time DEFAULTS and, where an array is sized by one (NR_CLUTTER_MAX_PATHS,
  NR_CLUTTER_MAX_KERNELS, NR_COMB_MAX_HARMONIC, NR_CLUTTER_SLOW_TREND_MAX), as the
  hard CAPACITY. This struct carries the ACTIVE value nr_ue_sensing_range_doppler()
- uses, so one build can run at different settings and be swept in a single run (see
- nr_sensing_params_sweep()). Every field must stay within its capacity; the transform
+ uses, so one build can run at different settings. Every field must stay within its
+ capacity; the transform
  asserts the ones that size arrays.
 --------------------------------------------------------------------------- */
 typedef struct {
@@ -635,42 +635,6 @@ static inline void nr_sensing_params_default(nr_sensing_params_t *p)
   p->comb_tdd_multiple = NR_COMB_TDD_MULTIPLE;
   p->comb_power_iters  = NR_COMB_POWER_ITERS;
 }
-
-/// Most param sets one run may sweep over; also the width of the sets[]/labels[] a caller passes.
-#define NR_SWEEP_MAX_SETS 16
-
-/// Which single field a one-factor sweep varies.
-typedef enum {
-  NR_SWEEP_NONE = 0,
-  NR_SWEEP_CLUTTER_MODE,      ///< lo..hi over {0=NONE,1=MEAN,2=KERNEL}
-  NR_SWEEP_MAX_PATHS,
-  NR_SWEEP_TREND_DEGREE,
-  NR_SWEEP_KERNEL_HALF_SPAN,
-  NR_SWEEP_STATIC_MIN,
-  NR_SWEEP_SNR_MIN,
-  NR_SWEEP_MIN_SEP_BINS,
-  NR_SWEEP_LOS_FIRST_DB,
-  NR_SWEEP_LOS_NORM,          ///< lo..hi over {0,1}
-  NR_SWEEP_LOS_MAX_CORR_DB,
-  NR_SWEEP_COMB_REMOVE,       ///< lo..hi over {0,1}
-  NR_SWEEP_COMB_HARMONIC,
-  NR_SWEEP_COMB_TDD_MULTIPLE,
-} nr_sweep_param_t;
-
-/// Parse a sweep field name ("trend_degree", ...), NR_SWEEP_NONE if it matches none.
-nr_sweep_param_t nr_sweep_param_from_str(const char *s);
-
-/* Build a one-factor sweep: copies of base with field `which` set to lo, lo+step, ...
- up to hi inclusive, each clamped to that field's valid range. Writes at most
- NR_SWEEP_MAX_SETS sets to sets[] with a short label ("trend_degree=2") per set in
- labels[], and returns the count. which == NR_SWEEP_NONE (or step <= 0) returns 0. */
-int nr_sensing_params_sweep(const nr_sensing_params_t *base,
-                            nr_sweep_param_t which,
-                            double lo,
-                            double hi,
-                            double step,
-                            nr_sensing_params_t sets[NR_SWEEP_MAX_SETS],
-                            char labels[NR_SWEEP_MAX_SETS][48]);
 
 /* Delay response (IDFT) of one grant's Hann window, sampled at u = b - u0.
 
@@ -815,102 +779,5 @@ int nr_ue_sensing_dump_snapshots_tagged(const char *path,
                                         int aarx,
                                         bool truncate,
                                         bool header);
-
-/* SPATIAL NULL toward the gNB, over M Rx chains.
-
-Every path reaches the chains with a phase (and gain) difference set by the direction it
-comes from. A direction's paths therefore all satisfy h_a = c_a h_0 for one complex c_a
-per chain, and
-
-    y = h_0 - sum_{a=1}^{M-1} w_a h_a
-
-cancels that direction when sum_a w_a c_a = 1, while paths from other directions, which
-have their own c', survive with gain |1 - sum_a w_a c'_a|. M chains give M-1 weights, so
-M-1 directions can be cancelled at once.
-
-The weights are fitted by least squares on the static (slow-time mean) profile m_a[b],
-not on the snapshots: a mover averages out of it over the window, so it cannot pull the
-null towards itself, and only the direct path and the static clutter are left to aim at.
-Minimising sum_{b in B} |m_0[b] - sum_a w_a m_a[b]|^2 gives the normal equations
-
-    G w = p,  G[c][a] = sum_b conj(m_c[b]) m_a[b],  p[c] = sum_b conj(m_c[b]) m_0[b]
-
-which at M = 2 is the scalar w = <m1, m0> / <m1, m1> this started as.
-
-WHICH BINS ARE FITTED ON (B). The direct path's mainlobe always, and at M = 2 that alone:
-spread over the whole profile, a single weight would null whatever mixture of directions
-holds the most static energy, which is not a direction at all. From M = 3 the weights are
-free to take the static clutter as well, so other bins may join B.
-
-They are not chosen by energy, though, but by whether what the bin holds stays put. A bin
-carrying a mover appears in the static profile too, because the slow-time mean does not
-remove a mover, it leaks it: 40 to 50 dB down for a walking pace over a tenth of a second,
-yet carrying the mover's own direction. That leak sits far above the loading below, so
-least squares with a weight to spare would aim one straight at it and cancel the mover
-outright, every snapshot of it, the null being one spatial filter applied to them all. A
-bin's static share separates the two cases: |mean|^2 over mean |h|^2 is near 1 where the
-scene is still and small where the energy is a mover (0.01 for the leak above). Only bins
-above NR_SENSING_NULL_STATIC_MIN join B, which is also why the direct path is pinned into
-it rather than left to qualify on its own.
-
-CONDITIONING. A scene with one static direction makes m_a[b] = c_a s[b] for every chain,
-so G has rank 1 whatever M is, and the M-1 weights are not determined by it. G is
-therefore loaded by NR_SENSING_NULL_LOADING of its mean diagonal before the solve. Where
-the scene really holds M-1 directions the loading is negligible; where it holds fewer,
-the loaded solve returns the smallest weights that still null what is there, rather than
-a large arbitrary vector in the undetermined directions. The null degrades to one
-direction instead of breaking.
-
-h is the chains' histories, chain 0 first, n_ant of them. out receives chain 0's history
-with each snapshot that EVERY other chain also holds (same symbol: same t_sample and
-layer) replaced by y above, and every other snapshot of the stream marked with ports 0 so
-no gather takes it. out owns a new ring and lock, to be freed by the caller. res reports
-the weights and how deep the null went: los_db is the direct path's static power after
-over before, static_db the same over the whole profile. Returns false, out untouched,
-when no snapshot is held by every chain or the loaded system is still singular. */
-
-/// Fraction of its mean diagonal the Gram matrix is loaded by before the solve
-#define NR_SENSING_NULL_LOADING 1e-6
-
-/* Static share a bin needs before a weight may be aimed at it, beyond the direct path's
-mainlobe, which is always fitted on. Half: a bin whose energy is more static than not.
-The two populations are nowhere near the boundary (a still bin sits at 0.9 and up, a
-mover's leak at a few hundredths), so this only has to fall between them. */
-#define NR_SENSING_NULL_STATIC_MIN 0.5
-
-typedef struct {
-  /* The weights, w[a - 1] multiplying chain a. n_w = n_ant - 1 of them, so w[0] alone
-  is the scalar of the two-chain null. */
-  cf_t w[NR_SENSING_MAX_RX - 1];
-  int n_w;
-  /// the direct path's bin, which the weights are fitted around at n_w = 1
-  int u0;
-  /// bins of the static profile the weights were fitted on
-  int n_fit_bins;
-  /// static power around the direct path after the null over before, dB
-  double los_db;
-  /// static power of the whole profile after over before, dB
-  double static_db;
-  /// snapshots of the stream on chain 0, and how many of them every other chain also held
-  int n0;
-  int n_pairs;
-  /* Health per chain, to tell a chain that does not see the scene from a scene that has
-  no single direction to null. p_db[a]: chain a's mean power over chain 0's, every bin and
-  paired snapshot, near 0 dB for like antennas and chains and 0 by construction at a = 0.
-  static_share[a]: the share of that chain's power which is static (|slow-time mean|^2
-  over mean |h|^2), close to 1 for a still scene that stands well above the noise, near 0
-  for a chain that holds noise only. */
-  double p_db[NR_SENSING_MAX_RX];
-  double static_share[NR_SENSING_MAX_RX];
-} nr_sensing_null_t;
-
-/// aarx of a map built from the nulled chains, as -1 marks the average of them
-#define NR_SENSING_AARX_NULL (-2)
-
-bool nr_ue_sensing_spatial_null(const nr_sensing_history_t *h,
-                                int n_ant,
-                                const nr_sensing_stream_t *st,
-                                nr_sensing_history_t *out,
-                                nr_sensing_null_t *res);
 
 #endif // __NR_UE_MAP__H__

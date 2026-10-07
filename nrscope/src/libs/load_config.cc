@@ -313,27 +313,11 @@ int load_config(std::vector<Radio>& radios, std::string file_name)
     }
     flag("clutter_removal", &nrscope_sensing_args.clutter_removal);
     flag("clutter_kernel", &nrscope_sensing_args.clutter_kernel);
-    flag("clutter_compare", &nrscope_sensing_args.clutter_compare);
     flag("antenna_avg", &nrscope_sensing_args.antenna_avg);
     flag("layer_avg", &nrscope_sensing_args.layer_avg);
-    flag("random_drop", &nrscope_sensing_args.random_drop);
     flag("tdd_detect", &nrscope_sensing_args.tdd_detect);
     flag("music", &nrscope_sensing_args.music);
-    flag("spatial_null", &nrscope_sensing_args.spatial_null);
     flag("mirror_reject", &nrscope_sensing_args.mirror_reject);
-
-    /* Parameter sweep (mode b). sweep.param names the clutter field to vary, lo/hi/step
-    its range; empty or absent disables it. See nrscope_sensing_args_t.sweep_param. */
-    if (sn["sweep"]) {
-      const YAML::Node sw = sn["sweep"];
-      if (sw["param"]) {
-        snprintf(nrscope_sensing_args.sweep_param, sizeof(nrscope_sensing_args.sweep_param), "%s",
-                 sw["param"].as<std::string>().c_str());
-      }
-      if (sw["lo"])   nrscope_sensing_args.sweep_lo   = sw["lo"].as<double>();
-      if (sw["hi"])   nrscope_sensing_args.sweep_hi   = sw["hi"].as<double>();
-      if (sw["step"]) nrscope_sensing_args.sweep_step = sw["step"].as<double>();
-    }
 
     flag("test_record_samples", &nrscope_sensing_args.test_record_samples);
     if (sn["record_max_files"])

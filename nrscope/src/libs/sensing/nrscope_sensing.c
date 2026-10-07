@@ -704,9 +704,8 @@ static void nr_ue_sensing_map_task(void *arg)
                                        : t->args->clutter_kernel ? NR_CLUTTER_KERNEL
                                                                        : NR_CLUTTER_MEAN;
 
-  /* The clutter-removal parameters for the real pipeline below: compile-time defaults
-  with the clutter mode set from the runtime switches above. The parameter sweep
-  (mode b, at the end of this function) re-runs the map from copies of this base. */
+  /* The clutter-removal parameters: compile-time defaults with the clutter mode set from
+  the runtime switches above. */
   nr_sensing_params_t base_params;
   nr_sensing_params_default(&base_params);
   base_params.clutter_mode = clutter;
@@ -783,76 +782,16 @@ static void nr_ue_sensing_map_task(void *arg)
   int n_combined = 0;
   int n = 0;
 
-  /* Runtime parameter spatial_null: the map from chain 0 minus the weighted sum of the
-  other chains, the weights cancelling the direct path's direction and, from three chains
-  up, the strongest static clutter with it, instead of the average of the chains' maps;
-  see nr_ue_sensing_spatial_null(). Built as a one-chain task on the nulled history, so
-  it goes through the same clutter removal and transform as any map, and its slow-time
-  samples are what the detector runs on (det below). The raw chains are still
-  transformed, into a map that is thrown away, for what has to come from them: the AoA,
-  which compares the chains and would find no direct path left in the nulled one, the
-  MUSIC observations, and bin_los, the direct path the excess ranges are measured from. */
-  const bool null = t->args->spatial_null && t->n_ant >= 2;
-  nr_sensing_map_task_t *tn = NULL;
-  nr_sensing_slowtime_t slow_null = {0};
-  nr_sensing_null_t null_res;
-  if (null) {
-    tn = malloc_or_fail(sizeof(*tn) + sizeof(tn->snap[0]));
-    memcpy(tn, t, sizeof(*t));
-    tn->n_ant = 1;
-    if (!nr_ue_sensing_spatial_null(t->snap, t->n_ant, &t->stream, &tn->snap[0], &null_res)) {
-      LOG_W(NR_PHY, "sensing: spatial null found no symbol on every chain, map averaged instead\n");
-      free(tn);
-      tn = NULL;
-    }
-  }
   /* sensing.avg_maps: build on the stream's averaging grid; see nr_ue_sensing_avg_apply(). */
-  const int avg_aarx = tn != NULL ? NR_SENSING_AARX_NULL : t->aarx;
-  const int avg_nf = nr_ue_sensing_avg_grid(t->args, &t->stream, avg_aarx);
-  if (tn != NULL) {
-    slow_null.t_s = malloc_or_fail((size_t)tn->snap[0].depth * sizeof(*slow_null.t_s));
-    slow_null.h_re = malloc_or_fail((size_t)tn->snap[0].depth * NR_SENSING_MAP_MAX_BINS_RANGE * sizeof(*slow_null.h_re));
-    slow_null.h_im = malloc_or_fail((size_t)tn->snap[0].depth * NR_SENSING_MAP_MAX_BINS_RANGE * sizeof(*slow_null.h_im));
-    n = nr_ue_sensing_task_map(tn, &base_params, avg_nf, &t->map, &slow_null, 1, NULL, NULL);
-    if (n > 0) {
-      nr_sensing_map_t *raw = malloc_or_fail(sizeof(*raw));
-      if (nr_ue_sensing_task_map(t, &base_params, avg_nf, raw, slow, n_slow, &n_combined, obs) > 0)
-        t->map.bin_los = raw->bin_los;
-      free(raw);
-      /* One weight per chain behind chain 0, and one power-and-static-share pair per
-        chain, so a chain that does not see the scene can be told from a scene with no
-        single direction to null whatever the chain count is. */
-      char w_str[160] = {0}, rx_str[256] = {0};
-      for (int a = 0, off = 0; a < null_res.n_w && off < (int)sizeof(w_str); a++)
-        off += snprintf(w_str + off, sizeof(w_str) - off, "%s%.3f%+.3fj",
-                        a > 0 ? " " : "", crealf(null_res.w[a]), cimagf(null_res.w[a]));
-      for (int a = 0, off = 0; a < t->n_ant && off < (int)sizeof(rx_str); a++)
-        off += snprintf(rx_str + off, sizeof(rx_str) - off, " rx%d %+.1f dB static %.2f;",
-                        a, null_res.p_db[a], null_res.static_share[a]);
-      LOG_I(NR_PHY,
-            "sensing: spatial null over %d chains, w [%s] fitted on %d bins around bin %d: "
-            "direct path %.1f dB, static scene %.1f dB, %d of %d symbols on every chain."
-            " Against rx0:%s\n",
-            t->n_ant,
-            w_str,
-            null_res.n_fit_bins,
-            null_res.u0,
-            null_res.los_db,
-            null_res.static_db,
-            null_res.n_pairs,
-            null_res.n0,
-            rx_str);
-    }
-  } else {
-    n = nr_ue_sensing_task_map(t, &base_params, avg_nf, &t->map, slow, n_slow, &n_combined, obs);
-  }
+  const int avg_nf = nr_ue_sensing_avg_grid(t->args, &t->stream, t->aarx);
+  n = nr_ue_sensing_task_map(t, &base_params, avg_nf, &t->map, slow, n_slow, &n_combined, obs);
   // the slow-time samples the map was built from, which the detector has to see too
-  const nr_sensing_slowtime_t *det = tn != NULL ? &slow_null : &slow[0];
+  const nr_sensing_slowtime_t *det = &slow[0];
 
   /* sensing.avg_maps: the map from here on is the mean over the stream's last maps. The
   TDD detector reads det, this window's slow-time samples, so it is not affected; the dump
   and, with tdd_detect off, the AoA's own CFAR are. */
-  const int n_avg = n > 0 ? nr_ue_sensing_avg_apply(t->args, &t->stream, avg_aarx, &t->map) : 1;
+  const int n_avg = n > 0 ? nr_ue_sensing_avg_apply(t->args, &t->stream, t->aarx, &t->map) : 1;
   if (n_avg > 1)
     LOG_D(NR_PHY, "sensing: map %d.%d averaged over %d maps\n", t->frame, t->slot, n_avg);
 
@@ -1090,7 +1029,7 @@ static void nr_ue_sensing_map_task(void *arg)
     /* aarx -2 marks a nulled map, as -1 marks an average: the plot labels it, and nothing
     else in a dump changes */
     nr_ue_sensing_dump_map(t->args->dump[0] ? t->args->dump : NULL, t->frame, t->slot,
-                           tn != NULL ? NR_SENSING_AARX_NULL : t->aarx, &t->map, markers, n_markers, aoa_out, n_aoa);
+                           t->aarx, &t->map, markers, n_markers, aoa_out, n_aoa);
 
     /* The MUSIC map of the same window, on the same grid, written to its own file one line
     per map in the same order as the DFT dump, so line i of both files is the same window.
@@ -1125,56 +1064,6 @@ static void nr_ue_sensing_map_task(void *arg)
       snprintf(music_path, sizeof(music_path), "%s.music.csv", t->args->dump);
       nr_ue_sensing_dump_map(music_path, t->frame, t->slot, t->aarx, map_music, markers, n_markers, NULL, 0);
       free(map_music);
-    }
-
-    /* Runtime parameter --sensing-clutter-compare: the same map with the kernel fit
-    limited to the direct path, built from the same snapshots, to <sensing-dump>.L1.csv.
-    Line i of both files is the same window, so --index i compares them. No detector
-    or AoA runs on it. */
-    if (t->args->clutter_compare && clutter == NR_CLUTTER_KERNEL && t->args->dump[0] != 0) {
-      nr_sensing_params_t p_l1 = base_params;
-      p_l1.max_paths = 1;
-      nr_sensing_map_t *map_l1 = malloc_or_fail(sizeof(*map_l1));
-      if (nr_ue_sensing_task_map(t, &p_l1, 0, map_l1, NULL, 0, NULL, NULL) > 0) {
-        char l1_path[512];
-        snprintf(l1_path, sizeof(l1_path), "%s.L1.csv", t->args->dump);
-        nr_ue_sensing_dump_map(l1_path, t->frame, t->slot, t->aarx, map_l1, NULL, 0, NULL, 0);
-      }
-      free(map_l1);
-    }
-
-    /* Parameter sweep (mode b): re-run the map from copies of base_params with one field
-    varied across --sensing-sweep-param's range, each to its own dump
-    <sensing-dump>.<field>_<value>.csv, line i the same window as the main dump. Map only,
-    no detector/AoA/MUSIC, and on the same history the main map used (nulled when the
-    spatial null is on), so the sweep is directly comparable to it. A peak-over-floor
-    metric per set is logged so the sweep is self-scoring. The real pipeline is untouched. */
-    if (t->args->dump[0] != 0) {
-      const nr_sweep_param_t which = nr_sweep_param_from_str(t->args->sweep_param);
-      if (which != NR_SWEEP_NONE) {
-        const nr_sensing_map_task_t *ts = tn != NULL ? tn : t;
-        nr_sensing_params_t sets[NR_SWEEP_MAX_SETS];
-        char labels[NR_SWEEP_MAX_SETS][48];
-        const int n_sets = nr_sensing_params_sweep(&base_params, which, t->args->sweep_lo,
-                                                   t->args->sweep_hi, t->args->sweep_step, sets, labels);
-        nr_sensing_map_t *map_s = malloc_or_fail(sizeof(*map_s));
-        for (int sp = 0; sp < n_sets; sp++) {
-          if (nr_ue_sensing_task_map(ts, &sets[sp], 0, map_s, NULL, 0, NULL, NULL) <= 0)
-            continue;
-          /* The map is normalised to its own noise floor, so the peak value is its SNR. */
-          double peak = 0.0;
-          const int ncell = map_s->n_bins * map_s->n_freq;
-          for (int i = 0; i < ncell; i++)
-            if (map_s->power[i] > peak)
-              peak = map_s->power[i];
-          char sweep_path[512];
-          snprintf(sweep_path, sizeof(sweep_path), "%s.%s.csv", t->args->dump, labels[sp]);
-          nr_ue_sensing_dump_map(sweep_path, t->frame, t->slot, t->aarx, map_s, NULL, 0, NULL, 0);
-          LOG_I(NR_PHY, "SENSING SWEEP %d.%d %s: peak %.1f dB over floor\n", t->frame, t->slot,
-                labels[sp], (peak > 0.0) ? 10.0 * log10(peak) : 0.0);
-        }
-        free(map_s);
-      }
     }
 
     /* Slots the window spans. Not the slots that carried DM-RS: PDSCH is only scheduled
@@ -1212,14 +1101,6 @@ static void nr_ue_sensing_map_task(void *arg)
             t->n_ant * t->n_layers,
             t->n_ant,
             t->n_layers);
-  }
-  if (tn != NULL) {
-    free(slow_null.t_s);
-    free(slow_null.h_re);
-    free(slow_null.h_im);
-    free(tn->snap[0].ring);
-    pthread_mutex_destroy(&tn->snap[0].lock);
-    free(tn);
   }
   for (int a = 0; a < n_slow; a++) {
     free(slow[a].t_s);
@@ -1543,7 +1424,7 @@ int nrscope_sensing_process_grant(nrscope_sensing_t*          s,
     nr_sensing_history_t* hist = hist_of(s, (int)aarx, ports, layer);
     const int idft = nr_ue_sensing_slot_profile(NSYMB, (int)n_sc_grid, H_grid, V_grid, t_sample, hist,
                                                 (nr_sensing_stream_t){.ports = ports, .layer = (uint8_t)layer},
-                                                slot_abs, s->args.random_drop, (uint16_t)~dmrs_mask, &lats[layer], &used);
+                                                slot_abs, (uint16_t)~dmrs_mask, &lats[layer], &used);
     if (idft > 0) {
       n_pushed += __builtin_popcount(used);
       maybe_map(s, (int)aarx, ports, layer, lay.n_ports, &lats[layer], sfn, slot_idx, t_newest);

@@ -14,15 +14,12 @@ kernel CLEAN), rank-1 comb removal, the non-uniform Doppler DFT, and the noise-f
 normalisation. Per-chain maps are averaged exactly as nr_ue_sensing_task_map() does.
 
 A bare run (no --sweep) reproduces exactly the map normal mode would produce with the
-same parameters, except that it does NOT apply the spatial null or the AoA: it is the
-antenna- and layer-averaged clutter-removed range-Doppler map. To compare it against a
-live map2d.csv, run the normal pipeline with spatial_null: false (the AoA only adds the
-marker/angle payload, it does not change the power map).
+same parameters, without the AoA: the antenna- and layer-averaged clutter-removed
+range-Doppler map (the AoA only adds the marker/angle payload, it does not change it).
 
 Detection is --clutter-map (C below); without it the maps are written without markers.
 
-NOT ported (use the live pipeline, or extend here): the spatial null across chains,
-AoA/MUSIC, and alignment (alignment is applied in the capture path
+NOT ported (use the live pipeline, or extend here): AoA/MUSIC, and alignment (alignment is applied in the capture path
 before these samples are stored, so it cannot be swept from a recording).
 
 Each produced map is written one line per input file to <out>/<label>.csv (default
@@ -939,8 +936,7 @@ def main():
         args.out_dir = os.path.join(os.path.dirname(files[0]) or ".", "replay")
     args.out_dir = os.path.expanduser(os.path.expandvars(args.out_dir))
     os.makedirs(args.out_dir, exist_ok=True)
-    print(f"writing maps to {args.out_dir}/ (same pipeline as normal mode, without the "
-          f"spatial null and AoA)")
+    print(f"writing maps to {args.out_dir}/ (same pipeline as normal mode, without the AoA)")
 
     suffix = ""
     if args.avg_maps > 1:
