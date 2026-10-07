@@ -77,6 +77,16 @@ DEFAULTS = dict(
     comb_power_iters=24,
     sliding_la_ms=0.0,    # sliding ECA (ACRF-CS) averaging window, ms; 0 = off (slow trend used)
     sliding_ls_ms=0.5,    # its update block, ms; one slot pushes the block side peaks to 2 kHz
+    # --kfactor analysis (fluctuation statistics per range bin over seconds)
+    k_window_s=2.0,       # analysis window, s; a person standing still needs seconds to show
+    k_hop_s=0.5,          # step between windows, s
+    k_thresh_db=3.0,      # flag a bin when its (floor-corrected) Rician K is below this
+    k_margin_db=6.0,      # ...and its slow fluctuation is this far above the window's floor (25th pct of bins)
+    k_common_norm=1,      # remove a common complex gain per snapshot first (the slow common drift)
+    k_floor_corr=1,       # use the slow (lagged-correlation) fluctuation power, which the floor barely reaches
+    k_lag_ms=100.0,       # lag of that correlation; the floor decorrelates in ~100 ms, a swaying body
+                          # does not (0: next snapshot)
+    k_detrend=1,          # remove a linear drift per bin within the window
 )
 
 # field -> (lo, hi) hard range, for clamping a swept value (mirrors nr_sweep_apply)
@@ -86,8 +96,10 @@ RANGE = dict(
     min_sep_bins=(1, None), los_first_db=(0.0, None), comb_remove=(0, 1),
     comb_harmonic=(1, COMB_MAX_HARMONIC), comb_tdd_multiple=(1, None),
     sliding_la_ms=(0.0, None), sliding_ls_ms=(0.1, None),
+    k_window_s=(0.05, None), k_hop_s=(0.01, None), k_thresh_db=(None, None), k_margin_db=(None, None),
+    k_common_norm=(0, 1), k_floor_corr=(0, 1), k_detrend=(0, 1), k_lag_ms=(0.0, None),
 )
-INT_FIELDS = {"clutter_mode", "max_paths", "trend_degree", "kernel_half_span",
+INT_FIELDS = {"k_common_norm", "k_floor_corr", "k_detrend", "clutter_mode", "max_paths", "trend_degree", "kernel_half_span",
               "min_sep_bins", "comb_remove", "comb_harmonic", "comb_tdd_multiple",
               "comb_power_iters"}
 
@@ -485,6 +497,139 @@ def write_map_line(fh, idx, m):
              ",".join(f"{x:g}" for x in list(power) + mk) + "\n")
 
 
+# ---------------------------------------------------------------- K-factor analysis
+
+def load_run(files):
+    """Every recorded snapshot of a run per (aarx, layer), time ordered, de-duplicated and
+    normalised to the widest grant, so analysis windows can span consecutive recordings."""
+    acc, m_per_bin = {}, None
+    for path in files:
+        g, _, _ = parse_rec(path)
+        for k, snaps in g.items():
+            acc.setdefault(k, []).extend(snaps)
+            if m_per_bin is None and snaps:
+                s0 = snaps[0]
+                m_per_bin = C / (s0["idft"] * s0["k_step"] * s0["scs"])
+    out = {}
+    for k, snaps in acc.items():
+        t = np.array([x["t_abs"] for x in snaps])
+        order = np.argsort(t, kind="stable")
+        keep = np.concatenate([[True], np.diff(t[order]) > 1e-9])
+        idx = order[keep]
+        npil = np.array([snaps[i]["n_pilots"] for i in idx], dtype=float)
+        H = np.stack([snaps[i]["h"] for i in idx]) * (npil.max() / npil)[:, None]
+        out[k] = dict(t=t[idx], h=H)
+    return out, m_per_bin
+
+
+def kfactor_window(H, t, prm):
+    """Per-bin powers of one chain over one analysis window: static |mean|^2, total
+    fluctuation, and its slow (lag-1 correlated) part.
+
+    Common gain: over seconds every bin wanders together (gain and phase of the whole
+    snapshot, several rad in 2 s on the lab runs), which makes walls look as alive as a
+    person. A complex gain per snapshot, fitted against the static profile and refined a
+    few times, takes it out; a single mover barely moves that fit since the static scene
+    dominates it. Slow part: |mean(r(t+lag) conj(r(t)))|. The floor decorrelates over ~100 ms
+    and mostly averages out of it, while a body's fluctuation, correlated over longer, stays."""
+    if prm["k_common_norm"]:
+        ref = H.mean(0)
+        for _ in range(3):
+            g = (H @ ref.conj()) / np.vdot(ref, ref).real
+            g[np.abs(g) < 1e-12] = 1.0
+            Hn = H / g[:, None]
+            ref = Hn.mean(0)
+        H = Hn
+    mu = H.mean(0)
+    r = H - mu
+    if prm["k_detrend"]:
+        A = np.vstack([np.ones_like(t), t - t.mean()]).T
+        r = r - A @ np.linalg.lstsq(A, r, rcond=None)[0]
+    p_tot = (np.abs(r) ** 2).mean(0)
+    lag = prm.get("k_lag_ms", 0.0) * 1e-3
+    if lag > 0:
+        # pairs about `lag` apart; measured on the lab runs the floor keeps ~20% correlation
+        # for tens of ms and ~5% at 100-200 ms, so a lag of that order strips far more of it
+        # than the next snapshot does
+        j = np.searchsorted(t, t + lag)
+        i = np.nonzero(j < len(t))[0]
+        j = j[i]
+        ok = np.abs(t[j] - t[i] - lag) < max(0.25e-3, 0.1 * lag)
+        i, j = i[ok], j[ok]
+    else:
+        i, j = np.arange(len(t) - 1), np.arange(1, len(t))
+    p_slow = np.abs((r[j] * r[i].conj()).mean(0)) if len(i) else np.zeros_like(p_tot)
+    return np.abs(mu) ** 2, p_tot, p_slow
+
+
+def kfactor_run(data, m_per_bin, prm, label, out_dir):
+    """Sliding K-factor analysis over a whole run: per window and range bin, chains summed in
+    power. Writes <label>.kfactor.csv and a time x range picture, prints a summary."""
+    W, hop = prm["k_window_s"], prm["k_hop_s"]
+    t0 = min(d["t"][0] for d in data.values())
+    t1 = max(d["t"][-1] for d in data.values())
+    rows, times, kmap, fmap = [], [], [], []
+    for start in np.arange(t0, t1 - W + 1e-9, hop):
+        S = Pt = Ps = 0.0
+        n_used = 0
+        for d in data.values():
+            sel = (d["t"] >= start) & (d["t"] < start + W)
+            if sel.sum() < 200:
+                continue
+            a, b, c = kfactor_window(d["h"][sel], d["t"][sel], prm)
+            S, Pt, Ps, n_used = S + a, Pt + b, Ps + c, n_used + 1
+        if n_used == 0:
+            continue
+        los = S.max()
+        fl = Ps if prm["k_floor_corr"] else Pt
+        db = lambda x: 10.0 * np.log10(np.maximum(x, 1e-30))
+        static_db, fl_db = db(S / los), db(fl / los)
+        k_raw, k_db = db(S / Pt), db(S / fl)
+        # what "significant" fluctuation means is relative to this window's floor: the white
+        # floor keeps a small lag-1 correlation (~0.05 of its power) that an absolute level
+        # would mistake for slow motion, and the floor itself drifts over a run
+        floor_db = np.percentile(fl_db, 25)
+        flag = (fl_db >= floor_db + prm["k_margin_db"]) & (k_db < prm["k_thresh_db"])
+        tc = start + 0.5 * W - t0
+        times.append(tc); kmap.append(k_db); fmap.append(flag)
+        for b in range(len(S)):
+            rows.append((tc, b, b * m_per_bin, static_db[b], k_raw[b], k_db[b], Ps[b] / Pt[b], fl_db[b],
+                         fl_db[b] - floor_db, int(flag[b])))
+    if not rows:
+        print(f"{label}: no window long enough")
+        return
+    path = os.path.join(out_dir, f"{label}.kfactor.csv")
+    with open(path, "w") as fh:
+        fh.write("t_s,bin,range_m,static_db,k_raw_db,k_db,lag1_coh,fluct_db,fluct_over_floor_db,flag\n")
+        for r in rows:
+            fh.write(f"{r[0]:.3f},{r[1]},{r[2]:.2f},{r[3]:.2f},{r[4]:.2f},{r[5]:.2f},{r[6]:.3f},{r[7]:.2f},"
+                     f"{r[8]:.2f},{r[9]}\n")
+    K, F = np.array(kmap), np.array(fmap)
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(figsize=(10, 5))
+        nb = K.shape[1]
+        im = ax.imshow(np.clip(K.T, -10, 20), aspect="auto", origin="lower", cmap="viridis",
+                       extent=[times[0] - hop / 2, times[-1] + hop / 2, -0.5 * m_per_bin, (nb - 0.5) * m_per_bin])
+        ti, bi = np.nonzero(F)
+        ax.scatter(np.array(times)[ti], bi * m_per_bin, s=8, c="red", label=f"K < {prm['k_thresh_db']:g} dB")
+        ax.set_xlabel("time in run (s)"); ax.set_ylabel("bistatic path length (m)")
+        ax.set_title(f"{label}: Rician K per range bin, {W:g} s windows"); ax.legend(loc="upper right")
+        fig.colorbar(im, ax=ax, label="K (dB)")
+        fig.savefig(os.path.join(out_dir, f"{label}.kfactor.png"), dpi=110, bbox_inches="tight")
+        plt.close(fig)
+    except ImportError:
+        pass
+    print(f"{label:28s}  {len(times)} windows of {W:g} s | flagged cells {F.mean()*100:.1f}% | "
+          f"windows with a flag {np.mean(F.any(1))*100:.0f}%")
+    for tc, f in zip(times, F):
+        if f.any():
+            rng = ", ".join(f"{b*m_per_bin:.0f}" for b in np.nonzero(f)[0][:8])
+            print(f"    t {tc:6.2f} s: {f.sum():2d} bin(s) at {rng}{' ...' if f.sum() > 8 else ''} m")
+
+
 # ---------------------------------------------------------------- detection
 
 def run_detector(m, mirror, cfg=None):
@@ -548,6 +693,9 @@ def main():
                     help="detector replica power-drop requirement, Eq. (23) (C default 0.2)")
     ap.add_argument("--no-mirror-reject", action="store_true",
                     help="keep targets with an equally strong mirror at -v (mirror_reject: false)")
+    ap.add_argument("--kfactor", action="store_true",
+                    help="instead of maps: per-range-bin Rician K / slow fluctuation over sliding "
+                         "windows of seconds (k_* parameters, sweepable), to <label>.kfactor.csv/.png")
     ap.add_argument("--vcomp", action="store_true",
                     help="with --avg-maps: shift each Doppler column by its path-length "
                          "rate before averaging, so movers stay aligned")
@@ -595,6 +743,12 @@ def main():
         args.out_dir = os.path.join(os.path.dirname(files[0]) or ".", "replay")
     args.out_dir = os.path.expanduser(os.path.expandvars(args.out_dir))
     os.makedirs(args.out_dir, exist_ok=True)
+    if args.kfactor:
+        data, m_per_bin = load_run(files)
+        print(f"K-factor analysis of {len(files)} recordings, chains {sorted(data)}, to {args.out_dir}/")
+        for label, prm in sets:
+            kfactor_run(data, m_per_bin, prm, label, args.out_dir)
+        return 0
     print(f"writing maps to {args.out_dir}/ (same pipeline as normal mode, without the "
           f"spatial null and AoA)")
 
