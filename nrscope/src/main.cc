@@ -3,6 +3,7 @@
 #include <string>
 #include <unistd.h>
 #include <csignal>
+#include <sched.h>
 #include <thread>
 
 #include "nrscope/hdr/nrscope_def.h"
@@ -63,6 +64,30 @@ int main(int argc, char** argv){
   if(load_config(radios, file_name) == NR_FAILURE){
     std::cout << "Load config fail." << std::endl;
     return NR_FAILURE;
+  }
+
+  /* Keep every thread that does not pin itself off the serial capture stages' CPUs.
+    UHD starts its own threads unpinned during the radio init, inheriting this thread's
+    mask; its control endpoint thread (uhd_ctrl_ep*, ~50% of a core with four chains)
+    was seen on the fetch and consumer CPUs, taking time the capture needs. The stages
+    and the workers pin themselves explicitly, so they are unaffected. */
+  {
+    cpu_set_t mask;
+    if (sched_getaffinity(0, sizeof(mask), &mask) == 0) {
+      int n_cut = 0;
+      for (auto& r : radios) {
+        if (!r.cpu_affinity)
+          continue;
+        for (int c : {r.fetch_cpu, r.consumer_cpu, r.dispatcher_cpu}) {
+          if (c >= 0 && CPU_ISSET(c, &mask) && CPU_COUNT(&mask) > 1) {
+            CPU_CLR(c, &mask);
+            n_cut++;
+          }
+        }
+      }
+      if (n_cut > 0 && sched_setaffinity(0, sizeof(mask), &mask) != 0)
+        perror("sched_setaffinity");
+    }
   }
 
   // All the radios have the same setting for local log or push to google
