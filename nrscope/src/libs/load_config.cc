@@ -315,6 +315,7 @@ int load_config(std::vector<Radio>& radios, std::string file_name)
     flag("clutter_kernel", &nrscope_sensing_args.clutter_kernel);
     flag("antenna_avg", &nrscope_sensing_args.antenna_avg);
     flag("layer_avg", &nrscope_sensing_args.layer_avg);
+    flag("random_drop", &nrscope_sensing_args.random_drop);
     flag("tdd_detect", &nrscope_sensing_args.tdd_detect);
     flag("music", &nrscope_sensing_args.music);
     flag("mirror_reject", &nrscope_sensing_args.mirror_reject);

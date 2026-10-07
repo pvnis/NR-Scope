@@ -182,6 +182,7 @@ static bool test_run_scene(const char* name,
                                                             &hist,
                                                             stream,
                                                             (uint64_t)slot,
+                                                            false, // no random drop: the test wants every sample
                                                             0,
                                                             &lat,
                                                             &used_mask);

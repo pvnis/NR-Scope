@@ -106,6 +106,7 @@ sensing:
   clutter_kernel: true
   antenna_avg: true 
   layer_avg: true
+  random_drop: false
   tdd_detect: true
 
   # Doppler MUSIC alongside the DFT map, to <dump>.music.csv. Its observations are the

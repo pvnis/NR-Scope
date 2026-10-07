@@ -125,13 +125,14 @@ void nr_ue_sensing_apply_hann(const pilot_lattice_t *lattice, cf_t *out)
   }
 }
 
-#if NR_SENSING_EMULATE_GRANTS == 1
-/* splitmix64 finaliser, used to draw the emulated grants from the slot index.
+/* splitmix64 finaliser, used to draw what the random drop leaves out.
 
-Slot indices differ by a fixed stride and are far from random, so they have to be mixed
-before any bit of them is usable. Deriving the draws from them rather than from a
-stateful generator gives every Rx antenna the same grant, and a recorded capture replays
-identically. */
+The inputs are slot timestamps and period indices, which differ by a fixed stride and
+are far from random, so they have to be mixed before any bit of them is usable.
+
+Deriving the draws from those values rather than from a stateful generator matters
+for two reasons: every Rx antenna then reaches the same decision, so their histories
+stay in step and can still be combined, and a recorded capture replays identically. */
 static uint64_t nr_ue_sensing_mix(uint64_t x)
 {
   x += 0x9E3779B97F4A7C15ULL;
@@ -139,7 +140,6 @@ static uint64_t nr_ue_sensing_mix(uint64_t x)
   x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
   return x ^ (x >> 31);
 }
-#endif
 
 /* GRANT EMULATION, for simulation only. Rebuild after changing it.
 
@@ -300,6 +300,7 @@ int nr_ue_sensing_slot_profile(int n_sym,
                                nr_sensing_history_t *hist,
                                nr_sensing_stream_t stream,
                                uint64_t slot_abs,
+                               bool random_drop,
                                uint16_t skip_mask,
                                pilot_lattice_t *lattice,
                                uint16_t *used_mask)
@@ -309,6 +310,20 @@ int nr_ue_sensing_slot_profile(int n_sym,
   bool have_ref = false;
   int idft_size = 0;
   *used_mask = 0;
+
+  /* Which symbol of this slot to leave out, as an ordinal among the symbols the pass
+  accepts. Taken from the first symbol of the slot so it does not depend on which ones
+  end up carrying pilots, and a draw beyond the count of the slot leaves them all in.
+  -1 keeps them all. */
+  const int drop_idx = random_drop ? (int)(nr_ue_sensing_mix(t_sample[0]) % NR_SENSING_DROP_OUTCOMES) : -1;
+  int sym_idx = 0;
+
+  /* One position of the TDD period is drawn and the slot sitting there is left out
+  whole. A draw landing on an uplink slot leaves the period untouched, since no PDSCH
+  is scheduled there. */
+  const uint64_t period = slot_abs / NR_SENSING_TDD_PERIOD_SLOTS;
+  const int drop_pos = (int)(nr_ue_sensing_mix(period) % NR_SENSING_TDD_PERIOD_SLOTS);
+  const bool drop_slot = random_drop && (int)(slot_abs % NR_SENSING_TDD_PERIOD_SLOTS) == drop_pos;
 
   /* One profile per symbol can reach 2*32767^2, so three of them overflow a
   uint32_t. Accumulate in 64 bits and divide back down at the end. */
@@ -408,8 +423,12 @@ int nr_ue_sensing_slot_profile(int n_sym,
     nr_ue_sensing_delay_response(lat.n_lattice, pilots, idft_size, h_time);
 
     /* If we store the complex response, then we store the time of the symbol as well,
-    so that the Doppler transform can be done later. */
-    if (hist) {
+    so that the Doppler transform can be done later. The random drop leaves out at most
+    one symbol of the slot, and this whole slot when it is the one drawn for its TDD
+    period. The range profile below still averages every symbol: it is built from
+    magnitudes and does not care how the samples are spaced in time. */
+    const bool drop_sym = (sym_idx++ == drop_idx);
+    if (hist && !drop_slot && !drop_sym) {
       nr_ue_sensing_history_push(hist, t_sample[m], stream, &lat, idft_size, h_time);
     }
 

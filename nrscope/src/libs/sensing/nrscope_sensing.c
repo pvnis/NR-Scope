@@ -1424,7 +1424,7 @@ int nrscope_sensing_process_grant(nrscope_sensing_t*          s,
     nr_sensing_history_t* hist = hist_of(s, (int)aarx, ports, layer);
     const int idft = nr_ue_sensing_slot_profile(NSYMB, (int)n_sc_grid, H_grid, V_grid, t_sample, hist,
                                                 (nr_sensing_stream_t){.ports = ports, .layer = (uint8_t)layer},
-                                                slot_abs, (uint16_t)~dmrs_mask, &lats[layer], &used);
+                                                slot_abs, s->args.random_drop, (uint16_t)~dmrs_mask, &lats[layer], &used);
     if (idft > 0) {
       n_pushed += __builtin_popcount(used);
       maybe_map(s, (int)aarx, ports, layer, lay.n_ports, &lats[layer], sfn, slot_idx, t_newest);

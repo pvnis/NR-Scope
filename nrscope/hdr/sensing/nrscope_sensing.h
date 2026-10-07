@@ -62,6 +62,8 @@ typedef struct {
   bool antenna_avg;
   /// --sensing-layer-avg: one map averaged over the layers
   bool layer_avg;
+  /// --sensing-random-drop: break up the periodicity of the slow-time sampling
+  bool random_drop;
   /// --sensing-tdd-detect: run the TDD detector on each map
   bool tdd_detect;
   /// --sensing-music: also build each map with Doppler MUSIC
