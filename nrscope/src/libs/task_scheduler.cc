@@ -505,13 +505,14 @@ void TaskSchedulerNRScope::PrintStatus(const SlotResult& now_result, double now)
   /* delay_us is the SSB timing error ue_sync last measured and corrected; it
     should hover around zero. A value stuck at one number means tracking is not
     running and the capture timing is drifting with the radio's clock. */
-  printf(", RX peak %+.1f / mean %+.1f dBFS at gain %.1f dB (%u AGC changes), SSB timing %+.3f us, %zu RNTI(s)%s, "
+  printf(", RX peak %+.1f / mean %+.1f dBFS at gain %.1f dB (%u AGC changes), SSB timing %+.3f us, window shift %ld, %zu RNTI(s)%s, "
          "%lu slot(s) dropped so far\n",
          rx_peak_dbfs.load(std::memory_order_relaxed),
          rx_mean_dbfs.load(std::memory_order_relaxed),
          rx_gain_db.load(std::memory_order_relaxed),
          rx_gain_changes.load(std::memory_order_relaxed),
          now_result.outcome.delay_us,
+         (long)now_result.outcome.window_shift_total,
          task_scheduler_state.known_rntis.size(),
          rntis.c_str(),
          (unsigned long)nof_dropped_slots.load(std::memory_order_relaxed));

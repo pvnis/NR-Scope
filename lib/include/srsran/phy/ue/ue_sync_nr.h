@@ -107,6 +107,12 @@ typedef struct SRSRAN_API {
   float avg_delay_us; ///< Current average delay
   /// Samples the receive window has been moved since start, by timing corrections: positive = dropped (window later)
   int64_t window_shift_total;
+  /* The pending next_rf_sample_offset comes from a (re-)acquisition in FIND, not from tracking.
+  It realigns the window on the SSB after lost samples, so the window does not move on the air
+  and window_shift_total must not count it. */
+  bool next_offset_is_reacq;
+  /// Consecutive SSB opportunities in TRACK whose PBCH failed its CRC
+  uint32_t nof_pbch_miss;
 
   float resample_ratio;
 

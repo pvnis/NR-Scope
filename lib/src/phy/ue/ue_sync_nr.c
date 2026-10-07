@@ -26,6 +26,11 @@
 #include <pthread.h>
 
 #define UE_SYNC_NR_DEFAULT_CFO_ALPHA 0.1
+/* PBCH CRC failures in a row that TRACK rides out before going back to FIND. One miss used
+  to drop sync: on a weak SSB (indoors, ~+3 dB) that cost ~130 ms of airtime per miss in a
+  full re-search, while the window had not moved. Missed opportunities keep the last timing
+  and CFO, so a real loss is only noticed this many SSB periods later. */
+#define UE_SYNC_NR_MAX_PBCH_MISS 4
 pthread_mutex_t lock;
 
 int prepare_resampler(resampler_kit * q, float resample_ratio, uint32_t pre_resample_sf_sz, uint32_t resample_worker_num) {
@@ -56,6 +61,8 @@ int srsran_ue_sync_nr_init(srsran_ue_sync_nr_t* q, const srsran_ue_sync_nr_args_
   q->disable_cfo     = args->disable_cfo;
   q->cfo_alpha       = isnormal(args->cfo_alpha) ? args->cfo_alpha : UE_SYNC_NR_DEFAULT_CFO_ALPHA;
   q->window_shift_total = 0;
+  q->next_offset_is_reacq = false;
+  q->nof_pbch_miss        = 0;
 
   // Initialise SSB
   srsran_ssb_args_t ssb_args = {};
@@ -171,6 +178,9 @@ static int ue_sync_nr_update_ssb(srsran_ue_sync_nr_t*                 q,
 
   // Apply feedback
   ue_sync_nr_apply_feedback(q);
+  /* An offset found in FIND puts the window back on the SSB after a sync loss (usually lost
+    samples): the window keeps its place on the air, so it is not a move to undo. */
+  q->next_offset_is_reacq = (q->state != SRSRAN_UE_SYNC_NR_STATE_TRACK);
 
   // Setup context
   q->ssb_idx = pbch_msg->ssb_idx;
@@ -241,11 +251,15 @@ static int ue_sync_nr_run_track(srsran_ue_sync_nr_t* q, cf_t* buffer)
     ERROR("Error finding SSB");
     return SRSRAN_ERROR;
   }
-  // If the PBCH message was NOT decoded, transition to find
+  // If the PBCH message was NOT decoded, ride it out, and transition to find once too many failed in a row
   if (!pbch_msg.crc) {
-    q->state = SRSRAN_UE_SYNC_NR_STATE_FIND;
+    if (++q->nof_pbch_miss >= UE_SYNC_NR_MAX_PBCH_MISS) {
+      q->nof_pbch_miss = 0;
+      q->state         = SRSRAN_UE_SYNC_NR_STATE_FIND;
+    }
     return SRSRAN_SUCCESS;
   }
+  q->nof_pbch_miss = 0;
 
   return ue_sync_nr_update_ssb(q, &measurements, &pbch_msg);
 }
@@ -274,7 +288,10 @@ static int ue_sync_nr_recv(srsran_ue_sync_nr_t* q, cf_t** buffer, srsran_timesta
   /* Every sample dropped moves the window one sample later on the air, every
     zero inserted one earlier. Paths in a delay profile move the other way by the
     same count, which the sensing path undoes exactly rather than estimating. */
-  q->window_shift_total += q->next_rf_sample_offset;
+  if (!q->next_offset_is_reacq) {
+    q->window_shift_total += q->next_rf_sample_offset;
+  }
+  q->next_offset_is_reacq  = false;
   q->next_rf_sample_offset = 0;
 
   // Select buffer offsets
@@ -546,7 +563,10 @@ static int ue_sync_nr_recv_nrscope(srsran_ue_sync_nr_t* q,
   /* Every sample dropped moves the window one sample later on the air, every
     zero inserted one earlier. Paths in a delay profile move the other way by the
     same count, which the sensing path undoes exactly rather than estimating. */
-  q->window_shift_total += q->next_rf_sample_offset;
+  if (!q->next_offset_is_reacq) {
+    q->window_shift_total += q->next_rf_sample_offset;
+  }
+  q->next_offset_is_reacq  = false;
   q->next_rf_sample_offset = 0;
 
   // Select buffer offsets
