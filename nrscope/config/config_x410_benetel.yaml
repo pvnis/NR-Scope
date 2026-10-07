@@ -116,7 +116,6 @@ sensing:
   # and only four chains make the NR_MUSIC_MAX_ORDER = 4 model order reachable. Needs
   # antenna_avg for the chains to reach it at all.
   music: false
-  compensate_window_shifts: false  # NR-Scope only; off is OAI's behaviour
 
   # Map from chain 0 minus the weighted other chains, nulling the direct path's
   # direction; needs antenna_avg and 2+ chains. M chains give M-1 weights: at 2 the one

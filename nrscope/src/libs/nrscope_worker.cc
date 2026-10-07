@@ -338,7 +338,6 @@ void NRScopeWorker::Run()
     slot_result.outcome     = outcome;
     slot_result.sf_round    = sf_round;
     worker_state.sfn        = outcome.sfn;
-    worker_state.window_shift_samples = outcome.window_shift_total;
 
     /* Put the initialization delay into the worker's thread */
     if (!worker_state.sib1_inited) {

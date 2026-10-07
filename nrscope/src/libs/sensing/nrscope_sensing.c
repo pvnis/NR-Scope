@@ -1482,8 +1482,7 @@ int nrscope_sensing_process_grant(nrscope_sensing_t*          s,
                                   int                         dci_ports,
                                   uint32_t                    pci,
                                   uint32_t                    sfn,
-                                  uint32_t                    slot_idx,
-                                  int64_t                     window_shift)
+                                  uint32_t                    slot_idx)
 {
   if (s == NULL || sc == NULL || grid == NULL || cfg == NULL || place == NULL || n_sc_grid != sc->n_sc) {
     return s == NULL ? 0 : -1;
@@ -1534,22 +1533,6 @@ int nrscope_sensing_process_grant(nrscope_sensing_t*          s,
       const uint32_t cinit = nr_ue_dmrs_seed(&carrier, &cfg->dmrs, &cfg->grant, slot_idx, l);
       nr_ue_dmrs_estimate_symbol(&lay, layer, cinit, &cfg->grant, place, &grid[(size_t)l * n_sc_grid], (int)n_sc_grid,
                                  &sc->H[(size_t)l * n_sc_grid], &sc->valid[(size_t)l * n_sc_grid]);
-      /* Undo the window's moves. The window is window_shift samples later than at
-        start, so every path sits window_shift bins earlier in the profile (one
-        sample is one bin: the delay axis spans the 4096-point symbol). A delay d
-        is exp(-j 2 pi k d / N) across subcarriers k, so multiplying by
-        exp(-j 2 pi k shift / N) puts the paths back. The ramp's origin only adds
-        a phase common to the symbol, which the alignment removes anyway. */
-      if (s->args.compensate_window_shifts && window_shift != 0) {
-        const double step = -2.0 * M_PI * (double)(window_shift % (int64_t)s->ofdm_size) / s->ofdm_size;
-        cf_t*        H    = &sc->H[(size_t)l * n_sc_grid];
-        const bool*  V    = &sc->valid[(size_t)l * n_sc_grid];
-        for (uint32_t k = 0; k < n_sc_grid; k++) {
-          if (V[k]) {
-            H[k] *= cexpf(I * (float)fmod(step * k, 2.0 * M_PI));
-          }
-        }
-      }
     }
     /* OAI's per-slot stage, unchanged: the DM-RS symbols of this layer become
       delay responses pushed into the history (grants under half the carrier are

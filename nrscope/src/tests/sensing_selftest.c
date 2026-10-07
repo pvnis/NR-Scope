@@ -649,7 +649,6 @@ static void test_glue(void)
   static struct {
     srsran_sch_cfg_nr_t cfg;
     uint32_t            sfn, slot_idx;
-    int64_t             shift;
   } q_meta[QD];
   int n_dl = 0;            // downlink slots enqueued so far
   int next[N_ANT] = {0};   // the next slot each chain still owes
@@ -699,7 +698,7 @@ static void test_glue(void)
     // enqueue this slot, then hand every chain the slots its lag has made due
     const int qi = n_dl % QD;
     memcpy(q_rx[qi], rx, sizeof(rx));
-    q_meta[qi].cfg = cfg, q_meta[qi].sfn = sfn, q_meta[qi].slot_idx = slot_idx, q_meta[qi].shift = shift;
+    q_meta[qi].cfg = cfg, q_meta[qi].sfn = sfn, q_meta[qi].slot_idx = slot_idx;
     n_dl++;
     for (int c = 0; c < N_ANT; c++) {
       while (next[c] <= n_dl - 1 - LAG[c]) {
@@ -708,7 +707,7 @@ static void test_glue(void)
           rx_a[i] = cable[c] * q_rx[j][i];
         }
         const int n = nrscope_sensing_process_grant(s, sc, c, rx_a, n_sc, &place, &q_meta[j].cfg, 2, 1,
-                                                    q_meta[j].sfn, q_meta[j].slot_idx, q_meta[j].shift);
+                                                    q_meta[j].sfn, q_meta[j].slot_idx);
         pushed[c] += n > 0 ? n : 0;
         next[c]++;
       }
@@ -723,7 +722,7 @@ static void test_glue(void)
         rx_a[i] = cable[c] * q_rx[j][i];
       }
       const int n = nrscope_sensing_process_grant(s, sc, c, rx_a, n_sc, &place, &q_meta[j].cfg, 2, 1,
-                                                  q_meta[j].sfn, q_meta[j].slot_idx, q_meta[j].shift);
+                                                  q_meta[j].sfn, q_meta[j].slot_idx);
       pushed[c] += n > 0 ? n : 0;
       next[c]++;
     }

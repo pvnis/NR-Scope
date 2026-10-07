@@ -70,9 +70,6 @@ typedef struct {
   bool tdd_detect;
   /// --sensing-music: also build each map with Doppler MUSIC
   bool music;
-  /* NR-Scope only, off: undo the receive window's moves (from the timing tracking)
-  before the alignment, instead of leaving the alignment to find them as in OAI. */
-  bool compensate_window_shifts;
   /* NR-Scope only, off: build the map from chain 0 minus the weighted sum of the other
   chains, the weights chosen so the direct path cancels (a spatial null toward the gNB),
   instead of averaging the chains' maps. M chains give M-1 weights, so from three chains
@@ -156,8 +153,6 @@ nrscope_sensing_t* nrscope_sensing_get(uint64_t carrier_hz, double srate_hz, uin
                  DCI 1_0, which has none and means port 1000
    pci         : physical cell identity, the DM-RS scrambling fallback
    sfn, slot_idx : where the slot sits in the frame
-   window_shift : samples the receive window has moved since start, as of this
-                 slot (srsran_ue_sync_nr_outcome_t.window_shift_total)
    Returns snapshots pushed, 0 when the grant is not used (too narrow, a DM-RS
    configuration the estimator does not model), negative on error. */
 int nrscope_sensing_process_grant(nrscope_sensing_t*          s,
@@ -170,8 +165,7 @@ int nrscope_sensing_process_grant(nrscope_sensing_t*          s,
                                   int                         dci_ports,
                                   uint32_t                    pci,
                                   uint32_t                    sfn,
-                                  uint32_t                    slot_idx,
-                                  int64_t                     window_shift);
+                                  uint32_t                    slot_idx);
 
 /* Block until every queued map is built and dumped. For tests. */
 void nrscope_sensing_wait_maps(nrscope_sensing_t* s);

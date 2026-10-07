@@ -1437,8 +1437,7 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
                 nrscope_sensing_process_grant(sensing, sensing_scratch, a, ue_dl_grid.sf_symbols[a],
                                               grid_carrier.nof_prb * SRSRAN_NRE, &place, &pdsch_cfg, (int)d.ports,
                                               state->cs_ret.ssb_res.N_id, state->sfn,
-                                              SRSRAN_SLOT_NR_MOD(carrier_dl.scs, slot->idx),
-                                              state->window_shift_samples);
+                                              SRSRAN_SLOT_NR_MOD(carrier_dl.scs, slot->idx));
               }
             }
           }
