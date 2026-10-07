@@ -384,6 +384,8 @@ def draw_map(fig, ax, m, args, trail=(), cax=None):
     steady and the redraw cheap; without it (the one-shot and --browse paths) a new colour
     bar is made next to ax as before."""
     vmax = 0.0 if args.norm == "peak" else 40.0
+    if args.vmax is not None:
+        vmax = args.vmax
 
     x = m.speeds(args.carrier) if args.x == "speed" else m.dopplers
     # Markers and AoA cells are stored as speeds (m/s). In --x doppler mode they
@@ -401,9 +403,9 @@ def draw_map(fig, ax, m, args, trail=(), cax=None):
     mesh = ax.pcolormesh(x, y[keep], img[keep, :], vmin=args.floor, vmax=vmax,
                          shading="nearest", cmap="viridis")
     if cax is not None:
-        fig.colorbar(mesh, cax=cax, label="dB below peak")
+        fig.colorbar(mesh, cax=cax, label="dB below peak" if args.norm == "peak" else "dB re median cell")
     else:
-        fig.colorbar(mesh, ax=ax, label="dB below peak")
+        fig.colorbar(mesh, ax=ax, label="dB below peak" if args.norm == "peak" else "dB re median cell")
 
     # zero Doppler is where every static return should sit
     ax.axvline(0.0, color="white", lw=0.6, ls=":", alpha=0.7)
@@ -431,6 +433,11 @@ def draw_map(fig, ax, m, args, trail=(), cax=None):
         if vx.size:
             ax.plot(to_x(vx), vy, linestyle="none", marker="x", mec="red", ms=9, mew=1.8,
                     label=f"rejected: TDD replica ({vx.size})")
+        if args.uncertain:
+            vx, vy, _ = m.markers_of(VERDICT_UNCERTAIN)
+            if vx.size:
+                ax.plot(to_x(vx), vy, linestyle="none", marker="o", mfc="none", mec="white",
+                        ms=9, mew=1.2, label=f"detected, not confirmed ({vx.size})")
         vx, vy, snr = m.markers_of(VERDICT_TARGET)
         if vx.size:
             ax.plot(to_x(vx), vy, linestyle="none", marker="s", mfc="none", mec="lime",
@@ -654,6 +661,11 @@ def main():
                     help="clip the range axis at this many metres")
     ap.add_argument("--floor", type=float, default=-40.0,
                     help="lowest dB shown (default: -40)")
+    ap.add_argument("--vmax", type=float, default=None,
+                    help="top of the colour scale, dB (default 0 with --norm peak, 40 with median)")
+    ap.add_argument("--uncertain", action="store_true",
+                    help="also draw verdict-3 markers: mirrored at -v (live), or detected but "
+                         "not confirmed as a mover by replay_samples.py --track")
     ap.add_argument("--no-markers", action="store_true",
                     help="do not draw what --sensing-tdd-detect decided, even when "
                          "the dump carries it")

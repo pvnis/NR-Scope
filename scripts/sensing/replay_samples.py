@@ -842,7 +842,8 @@ def clutter_map(ms, prm, steps=()):
     residue, so the background is learnt again from the first map after a step.
 
     Then local maxima only (+-1 bin, +-3 Doppler cells), and the TDD replica test: a
-    detection with a stronger one at f +- k/T_TDD on the same range (+-1 bin) is a replica.
+    detection with a stronger one (raw power, not excess) at f +- k/T_TDD on the same range
+    (+-1 bin) is a replica.
     Attaches m["markers"] (verdict 0 kept, 1 replica) and m["excess_db"]."""
     if not ms:
         return
@@ -874,6 +875,7 @@ def clutter_map(ms, prm, steps=()):
             vok = (np.abs(speed) >= prm["cm_vmin_ms"]) & (np.abs(speed) <= prm["max_speed"])
             det = (ratio > thr) & vok[None, :]
         m["excess_db"] = exc.astype(np.float32)
+        m["excess"] = ratio.astype(np.float32)
         upd = ~det
         mu[upd] += alpha * (P[upd] - mu[upd])
         n_seen += 1
@@ -891,7 +893,9 @@ def clutter_map(ms, prm, steps=()):
         for z, b, f in cand:
             rep = False
             for (z2, b2, f2) in cand:
-                if z2 <= z or abs(b2 - b) > 1:
+                # raw power decides: the TDD comb puts a target's own peak above its replicas,
+                # while its excess can be lower where its background is louder
+                if P[b2, f2] <= P[b, f] or abs(b2 - b) > 1:
                     continue
                 k = (freqs[f] - freqs[f2]) / f_tdd
                 if abs(k - round(k)) * f_tdd <= 2 * df and round(k) != 0:
@@ -1231,6 +1235,14 @@ def main():
                 write_tracks(os.path.join(args.out_dir, f"{label}.tracks.csv"), tracks, ms[0]["t_center"])
             if args.clutter_map:
                 plot_run(os.path.join(args.out_dir, f"{label}.time.png"), ms, tracks or [])
+                # what C detects on: each cell over its own background (1 = as usual)
+                with open(os.path.join(args.out_dir, f"{label}.excess.csv"), "w") as fh:
+                    for i, m in enumerate(ms):
+                        if "excess" in m:
+                            write_map_line(fh, i, dict(m, power=m["excess"]))
+                pl = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plot_range_doppler.py")
+                print(f"  play what C sees:  {pl} {os.path.join(args.out_dir, label + '.excess.csv')} "
+                      f"--play --uncertain --norm median --floor 0 --vmax 20 --trail 0")
         peaks = np.array([10.0 * math.log10(max(p.max(), 1e-12)) for p in maps])
         # sliding outputs share K-1 of their K maps, so compare only outputs K apart
         rep = repeatability(maps[::max(1, args.avg_maps)])
