@@ -43,6 +43,21 @@ Examples:
 
   # sliding average of 4 consecutive maps (non-coherent), optionally velocity-compensated
   replay_samples.py --rec '~/runs/run_1/map2d.csv.rec.*.csv' --avg-maps 4 [--vcomp]
+
+Residue vs slow movers (--residue = the three stages below; each also on its own):
+  A --hygiene      before the maps: drop outlier snapshots, cut windows at scene steps
+  C --clutter-map  after the maps, in place of the TDD detector: each range-Doppler cell
+                   against its own history (stationary residue -> ~0 dB, a mover is new)
+  E --track        after C: Kalman tracks in (range, range rate); a mover's range must
+                   drift as its Doppler says, residue has Doppler but stays put
+  Writes <label>.tracks.csv and <label>.time.png (range-time and Doppler-time of the
+  run with the tracks: lime mover, cyan residue, grey unverified).
+  --inject DB,R0,AMP,PERIOD adds a synthetic walker to the recording, to measure what
+  survives on the real residue (indoor_1_record: found down to about -25 dB re the
+  direct path, nothing labelled mover without it).
+
+  replay_samples.py --rec '~/runs/indoor_1_record/map2d.csv.rec.*.csv' --residue
+  replay_samples.py --rec '...' --residue --inject=-25,20,6,10 --sweep cm_pfa --lo 1e-5 --hi 1e-3 --step 1e-4
 """
 import argparse
 import glob
@@ -87,6 +102,28 @@ DEFAULTS = dict(
     k_lag_ms=100.0,       # lag of that correlation; the floor decorrelates in ~100 ms, a swaying body
                           # does not (0: next snapshot)
     k_detrend=1,          # remove a linear drift per bin within the window
+    # --hygiene (A): snapshots and scene steps the clutter removal cannot model
+    a_ref_ms=100.0,       # span of the running local reference a snapshot is compared with
+    a_outlier_x=5.0,      # drop a snapshot whose residue against it exceeds this x the run median
+    a_block_ms=20.0,      # block for the scene-step test
+    a_step_ms=100.0,      # the step test compares the mean of this span before and after
+    a_step_x=4.0,         # a step is a change this x the run median of that comparison
+    # --clutter-map (C): each cell against its own history
+    cm_tau_s=5.0,         # memory of the per-cell background, s
+    cm_learn_maps=10,     # maps that only build the background before anything is detected
+    cm_pfa=1e-5,          # false-alarm rate per cell: power over its background mean > -ln(pfa)
+    cm_min_db=6.0,        # ...and at least this many dB above it
+    cm_vmin_ms=0.1,       # ignore |speed| below this (the static scene's own leakage)
+    # --track (E): kinematic consistency of the detections
+    tr_accel=1.0,         # random acceleration of a walker, m/s^2 (Kalman process noise)
+    tr_gate=13.8,         # association gate, chi-square with 2 dof (13.8: 99.9%)
+    tr_m=4,               # confirm a track after M hits ...
+    tr_n=6,               # ... within its last N maps
+    tr_max_miss=4,        # delete a track after this many maps in a row without a hit
+    tr_check_s=1.5,       # history needed before range drift and Doppler are compared
+    tr_tol_ms=0.5,        # allowed |range slope - Doppler range rate|, m/s (bistatic) ...
+    tr_tol_frac=0.6,      # ... or this fraction of |Doppler range rate|, whichever is larger; residue
+                          # has no range drift (slope ~0), so it misses by 1.0 x its rate
 )
 
 # field -> (lo, hi) hard range, for clamping a swept value (mirrors nr_sweep_apply)
@@ -98,10 +135,14 @@ RANGE = dict(
     sliding_la_ms=(0.0, None), sliding_ls_ms=(0.1, None),
     k_window_s=(0.05, None), k_hop_s=(0.01, None), k_thresh_db=(None, None), k_margin_db=(None, None),
     k_common_norm=(0, 1), k_floor_corr=(0, 1), k_detrend=(0, 1), k_lag_ms=(0.0, None),
+    a_ref_ms=(1.0, None), a_outlier_x=(1.0, None), a_block_ms=(1.0, None), a_step_ms=(1.0, None),
+    a_step_x=(1.0, None), cm_tau_s=(0.1, None), cm_learn_maps=(1, None), cm_pfa=(1e-12, 0.5),
+    cm_min_db=(0.0, None), cm_vmin_ms=(0.0, None), tr_accel=(0.01, None), tr_gate=(0.1, None),
+    tr_m=(1, None), tr_n=(1, None), tr_max_miss=(1, None), tr_check_s=(0.1, None), tr_tol_ms=(0.0, None), tr_tol_frac=(0.0, 0.95),
 )
 INT_FIELDS = {"k_common_norm", "k_floor_corr", "k_detrend", "clutter_mode", "max_paths", "trend_degree", "kernel_half_span",
               "min_sep_bins", "comb_remove", "comb_harmonic", "comb_tdd_multiple",
-              "comb_power_iters"}
+              "comb_power_iters", "cm_learn_maps", "tr_m", "tr_n", "tr_max_miss"}
 
 
 # ---------------------------------------------------------------- primitives
@@ -660,6 +701,365 @@ def write_targets(path, ms):
                          f"{t['range_m']:.2f},{t['f_hz']:.1f},{t['speed_ms']:.2f},{t['snr_dB']:.1f}\n")
 
 
+# ---------------------------------------------------------------- synthetic walker
+
+def inject_walker(parsed, spec):
+    """Add a synthetic point target to every recorded snapshot, to measure what A/C/E can
+    find on the real residue. spec = "level_db,r0_m,amp_m,period_s": a walker whose
+    bistatic excess range swings R(t) = r0 + amp sin(2 pi t / period), at level_db relative
+    to the run's median direct-path peak. Its delay response is the grant's own Hann kernel
+    at R/m_per_bin, its slow-time phase -2 pi R / lambda (so its Doppler is -Rdot/lambda,
+    consistent with its range drift); chain a gets a fixed extra phase 0.7 a rad."""
+    level_db, r0, amp, period = (float(x) for x in spec.split(","))
+    peaks = [np.abs(sn["h"]).max() for g in parsed for ss in g.values() for sn in ss[::50]]
+    a0 = 10.0 ** (level_db / 20.0) * float(np.median(peaks))
+    t0 = min(sn["t_abs"] for g in parsed for ss in g.values() for sn in ss)
+    cache = {}   # kernel on a 1/100-bin delay grid per grant shape: one per snapshot is too slow
+    for g in parsed:
+        for (aarx, _), ss in g.items():
+            for sn in ss:
+                tt = sn["t_abs"] - t0
+                lam = C / sn["carrier"]
+                m_per_bin = C / (sn["idft"] * sn["k_step"] * sn["scs"])
+                R = r0 + amp * math.sin(2.0 * math.pi * tt / period)
+                key = (sn["n_pilots"], sn["a_m"], sn["idft"], len(sn["h"]), int(round(R / m_per_bin * 100)))
+                K = cache.get(key)
+                if K is None:
+                    K = clutter_kernel(key[0], key[1], key[4] / 100.0, key[2], key[3])
+                    K = cache[key] = K / np.abs(K).max()
+                sn["h"] = sn["h"] + a0 * np.exp(-2j * np.pi * R / lam + 0.7j * aarx) * K
+    return a0
+
+
+# ---------------------------------------------------------------- A: snapshot hygiene
+
+def _running_mean(t, H, half_s, keep):
+    """Mean of the kept rows of H within +-half_s of each row's time, per column."""
+    w = keep.astype(float)
+    cs = np.vstack([np.zeros((1, H.shape[1]), complex), np.cumsum(H * w[:, None], axis=0)])
+    cw = np.concatenate([[0.0], np.cumsum(w)])
+    lo = np.searchsorted(t, t - half_s, "left")
+    hi = np.searchsorted(t, t + half_s, "right")
+    n = np.maximum(cw[hi] - cw[lo], 1.0)
+    return (cs[hi] - cs[lo]) / n[:, None]
+
+
+def hygiene(parsed, prm):
+    """A. Clean the run before any map is built, on the reference stream (lowest chain and
+    layer), and apply the verdict to every (chain, layer) of the same symbol.
+
+    1. Outlier snapshots. Each snapshot is compared with the mean of the run's snapshots
+       within +-a_ref_ms/2: residue = |h - mean|^2 / |mean|^2. Indoors 2.5% of snapshots
+       sit 10-500x above the median, in bursts, with 2-6x the power (a grant on another
+       precoder or power level). The clutter removal cannot model them and each one lands
+       on every range and Doppler cell of its map. Two passes, the second with the
+       reference rebuilt without the first pass's outliers.
+    2. Scene steps. The mean of a_step_ms after each a_block_ms boundary is compared with
+       the mean before it; a local maximum above a_step_x x the run median is a step (a new
+       effective channel: the static scene changes shape and power, x0.4-4 indoors). A
+       window that straddles one smears the step over every Doppler cell, so it keeps only
+       its larger side.
+
+    parsed: one {(aarx, layer): [snaps]} per recorded window. Returns the cleaned list and
+    a stats dict."""
+    keys = sorted({k for g in parsed for k in g})
+    ref = min(keys)
+    snaps = [s for g in parsed for s in g.get(ref, [])]
+    if len(snaps) < MIN_SNAPSHOTS:
+        return parsed, dict(outliers=0, steps=[], steps_abs=[], dropped_side=0, total=len(snaps))
+    t = np.array([s["t_abs"] for s in snaps])
+    order = np.argsort(t, kind="stable")
+    t = t[order]
+    npil = np.array([snaps[i]["n_pilots"] for i in order], float)
+    H = np.stack([snaps[i]["h"] for i in order]) * (npil.max() / npil)[:, None]
+
+    keep = np.ones(len(t), bool)
+    half = 0.5 * prm["a_ref_ms"] * 1e-3
+    for _ in range(2):
+        loc = _running_mean(t, H, half, keep)
+        e = np.sum(np.abs(H - loc) ** 2, 1) / np.maximum(np.sum(np.abs(loc) ** 2, 1), 1e-30)
+        keep = e < prm["a_outlier_x"] * np.median(e)
+    bad_t = set(np.round(t[~keep] * 1e7).astype(np.int64).tolist())
+
+    # scene steps on block means of the kept snapshots
+    blk = prm["a_block_ms"] * 1e-3
+    span = max(1, int(round(prm["a_step_ms"] / prm["a_block_ms"])))
+    edges = np.arange(t[0], t[-1] + blk, blk)
+    idx = np.clip(np.searchsorted(edges, t, "right") - 1, 0, len(edges) - 1)
+    M = np.full((len(edges), H.shape[1]), np.nan + 0j)
+    for i in np.unique(idx[keep]):
+        M[i] = H[keep & (idx == i)].mean(0)
+    d = np.zeros(len(edges))
+    for i in range(span, len(edges) - span):
+        a = M[i - span:i]; b = M[i:i + span]
+        a = a[~np.isnan(a[:, 0].real)]; b = b[~np.isnan(b[:, 0].real)]
+        if len(a) * 2 < span or len(b) * 2 < span:
+            continue
+        A = a.mean(0); B = b.mean(0)
+        d[i] = np.linalg.norm(B - A) / max(np.linalg.norm(A), 1e-30)
+    med = np.median(d[d > 0]) if np.any(d > 0) else 0.0
+    steps = [edges[i] for i in range(1, len(d) - 1)
+             if med > 0 and d[i] > prm["a_step_x"] * med and d[i] >= d[i - 1] and d[i] >= d[i + 1]]
+
+    out, dropped_side = [], 0
+    for g in parsed:
+        ng = {}
+        for k, ss in g.items():
+            ss = [s for s in ss if int(round(s["t_abs"] * 1e7)) not in bad_t]
+            if ss:
+                ts = np.array([s["t_abs"] for s in ss])
+                for st in steps:
+                    if ts[0] < st < ts[-1]:
+                        before = ts < st
+                        n0 = int(before.sum())
+                        side = before if n0 >= len(ss) - n0 else ~before
+                        dropped_side += len(ss) - int(side.sum())
+                        ss = [s for s, kp in zip(ss, side) if kp]
+                        ts = ts[side]
+            ng[k] = ss
+        out.append(ng)
+    return out, dict(outliers=int((~keep).sum()), total=len(t), steps=[s - t[0] for s in steps], steps_abs=steps,
+                     dropped_side=dropped_side)
+
+
+# ---------------------------------------------------------------- C: clutter-map CFAR
+
+def clutter_map(ms, prm, steps=()):
+    """C. Detect against each cell's own history instead of against its neighbours.
+
+    The residue the clutter removal leaves is stationary: the same symmetric +-0.3-1.3 m/s
+    skirt on the same range bins all run long. A CFAR across neighbouring cells reads it as
+    targets; a cell's own past does not, while a person moving through the cell is new to
+    it. Per (range, Doppler) cell the mean power is kept, exponentially over cm_tau_s (a
+    classic clutter map); the first cm_learn_maps maps only build it (plain average). A cell
+    is then a detection when its power exceeds its background mean by -ln(cm_pfa) (the
+    exceedance of exponential power, which both noise and residue speckle follow) and by
+    cm_min_db. Detected cells do not update the background, so a target standing in a cell
+    is not learnt away while it is detected. Only |speed| in [cm_vmin_ms, max_speed]: past
+    max_speed the map holds the TDD replicas.
+
+    steps: absolute times of scene steps (hygiene()). A new effective channel leaves a new
+    residue, so the background is learnt again from the first map after a step.
+
+    Then local maxima only (+-1 bin, +-3 Doppler cells), and the TDD replica test: a
+    detection with a stronger one at f +- k/T_TDD on the same range (+-1 bin) is a replica.
+    Attaches m["markers"] (verdict 0 kept, 1 replica) and m["excess_db"]."""
+    if not ms:
+        return
+    nb, nf = ms[0]["power"].shape
+    mu = np.zeros((nb, nf)); n_seen = 0
+    t_prev = None
+    thr = -math.log(prm["cm_pfa"])
+    thr = max(thr, 10.0 ** (prm["cm_min_db"] / 10.0))
+    steps = sorted(steps)
+    for m in ms:
+        P = m["power"].astype(float)
+        if P.shape != (nb, nf):
+            m["markers"] = []
+            continue
+        if t_prev is not None and any(t_prev < st <= m["t_center"] for st in steps):
+            n_seen = 0
+        dt = m["t_span"] if t_prev is None else max(m["t_center"] - t_prev, 1e-3)
+        t_prev = m["t_center"]
+        alpha = max(1.0 - math.exp(-dt / prm["cm_tau_s"]), 1.0 / (n_seen + 1))
+        freqs = -m["f_max"] + np.arange(nf) * (2.0 * m["f_max"] / (nf - 1))
+        lam = C / m["carrier"]
+        speed = freqs * lam / 2.0
+        if n_seen == 0:
+            mu[:] = P
+        ratio = P / np.maximum(mu, 1e-30)
+        exc = 10.0 * np.log10(np.maximum(ratio, 1e-12))
+        det = np.zeros((nb, nf), bool)
+        if n_seen >= prm["cm_learn_maps"]:
+            vok = (np.abs(speed) >= prm["cm_vmin_ms"]) & (np.abs(speed) <= prm["max_speed"])
+            det = (ratio > thr) & vok[None, :]
+        m["excess_db"] = exc.astype(np.float32)
+        upd = ~det
+        mu[upd] += alpha * (P[upd] - mu[upd])
+        n_seen += 1
+
+        cand = []
+        for b, f in zip(*np.nonzero(det)):
+            b0, b1 = max(0, b - 1), min(nb, b + 2)
+            f0, f1 = max(0, f - 3), min(nf, f + 4)
+            if exc[b, f] >= exc[b0:b1, f0:f1].max():
+                cand.append((exc[b, f], b, f))
+        cand.sort(reverse=True)
+        f_tdd = 1.0 / m["tdd_period"]
+        df = freqs[1] - freqs[0]
+        markers = []
+        for z, b, f in cand:
+            rep = False
+            for (z2, b2, f2) in cand:
+                if z2 <= z or abs(b2 - b) > 1:
+                    continue
+                k = (freqs[f] - freqs[f2]) / f_tdd
+                if abs(k - round(k)) * f_tdd <= 2 * df and round(k) != 0:
+                    rep = True
+                    break
+            frac = peak_frac(P[:, f], b) if 0 < b < nb - 1 else 0.0
+            markers.append(dict(verdict=tdd.VERDICT_REPLICA if rep else tdd.VERDICT_TARGET,
+                                bin=b + frac, range_m=(b + frac) * m["m_per_bin"], f_hz=freqs[f],
+                                speed_ms=speed[f], snr_dB=float(z)))
+        markers.sort(key=lambda x: x["verdict"])
+        m["markers"] = markers
+
+
+# ---------------------------------------------------------------- E: kinematic tracking
+
+def track(ms, prm):
+    """E. Track the kept detections over maps and test kinematic consistency.
+
+    State [R, Rdot]: bistatic excess range and its rate, constant-velocity Kalman filter
+    with random acceleration tr_accel. A detection measures both: R from its range bin and
+    Rdot = -lambda f from its Doppler (approaching, positive Doppler, shortens the path).
+    Association: greedy nearest, chi-square gate tr_gate (2 dof). A track is confirmed after
+    tr_m hits in its last tr_n maps and deleted after tr_max_miss misses in a row.
+
+    The discriminator: a real mover's range drifts as its Doppler says, a residue cell has
+    a Doppler and never moves. Once a track spans tr_check_s, the slope of a straight line
+    through its measured ranges is compared with its mean measured Rdot:
+      mover      |slope - Rdot| <= tr_tol_ms, or tr_tol_frac |Rdot| if larger
+      residue    it has Doppler (|Rdot| * span > one range bin) but no matching drift
+      unverified too short, or too slow for its drift to show within a bin
+    Returns the tracks; each marker gets "track" and its verdict is set: 0 for a mover's
+    detection, 3 (uncertain) for everything else kept by C."""
+    tracks, nid = [], 0
+    for i, m in enumerate(ms):
+        lam = C / m["carrier"]
+        sR = m["m_per_bin"] / 2.5
+        sV = lam * (1.0 / max(m["t_span"], 1e-3))
+        Rm = np.diag([sR * sR, sV * sV])
+        dets = [k for k in m.get("markers", []) if k["verdict"] == tdd.VERDICT_TARGET]
+        z = [np.array([k["range_m"], -lam * k["f_hz"]]) for k in dets]
+        t = m["t_center"]
+        live = [tr for tr in tracks if not tr["dead"]]
+        pred = []
+        for tr in live:
+            dt = t - tr["t"]
+            F = np.array([[1.0, dt], [0.0, 1.0]])
+            q = prm["tr_accel"] ** 2
+            Q = q * np.array([[dt ** 3 / 3, dt ** 2 / 2], [dt ** 2 / 2, dt]])
+            x = F @ tr["x"]; Pp = F @ tr["P"] @ F.T + Q
+            pred.append((x, Pp))
+        pairs = []
+        for a, (x, Pp) in enumerate(pred):
+            S = Pp + Rm; Si = np.linalg.inv(S)
+            for j, zz in enumerate(z):
+                r = zz - x
+                d2 = float(r @ Si @ r)
+                if d2 <= prm["tr_gate"]:
+                    pairs.append((d2, a, j))
+        pairs.sort()
+        used_t, used_z = set(), set()
+        for d2, a, j in pairs:
+            if a in used_t or j in used_z:
+                continue
+            used_t.add(a); used_z.add(j)
+            tr = live[a]; x, Pp = pred[a]
+            S = Pp + Rm; K = Pp @ np.linalg.inv(S)
+            tr["x"] = x + K @ (z[j] - x); tr["P"] = (np.eye(2) - K @ np.eye(2)) @ Pp
+            tr["t"] = t; tr["miss"] = 0
+            tr["hist"].append((i, t, z[j][0], z[j][1]))
+            dets[j]["track"] = tr["id"]
+        for a, tr in enumerate(live):
+            if a not in used_t:
+                tr["x"], tr["P"] = pred[a]; tr["t"] = t
+                tr["miss"] += 1
+                if tr["miss"] >= prm["tr_max_miss"]:
+                    tr["dead"] = True
+        for j, zz in enumerate(z):
+            if j in used_z:
+                continue
+            tracks.append(dict(id=nid, x=zz.copy(), P=Rm * 4.0, t=t, miss=0, dead=False,
+                               hist=[(i, t, zz[0], zz[1])]))
+            dets[j]["track"] = nid
+            nid += 1
+        for tr in tracks:
+            hits = [h[0] for h in tr["hist"] if h[0] > i - prm["tr_n"]]
+            if len(hits) >= prm["tr_m"]:
+                tr["confirmed"] = True
+
+    for tr in tracks:
+        h = np.array([(tt, R, V) for _, tt, R, V in tr["hist"]])
+        tr["span"] = float(h[-1, 0] - h[0, 0]) if len(h) > 1 else 0.0
+        tr["rdot"] = float(h[:, 2].mean())
+        tr["range"] = float(h[:, 1].mean())
+        tr["slope"] = float(np.polyfit(h[:, 0] - h[0, 0], h[:, 1], 1)[0]) if len(h) >= 3 and tr["span"] > 0 else 0.0
+        bin_m = ms[0]["m_per_bin"]
+        if not tr.get("confirmed") or tr["span"] < prm["tr_check_s"]:
+            tr["class"] = "unverified"
+        elif abs(tr["slope"] - tr["rdot"]) <= max(prm["tr_tol_ms"], prm["tr_tol_frac"] * abs(tr["rdot"])):
+            tr["class"] = "mover" if abs(tr["rdot"]) * tr["span"] > 0.5 * bin_m else "unverified"
+        elif abs(tr["rdot"]) * tr["span"] > bin_m:
+            tr["class"] = "residue"
+        else:
+            tr["class"] = "unverified"
+    cls = {tr["id"]: tr["class"] for tr in tracks}
+    for m in ms:
+        for k in m.get("markers", []):
+            if k["verdict"] == tdd.VERDICT_TARGET:
+                k["verdict"] = tdd.VERDICT_TARGET if cls.get(k.get("track")) == "mover" else tdd.VERDICT_UNCERTAIN
+    return tracks
+
+
+def write_tracks(path, tracks, t0):
+    with open(path, "w") as fh:
+        fh.write("track,class,t_start_s,t_end_s,span_s,hits,range_m,rdot_doppler_ms,range_slope_ms\n")
+        for tr in tracks:
+            if len(tr["hist"]) < 2:
+                continue
+            fh.write(f"{tr['id']},{tr['class']},{tr['hist'][0][1] - t0:.2f},{tr['hist'][-1][1] - t0:.2f},"
+                     f"{tr['span']:.2f},{len(tr['hist'])},{tr['range']:.1f},{tr['rdot']:.2f},{tr['slope']:.2f}\n")
+
+
+def plot_run(path, ms, tracks):
+    """Range-time and Doppler-time of a whole run: the max excess over the background per
+    range bin and per Doppler column, with C's detections and E's tracks on top."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return
+    ok = [m for m in ms if "excess_db" in m]
+    if not ok:
+        return
+    t0 = ms[0]["t_center"]
+    tc = np.array([m["t_center"] - t0 for m in ok])
+    nb, nf = ok[0]["excess_db"].shape
+    lam = C / ok[0]["carrier"]
+    sp = (-ok[0]["f_max"] + np.arange(nf) * (2.0 * ok[0]["f_max"] / (nf - 1))) * lam / 2.0
+    vis = np.abs(sp) <= 3.0
+    E = np.array([m["excess_db"] for m in ok])
+    fig, ax = plt.subplots(2, 1, figsize=(14, 9), sharex=True)
+    ax[0].pcolormesh(tc, np.arange(nb) * ok[0]["m_per_bin"], E[:, :, np.abs(sp) >= 0.1].max(2).T,
+                     vmin=0, vmax=15, cmap="magma", shading="auto")
+    ax[1].pcolormesh(tc, sp[vis], E[:, :, vis].max(1).T, vmin=0, vmax=15, cmap="magma", shading="auto")
+    col = dict(mover="lime", residue="cyan", unverified="0.6")
+    for tr in tracks:
+        if len(tr["hist"]) < 2:
+            continue
+        h = np.array([(tt - t0, R) for _, tt, R, _ in tr["hist"]])
+        spd = np.array([-V / 2.0 for _, _, _, V in tr["hist"]])   # Rdot = -lambda f, speed = f lambda / 2
+        c = col[tr["class"]]
+        lw = 2.0 if tr["class"] == "mover" else 1.0
+        ax[0].plot(h[:, 0], h[:, 1], "-o", color=c, ms=2, lw=lw)
+        ax[1].plot(h[:, 0], spd, "-o", color=c, ms=2, lw=lw)
+    for m in ok:
+        for k in m.get("markers", []):
+            if k["verdict"] == tdd.VERDICT_REPLICA:
+                continue
+            ax[0].plot(m["t_center"] - t0, k["range_m"], ".", color="w", ms=2)
+    ax[0].set_ylabel("bistatic excess range, m")
+    ax[1].set_ylabel("speed, m/s (f lambda/2)")
+    ax[1].set_xlabel("time, s")
+    ax[0].set_title("excess over each cell's background (dB, 0-15); tracks: lime mover, cyan residue, grey unverified")
+    plt.tight_layout()
+    plt.savefig(path, dpi=80)
+    plt.close(fig)
+
+
 # ---------------------------------------------------------------- driver
 
 def clamp(field, value):
@@ -699,9 +1099,24 @@ def main():
     ap.add_argument("--vcomp", action="store_true",
                     help="with --avg-maps: shift each Doppler column by its path-length "
                          "rate before averaging, so movers stay aligned")
+    ap.add_argument("--hygiene", action="store_true",
+                    help="A: drop outlier snapshots and cut windows at scene steps before the maps (a_*)")
+    ap.add_argument("--clutter-map", action="store_true",
+                    help="C: detect each cell against its own history instead of the TDD detector (cm_*)")
+    ap.add_argument("--track", action="store_true",
+                    help="E: track C's detections and keep the kinematically consistent ones (tr_*); "
+                         "implies --clutter-map")
+    ap.add_argument("--residue", action="store_true", help="A + C + E together")
+    ap.add_argument("--inject", default=None, metavar="DB,R0,AMP,PERIOD",
+                    help="add a synthetic walker before everything: level re the direct path (dB), "
+                         "range centre and swing (m, bistatic excess), swing period (s)")
     for fld, val in DEFAULTS.items():     # allow overriding any base parameter
         ap.add_argument("--" + fld.replace("_", "-"), type=float, default=None)
     args = ap.parse_args()
+    if args.residue:
+        args.hygiene = args.clutter_map = args.track = True
+    if args.track:
+        args.clutter_map = True
 
     # expand ~ and env vars ourselves: a quoted glob is not expanded by the shell, and
     # glob does not expand ~ either, so '~/runs/...' would otherwise match nothing.
@@ -756,12 +1171,32 @@ def main():
     if args.avg_maps > 1:
         suffix = f"_avg{args.avg_maps}" + ("_vcomp" if args.vcomp else "")
 
+    parsed_all = [parse_rec(path)[0] for path in files]
+    if args.inject:
+        inject_walker(parsed_all, args.inject)
+        suffix += "_inj" + args.inject.replace(",", "_")
+    if args.hygiene:
+        suffix += "_A"
+    if args.clutter_map:
+        suffix += "_C"
+    if args.track:
+        suffix += "_E"
     for label, prm in sets:
         label += suffix
+        parsed = parsed_all
+        steps_abs = []
+        if args.hygiene:
+            parsed, st = hygiene(parsed_all, prm)
+            steps_abs = st["steps_abs"]
+            print(f"{label}: hygiene dropped {st['outliers']}/{st['total']} outlier snapshots "
+                  f"({100.0 * st['outliers'] / max(st['total'], 1):.1f}%), scene steps at "
+                  f"{', '.join(f'{x:.2f}' for x in st['steps']) or 'none'} s "
+                  f"({st['dropped_side']} snapshots cut off on the short side)")
         # every window on the first window's Doppler grid, so maps can be averaged
         ms, nf_run = [], 0
-        for path in files:
-            groups, _, _ = parse_rec(path)
+        for groups in parsed:
+            if not groups:
+                continue
             m = build_averaged(groups, prm, not args.no_antenna_avg, not args.no_layer_avg, nf_run)
             if m is None:
                 continue
@@ -771,7 +1206,12 @@ def main():
         if not ms:
             print(f"{label}: no maps built")
             continue
-        if not args.no_tdd_detect:
+        tracks = None
+        if args.clutter_map:
+            clutter_map(ms, prm, steps_abs)
+            if args.track:
+                tracks = track(ms, prm)
+        elif not args.no_tdd_detect:
             cfg = tdd.cfg_default()
             if args.tdd_pfa is not None:
                 cfg["pfa"] = args.tdd_pfa
@@ -784,19 +1224,30 @@ def main():
             with open(os.path.join(args.out_dir, f"{label}.csv"), "w") as fh:
                 for i, m in enumerate(ms):
                     write_map_line(fh, i, m)
-            if not args.no_tdd_detect:
+            detected = args.clutter_map or not args.no_tdd_detect
+            if detected:
                 write_targets(os.path.join(args.out_dir, f"{label}.targets.csv"), ms)
+            if tracks is not None:
+                write_tracks(os.path.join(args.out_dir, f"{label}.tracks.csv"), tracks, ms[0]["t_center"])
+            if args.clutter_map:
+                plot_run(os.path.join(args.out_dir, f"{label}.time.png"), ms, tracks or [])
         peaks = np.array([10.0 * math.log10(max(p.max(), 1e-12)) for p in maps])
         # sliding outputs share K-1 of their K maps, so compare only outputs K apart
         rep = repeatability(maps[::max(1, args.avg_maps)])
         line = (f"{label:28s}  maps {len(maps):3d}  peak SNR {peaks.mean():6.1f} +- "
                 f"{peaks.std():4.1f} dB   repeatability {rep:.3f}")
-        if not args.no_tdd_detect:
+        if args.clutter_map or not args.no_tdd_detect:
             n_t = np.array([sum(t["verdict"] == tdd.VERDICT_TARGET for t in m["markers"]) for m in ms])
             n_u = sum(sum(t["verdict"] == tdd.VERDICT_UNCERTAIN for t in m["markers"]) for m in ms)
             n_r = sum(sum(t["verdict"] == tdd.VERDICT_REPLICA for t in m["markers"]) for m in ms)
             line += (f"   targets/map {n_t.mean():.2f} (maps with one: {np.mean(n_t > 0)*100:.0f}%)"
                      f"  replicas {n_r}  uncertain {n_u}")
+        if tracks is not None:
+            by = {}
+            for tr in tracks:
+                if len(tr["hist"]) >= 2:
+                    by[tr["class"]] = by.get(tr["class"], 0) + 1
+            line += "   tracks " + " ".join(f"{k} {v}" for k, v in sorted(by.items()))
         print(line)
     return 0
 
