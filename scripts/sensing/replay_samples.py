@@ -19,10 +19,7 @@ antenna- and layer-averaged clutter-removed range-Doppler map. To compare it aga
 live map2d.csv, run the normal pipeline with spatial_null: false (the AoA only adds the
 marker/angle payload, it does not change the power map).
 
-The TDD detector and the +-v mirror rejection run as with tdd_detect and mirror_reject
-on (tdd_detect.py, a port of nr_ue_tdd_detect.c): on the window's rx0 conditioned samples,
-markers written into each map line and every marker to <label>.targets.csv. Disable with
---no-tdd-detect / --no-mirror-reject.
+Detection is --clutter-map (C below); without it the maps are written without markers.
 
 NOT ported (use the live pipeline, or extend here): the spatial null across chains,
 AoA/MUSIC, and alignment (alignment is applied in the capture path
@@ -67,9 +64,10 @@ import sys
 
 import numpy as np
 
-import tdd_detect as tdd
 
 C = 299792458.0
+# marker verdicts, as nr_tdd_verdict_t and plot_range_doppler.py read them
+VERDICT_TARGET, VERDICT_REPLICA, VERDICT_DUPLICATE, VERDICT_UNCERTAIN = 0, 1, 2, 3
 MAX_BINS_FREQ = 2048
 MIN_SNAPSHOTS = 32
 SLOW_TREND_MAX = 3
@@ -90,18 +88,6 @@ DEFAULTS = dict(
     comb_harmonic=6,
     comb_tdd_multiple=2,
     comb_power_iters=24,
-    sliding_la_ms=0.0,    # sliding ECA (ACRF-CS) averaging window, ms; 0 = off (slow trend used)
-    sliding_ls_ms=0.5,    # its update block, ms; one slot pushes the block side peaks to 2 kHz
-    # --kfactor analysis (fluctuation statistics per range bin over seconds)
-    k_window_s=2.0,       # analysis window, s; a person standing still needs seconds to show
-    k_hop_s=0.5,          # step between windows, s
-    k_thresh_db=3.0,      # flag a bin when its (floor-corrected) Rician K is below this
-    k_margin_db=6.0,      # ...and its slow fluctuation is this far above the window's floor (25th pct of bins)
-    k_common_norm=1,      # remove a common complex gain per snapshot first (the slow common drift)
-    k_floor_corr=1,       # use the slow (lagged-correlation) fluctuation power, which the floor barely reaches
-    k_lag_ms=100.0,       # lag of that correlation; the floor decorrelates in ~100 ms, a swaying body
-                          # does not (0: next snapshot)
-    k_detrend=1,          # remove a linear drift per bin within the window
     # --hygiene (A): snapshots and scene steps the clutter removal cannot model
     a_ref_ms=100.0,       # span of the running local reference a snapshot is compared with
     a_outlier_x=5.0,      # drop a snapshot whose residue against it exceeds this x the run median
@@ -126,21 +112,18 @@ DEFAULTS = dict(
                           # has no range drift (slope ~0), so it misses by 1.0 x its rate
 )
 
-# field -> (lo, hi) hard range, for clamping a swept value (mirrors nr_sweep_apply)
+# field -> (lo, hi) hard range, for clamping a swept value
 RANGE = dict(
     clutter_mode=(0, 2), max_paths=(1, 4), trend_degree=(0, SLOW_TREND_MAX),
     kernel_half_span=(1, None), static_min=(0.0, None), snr_min=(0.0, None),
     min_sep_bins=(1, None), los_first_db=(0.0, None), comb_remove=(0, 1),
     comb_harmonic=(1, COMB_MAX_HARMONIC), comb_tdd_multiple=(1, None),
-    sliding_la_ms=(0.0, None), sliding_ls_ms=(0.1, None),
-    k_window_s=(0.05, None), k_hop_s=(0.01, None), k_thresh_db=(None, None), k_margin_db=(None, None),
-    k_common_norm=(0, 1), k_floor_corr=(0, 1), k_detrend=(0, 1), k_lag_ms=(0.0, None),
     a_ref_ms=(1.0, None), a_outlier_x=(1.0, None), a_block_ms=(1.0, None), a_step_ms=(1.0, None),
     a_step_x=(1.0, None), cm_tau_s=(0.1, None), cm_learn_maps=(1, None), cm_pfa=(1e-12, 0.5),
     cm_min_db=(0.0, None), cm_vmin_ms=(0.0, None), tr_accel=(0.01, None), tr_gate=(0.1, None),
     tr_m=(1, None), tr_n=(1, None), tr_max_miss=(1, None), tr_check_s=(0.1, None), tr_tol_ms=(0.0, None), tr_tol_frac=(0.0, 0.95),
 )
-INT_FIELDS = {"k_common_norm", "k_floor_corr", "k_detrend", "clutter_mode", "max_paths", "trend_degree", "kernel_half_span",
+INT_FIELDS = {"clutter_mode", "max_paths", "trend_degree", "kernel_half_span",
               "min_sep_bins", "comb_remove", "comb_harmonic", "comb_tdd_multiple",
               "comb_power_iters", "cm_learn_maps", "tr_m", "tr_n", "tr_max_miss"}
 
@@ -256,43 +239,6 @@ def remove_path(res, snaps, u, half_span):
             res[i, b_lo:b_hi + 1] -= alpha * Ks[i]
 
 
-def sliding_filter(t, la_s, ls_s):
-    """Sliding ECA in the channel domain (ACRF-CS, Liu et al. 2020; the ECA-S equivalent).
-
-    The slow time is cut into blocks of ls_s seconds. Every sample of a block loses the mean
-    of the samples within +-la_s/2 of the block centre, i.e. the static channel estimated
-    around it, per delay bin. In this domain ECA's "project off the delayed copies of the
-    reference" is exactly that subtraction, since the reference is already divided out.
-
-    Unlike the slow trend, which fits one polynomial over the whole window, this follows a
-    static path that varies during the window. The price is a Doppler notch about 1/la_s
-    wide (la_s 40 ms: ~25 Hz, ~1.1 m/s at 3.45 GHz). The block structure puts side peaks at
-    multiples of 1/ls_s; one slot (0.5 ms) moves them to 2 kHz, off the map. Blocks and
-    windows are in time, not in sample counts, because TDD sampling is not uniform.
-
-    Returns the filter as a function of a slow-time array [n] or [n, k] (axis 0 = time),
-    so the TDD detector can model a target's tone through the same filter."""
-    t = np.asarray(t, dtype=np.float64)
-    ls_s = max(ls_s, 1e-6)
-    la_s = max(la_s, ls_s)                          # the window must cover its own block
-    blk = np.floor((t - t[0]) / ls_s).astype(np.int64)
-    ub = np.unique(blk)
-    centres = t[0] + (ub + 0.5) * ls_s
-    lo = np.searchsorted(t, centres - 0.5 * la_s, side="left")
-    hi = np.searchsorted(t, centres + 0.5 * la_s, side="right")
-    pos = np.searchsorted(ub, blk)
-    s_lo, s_hi = lo[pos], hi[pos]
-
-    def f(v):
-        v = np.asarray(v)
-        cs = np.concatenate([np.zeros((1,) + v.shape[1:], dtype=v.dtype), np.cumsum(v, axis=0)])
-        cnt = np.maximum(s_hi - s_lo, 1).reshape((-1,) + (1,) * (v.ndim - 1))
-        return v - (cs[s_hi] - cs[s_lo]) / cnt
-    return f
-
-
-# ---------------------------------------------------------------- the map
-
 def build_map(snaps, prm, n_freq_fixed=0):
     """Range-Doppler power map for one (chain, layer). Returns dict or None."""
     n = len(snaps)
@@ -352,20 +298,12 @@ def build_map(snaps, prm, n_freq_fixed=0):
             remove_path(res, snaps, u, prm["kernel_half_span"])
             u_fit.append(u)
 
-    # gain, then per-bin static removal: the slow trend (C default) or, when
-    # sliding_la_ms > 0, the sliding ECA in its place (not in the C pipeline yet)
-    slow_f = None
+    # gain, then per-bin static removal: the slow trend
     z = gain[:, None] * res                         # (n, n_bins)
-    if mode != 0 and prm.get("sliding_la_ms", 0) > 0:
-        slow_f = sliding_filter(t, prm["sliding_la_ms"] * 1e-3, prm["sliding_ls_ms"] * 1e-3)
-        z = slow_f(z)
-        trend_degree = -1                           # nothing projected; the detector models slow_f
-        Q = slow_basis(t, 0)                        # the comb is kept orthogonal to the mean only
-    else:
-        trend_degree = -1 if mode == 0 else prm["trend_degree"]
-        Q = slow_basis(t, trend_degree)             # (n_q, n)
-        for q in Q:
-            z = z - np.outer(q, q @ z)              # remove projection on q, per bin
+    trend_degree = -1 if mode == 0 else prm["trend_degree"]
+    Q = slow_basis(t, trend_degree)                 # (n_q, n)
+    for q in Q:
+        z = z - np.outer(q, q @ z)                  # remove projection on q, per bin
     res = z
 
     # rank-1 comb removal
@@ -420,7 +358,7 @@ def build_map(snaps, prm, n_freq_fixed=0):
                 # the conditioned slow-time samples and what the TDD detector needs with
                 # them, as range_doppler hands them back in slow_out
                 res=res, t=t, win_len=n_max, win_start=int(s0["a_m"]), idft=idft0,
-                trend_degree=trend_degree, tdd_period=tdd_period, slow_filter=slow_f)
+                trend_degree=trend_degree, tdd_period=tdd_period)
 
 
 def build_averaged(groups, prm, antenna_avg, layer_avg, n_freq_fixed=0):
@@ -538,160 +476,10 @@ def write_map_line(fh, idx, m):
              ",".join(f"{x:g}" for x in list(power) + mk) + "\n")
 
 
-# ---------------------------------------------------------------- K-factor analysis
-
-def load_run(files):
-    """Every recorded snapshot of a run per (aarx, layer), time ordered, de-duplicated and
-    normalised to the widest grant, so analysis windows can span consecutive recordings."""
-    acc, m_per_bin = {}, None
-    for path in files:
-        g, _, _ = parse_rec(path)
-        for k, snaps in g.items():
-            acc.setdefault(k, []).extend(snaps)
-            if m_per_bin is None and snaps:
-                s0 = snaps[0]
-                m_per_bin = C / (s0["idft"] * s0["k_step"] * s0["scs"])
-    out = {}
-    for k, snaps in acc.items():
-        t = np.array([x["t_abs"] for x in snaps])
-        order = np.argsort(t, kind="stable")
-        keep = np.concatenate([[True], np.diff(t[order]) > 1e-9])
-        idx = order[keep]
-        npil = np.array([snaps[i]["n_pilots"] for i in idx], dtype=float)
-        H = np.stack([snaps[i]["h"] for i in idx]) * (npil.max() / npil)[:, None]
-        out[k] = dict(t=t[idx], h=H)
-    return out, m_per_bin
-
-
-def kfactor_window(H, t, prm):
-    """Per-bin powers of one chain over one analysis window: static |mean|^2, total
-    fluctuation, and its slow (lag-1 correlated) part.
-
-    Common gain: over seconds every bin wanders together (gain and phase of the whole
-    snapshot, several rad in 2 s on the lab runs), which makes walls look as alive as a
-    person. A complex gain per snapshot, fitted against the static profile and refined a
-    few times, takes it out; a single mover barely moves that fit since the static scene
-    dominates it. Slow part: |mean(r(t+lag) conj(r(t)))|. The floor decorrelates over ~100 ms
-    and mostly averages out of it, while a body's fluctuation, correlated over longer, stays."""
-    if prm["k_common_norm"]:
-        ref = H.mean(0)
-        for _ in range(3):
-            g = (H @ ref.conj()) / np.vdot(ref, ref).real
-            g[np.abs(g) < 1e-12] = 1.0
-            Hn = H / g[:, None]
-            ref = Hn.mean(0)
-        H = Hn
-    mu = H.mean(0)
-    r = H - mu
-    if prm["k_detrend"]:
-        A = np.vstack([np.ones_like(t), t - t.mean()]).T
-        r = r - A @ np.linalg.lstsq(A, r, rcond=None)[0]
-    p_tot = (np.abs(r) ** 2).mean(0)
-    lag = prm.get("k_lag_ms", 0.0) * 1e-3
-    if lag > 0:
-        # pairs about `lag` apart; measured on the lab runs the floor keeps ~20% correlation
-        # for tens of ms and ~5% at 100-200 ms, so a lag of that order strips far more of it
-        # than the next snapshot does
-        j = np.searchsorted(t, t + lag)
-        i = np.nonzero(j < len(t))[0]
-        j = j[i]
-        ok = np.abs(t[j] - t[i] - lag) < max(0.25e-3, 0.1 * lag)
-        i, j = i[ok], j[ok]
-    else:
-        i, j = np.arange(len(t) - 1), np.arange(1, len(t))
-    p_slow = np.abs((r[j] * r[i].conj()).mean(0)) if len(i) else np.zeros_like(p_tot)
-    return np.abs(mu) ** 2, p_tot, p_slow
-
-
-def kfactor_run(data, m_per_bin, prm, label, out_dir):
-    """Sliding K-factor analysis over a whole run: per window and range bin, chains summed in
-    power. Writes <label>.kfactor.csv and a time x range picture, prints a summary."""
-    W, hop = prm["k_window_s"], prm["k_hop_s"]
-    t0 = min(d["t"][0] for d in data.values())
-    t1 = max(d["t"][-1] for d in data.values())
-    rows, times, kmap, fmap = [], [], [], []
-    for start in np.arange(t0, t1 - W + 1e-9, hop):
-        S = Pt = Ps = 0.0
-        n_used = 0
-        for d in data.values():
-            sel = (d["t"] >= start) & (d["t"] < start + W)
-            if sel.sum() < 200:
-                continue
-            a, b, c = kfactor_window(d["h"][sel], d["t"][sel], prm)
-            S, Pt, Ps, n_used = S + a, Pt + b, Ps + c, n_used + 1
-        if n_used == 0:
-            continue
-        los = S.max()
-        fl = Ps if prm["k_floor_corr"] else Pt
-        db = lambda x: 10.0 * np.log10(np.maximum(x, 1e-30))
-        static_db, fl_db = db(S / los), db(fl / los)
-        k_raw, k_db = db(S / Pt), db(S / fl)
-        # what "significant" fluctuation means is relative to this window's floor: the white
-        # floor keeps a small lag-1 correlation (~0.05 of its power) that an absolute level
-        # would mistake for slow motion, and the floor itself drifts over a run
-        floor_db = np.percentile(fl_db, 25)
-        flag = (fl_db >= floor_db + prm["k_margin_db"]) & (k_db < prm["k_thresh_db"])
-        tc = start + 0.5 * W - t0
-        times.append(tc); kmap.append(k_db); fmap.append(flag)
-        for b in range(len(S)):
-            rows.append((tc, b, b * m_per_bin, static_db[b], k_raw[b], k_db[b], Ps[b] / Pt[b], fl_db[b],
-                         fl_db[b] - floor_db, int(flag[b])))
-    if not rows:
-        print(f"{label}: no window long enough")
-        return
-    path = os.path.join(out_dir, f"{label}.kfactor.csv")
-    with open(path, "w") as fh:
-        fh.write("t_s,bin,range_m,static_db,k_raw_db,k_db,lag1_coh,fluct_db,fluct_over_floor_db,flag\n")
-        for r in rows:
-            fh.write(f"{r[0]:.3f},{r[1]},{r[2]:.2f},{r[3]:.2f},{r[4]:.2f},{r[5]:.2f},{r[6]:.3f},{r[7]:.2f},"
-                     f"{r[8]:.2f},{r[9]}\n")
-    K, F = np.array(kmap), np.array(fmap)
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        fig, ax = plt.subplots(figsize=(10, 5))
-        nb = K.shape[1]
-        im = ax.imshow(np.clip(K.T, -10, 20), aspect="auto", origin="lower", cmap="viridis",
-                       extent=[times[0] - hop / 2, times[-1] + hop / 2, -0.5 * m_per_bin, (nb - 0.5) * m_per_bin])
-        ti, bi = np.nonzero(F)
-        ax.scatter(np.array(times)[ti], bi * m_per_bin, s=8, c="red", label=f"K < {prm['k_thresh_db']:g} dB")
-        ax.set_xlabel("time in run (s)"); ax.set_ylabel("bistatic path length (m)")
-        ax.set_title(f"{label}: Rician K per range bin, {W:g} s windows"); ax.legend(loc="upper right")
-        fig.colorbar(im, ax=ax, label="K (dB)")
-        fig.savefig(os.path.join(out_dir, f"{label}.kfactor.png"), dpi=110, bbox_inches="tight")
-        plt.close(fig)
-    except ImportError:
-        pass
-    print(f"{label:28s}  {len(times)} windows of {W:g} s | flagged cells {F.mean()*100:.1f}% | "
-          f"windows with a flag {np.mean(F.any(1))*100:.0f}%")
-    for tc, f in zip(times, F):
-        if f.any():
-            rng = ", ".join(f"{b*m_per_bin:.0f}" for b in np.nonzero(f)[0][:8])
-            print(f"    t {tc:6.2f} s: {f.sum():2d} bin(s) at {rng}{' ...' if f.sum() > 8 else ''} m")
-
-
-# ---------------------------------------------------------------- detection
-
-def run_detector(m, mirror, cfg=None):
-    """The TDD detector on the window's rx0 conditioned samples, on the map's own Doppler
-    grid, then the mirror rejection on the (possibly averaged) map, as map_task does with
-    tdd_detect and mirror_reject on. Attaches m["markers"]: targets first, then rejections."""
-    obs = tdd.Obs(h=m["res"], t=m["t"], idft_size=m["idft"], win_len=m["win_len"],
-                  win_start=m["win_start"], win=hann(m["win_len"]), m_per_bin=m["m_per_bin"],
-                  n_freq=m["n_freq"], f_max_hz=m["f_max"], lambda_m=C / m["carrier"],
-                  t_tdd_s=m["tdd_period"], trend_q=slow_basis(m["t"], m["trend_degree"]),
-                  slow_filter=m.get("slow_filter"))
-    targets, rejected = tdd.detect(obs, cfg)
-    if mirror:
-        targets, rejected = tdd.mirror_reject(targets, rejected, m["power"], m["f_max"])
-    m["markers"] = targets + rejected
-
-
 def write_targets(path, ms):
     """Every marker of every map, one per line, for persistence analysis."""
-    names = {tdd.VERDICT_TARGET: "target", tdd.VERDICT_REPLICA: "replica",
-             tdd.VERDICT_DUPLICATE: "duplicate", tdd.VERDICT_UNCERTAIN: "uncertain"}
+    names = {VERDICT_TARGET: "target", VERDICT_REPLICA: "replica",
+             VERDICT_DUPLICATE: "duplicate", VERDICT_UNCERTAIN: "uncertain"}
     with open(path, "w") as fh:
         fh.write("map,t_s,verdict,bin,range_m,f_hz,speed_ms,snr_dB\n")
         t0 = ms[0]["t_center"]
@@ -902,7 +690,7 @@ def clutter_map(ms, prm, steps=()):
                     rep = True
                     break
             frac = peak_frac(P[:, f], b) if 0 < b < nb - 1 else 0.0
-            markers.append(dict(verdict=tdd.VERDICT_REPLICA if rep else tdd.VERDICT_TARGET,
+            markers.append(dict(verdict=VERDICT_REPLICA if rep else VERDICT_TARGET,
                                 bin=b + frac, range_m=(b + frac) * m["m_per_bin"], f_hz=freqs[f],
                                 speed_ms=speed[f], snr_dB=float(z)))
         markers.sort(key=lambda x: x["verdict"])
@@ -934,7 +722,7 @@ def track(ms, prm):
         sR = m["m_per_bin"] / 2.5
         sV = lam * (1.0 / max(m["t_span"], 1e-3))
         Rm = np.diag([sR * sR, sV * sV])
-        dets = [k for k in m.get("markers", []) if k["verdict"] == tdd.VERDICT_TARGET]
+        dets = [k for k in m.get("markers", []) if k["verdict"] == VERDICT_TARGET]
         z = [np.array([k["range_m"], -lam * k["f_hz"]]) for k in dets]
         t = m["t_center"]
         live = [tr for tr in tracks if not tr["dead"]]
@@ -1002,8 +790,8 @@ def track(ms, prm):
     cls = {tr["id"]: tr["class"] for tr in tracks}
     for m in ms:
         for k in m.get("markers", []):
-            if k["verdict"] == tdd.VERDICT_TARGET:
-                k["verdict"] = tdd.VERDICT_TARGET if cls.get(k.get("track")) == "mover" else tdd.VERDICT_UNCERTAIN
+            if k["verdict"] == VERDICT_TARGET:
+                k["verdict"] = VERDICT_TARGET if cls.get(k.get("track")) == "mover" else VERDICT_UNCERTAIN
     return tracks
 
 
@@ -1052,7 +840,7 @@ def plot_run(path, ms, tracks):
         ax[1].plot(h[:, 0], spd, "-o", color=c, ms=2, lw=lw)
     for m in ok:
         for k in m.get("markers", []):
-            if k["verdict"] == tdd.VERDICT_REPLICA:
+            if k["verdict"] == VERDICT_REPLICA:
                 continue
             ax[0].plot(m["t_center"] - t0, k["range_m"], ".", color="w", ms=2)
     ax[0].set_ylabel("bistatic excess range, m")
@@ -1089,17 +877,6 @@ def main():
     ap.add_argument("--no-layer-avg", action="store_true")
     ap.add_argument("--avg-maps", type=int, default=1,
                     help="sliding non-coherent average over K consecutive maps (default 1: off)")
-    ap.add_argument("--no-tdd-detect", action="store_true",
-                    help="skip the TDD detector (on by default, as tdd_detect: true)")
-    ap.add_argument("--tdd-pfa", type=float, default=None,
-                    help="detector CFAR false-alarm rate per cell (C default 1e-6)")
-    ap.add_argument("--tdd-gamma", type=float, default=None,
-                    help="detector replica power-drop requirement, Eq. (23) (C default 0.2)")
-    ap.add_argument("--no-mirror-reject", action="store_true",
-                    help="keep targets with an equally strong mirror at -v (mirror_reject: false)")
-    ap.add_argument("--kfactor", action="store_true",
-                    help="instead of maps: per-range-bin Rician K / slow fluctuation over sliding "
-                         "windows of seconds (k_* parameters, sweepable), to <label>.kfactor.csv/.png")
     ap.add_argument("--vcomp", action="store_true",
                     help="with --avg-maps: shift each Doppler column by its path-length "
                          "rate before averaging, so movers stay aligned")
@@ -1162,12 +939,6 @@ def main():
         args.out_dir = os.path.join(os.path.dirname(files[0]) or ".", "replay")
     args.out_dir = os.path.expanduser(os.path.expandvars(args.out_dir))
     os.makedirs(args.out_dir, exist_ok=True)
-    if args.kfactor:
-        data, m_per_bin = load_run(files)
-        print(f"K-factor analysis of {len(files)} recordings, chains {sorted(data)}, to {args.out_dir}/")
-        for label, prm in sets:
-            kfactor_run(data, m_per_bin, prm, label, args.out_dir)
-        return 0
     print(f"writing maps to {args.out_dir}/ (same pipeline as normal mode, without the "
           f"spatial null and AoA)")
 
@@ -1215,21 +986,12 @@ def main():
             clutter_map(ms, prm, steps_abs)
             if args.track:
                 tracks = track(ms, prm)
-        elif not args.no_tdd_detect:
-            cfg = tdd.cfg_default()
-            if args.tdd_pfa is not None:
-                cfg["pfa"] = args.tdd_pfa
-            if args.tdd_gamma is not None:
-                cfg["gamma"] = args.tdd_gamma
-            for m in ms:
-                run_detector(m, not args.no_mirror_reject, cfg)
         maps = [m["power"] for m in ms]
         if args.out_dir:
             with open(os.path.join(args.out_dir, f"{label}.csv"), "w") as fh:
                 for i, m in enumerate(ms):
                     write_map_line(fh, i, m)
-            detected = args.clutter_map or not args.no_tdd_detect
-            if detected:
+            if args.clutter_map:
                 write_targets(os.path.join(args.out_dir, f"{label}.targets.csv"), ms)
             if tracks is not None:
                 write_tracks(os.path.join(args.out_dir, f"{label}.tracks.csv"), tracks, ms[0]["t_center"])
@@ -1248,10 +1010,10 @@ def main():
         rep = repeatability(maps[::max(1, args.avg_maps)])
         line = (f"{label:28s}  maps {len(maps):3d}  peak SNR {peaks.mean():6.1f} +- "
                 f"{peaks.std():4.1f} dB   repeatability {rep:.3f}")
-        if args.clutter_map or not args.no_tdd_detect:
-            n_t = np.array([sum(t["verdict"] == tdd.VERDICT_TARGET for t in m["markers"]) for m in ms])
-            n_u = sum(sum(t["verdict"] == tdd.VERDICT_UNCERTAIN for t in m["markers"]) for m in ms)
-            n_r = sum(sum(t["verdict"] == tdd.VERDICT_REPLICA for t in m["markers"]) for m in ms)
+        if args.clutter_map:
+            n_t = np.array([sum(t["verdict"] == VERDICT_TARGET for t in m["markers"]) for m in ms])
+            n_u = sum(sum(t["verdict"] == VERDICT_UNCERTAIN for t in m["markers"]) for m in ms)
+            n_r = sum(sum(t["verdict"] == VERDICT_REPLICA for t in m["markers"]) for m in ms)
             line += (f"   targets/map {n_t.mean():.2f} (maps with one: {np.mean(n_t > 0)*100:.0f}%)"
                      f"  replicas {n_r}  uncertain {n_u}")
         if tracks is not None:
