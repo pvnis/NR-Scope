@@ -2,6 +2,8 @@
 #include <iostream>
 #include <string>
 #include <unistd.h>
+#include <csignal>
+#include <thread>
 
 #include "nrscope/hdr/nrscope_def.h"
 #include "nrscope/hdr/load_config.h"
@@ -29,6 +31,33 @@ int main(int argc, char** argv){
 
   int nof_usrp = get_nof_usrp(file_name);
   std::vector<Radio> radios(nof_usrp);
+
+  /* Ctrl-C: stop the radio streams, then leave. The receive loops stop on nrscope_stop;
+    once they have had time to leave UHD, the streams are stopped and flushed, so the
+    X410 is idle for the next run, and the process exits without running the destructors
+    of objects other threads still use. See my_sig_handler. */
+  sem_init(&nrscope_stop_sem, 0, 0);
+  {
+    struct sigaction sa = {};
+    sa.sa_handler = my_sig_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
+    /* Run as "nrscope ... | tee log", Ctrl-C also ends tee, and the next print would kill
+      the process with SIGPIPE before the streams are stopped. */
+    signal(SIGPIPE, SIG_IGN);
+  }
+  std::thread([&radios]() {
+    while (sem_wait(&nrscope_stop_sem) != 0) {
+    }
+    usleep(300000);
+    for (auto& r : radios) {
+      r.StopStreams();
+    }
+    printf("Radio streams stopped, exiting\n");
+    fflush(nullptr);
+    _exit(0);
+  }).detach();
 
   // TODO: Add a USRP as cell searcher -- always searching for the cell 
   if(load_config(radios, file_name) == NR_FAILURE){

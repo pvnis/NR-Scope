@@ -500,8 +500,18 @@ double get_now_timestamp_in_double();
 
 /**
  * Handle the CTRL+C signal in each thread.
+ *
+ * The first SIGINT/SIGTERM only asks for a stop: it sets nrscope_stop, which the
+ * receive loops check, and posts nrscope_stop_sem, which main's shutdown thread waits
+ * on to stop the radio streams before the process exits. Exiting from the handler
+ * instead tore UHD down under the threads still receiving and left the X410's stream
+ * endpoints running, and the next start then failed ("rx xport timed out getting a
+ * response from mgmt_portal", "Unexpected opcode value in STRC packet"), worse with
+ * four chains than with two. A second signal exits at once.
  */
 void my_sig_handler(int s);
+extern std::atomic<bool> nrscope_stop;
+extern sem_t             nrscope_stop_sem;
 
 /**
  * Calculate nof_rbgs, from sched_nr_rb.cc

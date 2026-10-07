@@ -310,7 +310,7 @@ int Radio::ScanInitandStart()
       rf_buffer.set_nof_samples(pre_resampling_slot_sz);
       rf_buffer.set(0, pre_resampling_rx_buffer);
 
-      for (uint32_t trial = 0; trial < nof_trials_scan; trial++) {
+      for (uint32_t trial = 0; trial < nof_trials_scan && !nrscope_stop.load(std::memory_order_relaxed); trial++) {
         if (trial == 0) {
           srsran_vec_cf_zero(rx_buffer[0], pre_resampling_slot_sz);
           srsran_vec_cf_zero(pre_resampling_rx_buffer, pre_resampling_slot_sz);
@@ -630,7 +630,7 @@ int Radio::RadioInitandStart()
     uint32_t nof_rx_fail        = 0;
     uint32_t nof_rx_fail_in_row = 0;
 
-    for (uint32_t trial = 0; trial < nof_trials; trial++) {
+    for (uint32_t trial = 0; trial < nof_trials && !nrscope_stop.load(std::memory_order_relaxed); trial++) {
       if (trial == 0) {
         srsran_vec_cf_zero(rx_buffer[0], slot_sz);
         srsran_vec_cf_zero(pre_resampling_rx_buffer, pre_resampling_slot_sz);
@@ -909,7 +909,8 @@ int Radio::FetchAndResample()
   uint64_t nof_sync_lost      = 0;
   uint64_t nof_sf_out_of_sync = 0;
 
-  while (true) {
+  // stops receiving on Ctrl-C, so main's shutdown thread can stop the stream (my_sig_handler)
+  while (!nrscope_stop.load(std::memory_order_relaxed)) {
     int current_value;
     sem_getvalue(&smph_sf_data_finished, &current_value);
     if (NRSCOPE_TRACE_PER_SLOT)
@@ -1015,6 +1016,14 @@ int Radio::FetchAndResample()
   }
 
   return SRSRAN_SUCCESS;
+}
+
+void Radio::StopStreams()
+{
+  srsran::radio* r = dynamic_cast<srsran::radio*>(radio.get());
+  if (r != nullptr) {
+    r->reset(); // stop_rx_stream on every RF device, which also flushes it
+  }
 }
 
 int Radio::DecodeAndProcess()

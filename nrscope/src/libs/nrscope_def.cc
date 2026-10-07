@@ -37,9 +37,19 @@ const char* sch_xoverhead_to_str(srsran_xoverhead_t xoverhead)
   return "invalid";
 }
 
+std::atomic<bool> nrscope_stop{false};
+sem_t             nrscope_stop_sem;
+
 void my_sig_handler(int s){
-  printf("Caught signal %d\n",s);
-  exit(0); 
+  // only async-signal-safe calls here: atomic exchange, write, sem_post, _exit
+  (void)s;
+  if (nrscope_stop.exchange(true)) {
+    _exit(130);
+  }
+  static const char msg[] = "\nStopping: halting the radio streams first (Ctrl-C again to force)\n";
+  ssize_t w = write(STDOUT_FILENO, msg, sizeof(msg) - 1);
+  (void)w;
+  sem_post(&nrscope_stop_sem);
 }
 
 uint32_t get_P(uint32_t bwp_nof_prb, bool config_1_or_2)

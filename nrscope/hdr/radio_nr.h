@@ -146,6 +146,8 @@ public:
    * @return SRSRAN_SUCCESS - 0 for successfuly exit
    */
   int RadioThread();
+  /// Stop the radio's receive streams, for a clean exit (see my_sig_handler)
+  void StopStreams();
 
   /**
    * Another entry to this class -- start the NR SA FR1 scan thread
