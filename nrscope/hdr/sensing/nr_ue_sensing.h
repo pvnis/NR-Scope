@@ -47,28 +47,24 @@ carrier, expressed as a numerator over NR_SENSING_MIN_BAND_DEN. */
 #define NR_SENSING_MIN_BAND_NUM 1
 #define NR_SENSING_MIN_BAND_DEN 2
 
-/* Outcomes of the per-slot draw used by the random drop: one per reference symbol a
-slot can carry, plus one that drops nothing. PDSCH DMRS gives 3 symbols per slot, so
-4 outcomes leave a quarter of the slots untouched and drop one symbol otherwise. */
-#define NR_SENSING_DROP_OUTCOMES 4
+/* Random drop: one slot in NR_SENSING_DROP_ONE_IN, drawn independently per slot, loses
+one of its reference symbols, itself drawn at random among the slot's DM-RS symbols.
+The other slots keep all of theirs.
 
-/* Slots in one TDD period, used by the random drop to leave out at most one whole
-slot per period.
+PDSCH DM-RS sits at the same symbols of every downlink slot (3 per slot here), so the
+slow-time sampling repeats a fixed 3-symbol pattern every slot, on top of the TDD
+period. Dropping the same symbol everywhere would only move that pattern; drawing
+both the slot and the symbol breaks it. At 2 about half the slots lose one symbol,
+which keeps 5/6 of the snapshots for 3 DM-RS symbols per slot. Larger keeps more. */
+#define NR_SENSING_DROP_ONE_IN 2
 
-Dropping symbols only jitters a sample by a fraction of a millisecond, far too little
-against a TDD period of a few, so it does not touch the grating lobes the periodic
-pattern puts at multiples of the TDD rate. Dropping a whole slot moves the sample by
-a slot time, which is the scale that matters.
-
-One position of the period is drawn and the slot sitting there is left out. When the
-draw lands on an uplink slot nothing is dropped, since no PDSCH is scheduled there,
-so some periods keep all of their slots.
+/* Slots in one TDD period.
 
 10 slots is 5 ms at 30 kHz subcarrier spacing. Match the gNB configuration.
 
 NR-Scope: a runtime value rather than OAI's constant 10, set from the cell's SIB1
-(tdd-UL-DL-ConfigurationCommon) once it is decoded, so the TDD detector and the
-random drop use the pattern of whatever cell is sniffed (10 slots on the Benetel
+(tdd-UL-DL-ConfigurationCommon) once it is decoded, so the TDD detector uses
+the pattern of whatever cell is sniffed (10 slots on the Benetel
 cell, 7 D, 1 S, 2 U). 10 until then. */
 extern int nr_sensing_tdd_period_slots;
 #define NR_SENSING_TDD_PERIOD_SLOTS nr_sensing_tdd_period_slots
@@ -304,10 +300,10 @@ uint64_t nr_ue_sensing_symbol_time(int hfn,
                 offset are filled in from the lattice this pass finds.
    slot_abs   : absolute slot index, read by random_drop and by the grant emulation
                 (NR_SENSING_EMULATE_GRANTS in nr_ue_sensing.c, simulation only)
-   random_drop : break up the periodicity of the slow-time sampling, on two scales.
-                At most one of the slot's reference symbols is left out of hist, and
-                at most one whole slot per TDD period is left out as well. The range
-                profile still averages every symbol either way.
+   random_drop : break up the periodicity of the slow-time sampling: in one slot in
+                NR_SENSING_DROP_ONE_IN, drawn at random, one DM-RS symbol drawn at
+                random is left out of hist. The range profile still averages every
+                symbol.
    skip_mask  : bit m set = ignore symbol m on this pass
    lattice    : receives the lattice the group shares, with n set to the smallest
                 pilot count averaged, so the reported resolution is the coarsest one

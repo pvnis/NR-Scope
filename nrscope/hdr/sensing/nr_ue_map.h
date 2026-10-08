@@ -28,7 +28,7 @@
 // Remember we assume TDD, 30 KHz SCS and 3.45 GHz
 
 #define NR_SENSING_MIN_SNAPSHOTS  32 
-#define NR_SENSING_TARGET_DV_MS   0.30  // sets the minimum window t_span^min
+#define NR_SENSING_TARGET_DV_MS   0.3  // sets the minimum window t_span^min
 
 /* How far past NR_SENSING_TARGET_DV_MS a map may land before it is worth a warning.
 The window is aimed at t_span^min itself, and snapshots arrive where the scheduler put
@@ -54,9 +54,9 @@ Make sure the Doppler axis is fine enough to resolve the targets.
 The maximum doppler f_max is 2v_max/lambda + 1 / TDD. The grid spans [-f_max,f_max]
 so 2f_max. We want 2 grid doppler points per cell, so n_freq = 2 * 2f_max * T_span points.
 So the bin spacing in m/s/bin is (lambda/2) * Delta_f = (lambda/2) 2f_max / (n_freq-1) =~ (lambda/2) 1 / 2T = lambda / 4T = delta_v/2.
-So with delta_v = 0.3m/s it gives 0.15 m/s per bin. This is just because we are putting 2 grid points per resolution cell !! else it would have been just 0.3m/s/bin.
+So with delta_v = 0.15m/s it gives 0.075 m/s per bin. This is just because we are putting 2 grid points per resolution cell !! else it would have been just 0.15m/s/bin.
 So the bin spacing for doppler depends on the time window T. 
-To convert this in Hz per bin we can just use the relation f = 2v/lambda, so delta_f = 2 delta_v / lambda = 2 * 0.3 / 0.087 = 6.9 Hz/bin.
+To convert this in Hz per bin we can just use the relation f = 2v/lambda, so delta_f = 2 delta_v / lambda = 2 * 0.15 / 0.087 = 3.45 Hz/bin.
 
 NR_SENSING_MAP_MAX_BINS_FREQ only serves when 4f_max*T_span exceeds this value. If it exceeds it
 then the spacing is coarser than 2 points per cell.
@@ -116,9 +116,9 @@ The two ends can cross only through criterion 1: 4 * f_max * t_min above the gri
 1023 points, e.g. 0.1 m/s (0.44 s) with more than about 17 m/s of coverage. Then
 nr_ue_sensing_span_bounds() says so rather than silently picking one end.
 
-For reference, were criteria 2 and 3 applied, at 3.41 GHz on the full carrier 0.3
+For reference, were criteria 2 and 3 applied, at 3.41 GHz on the full carrier 0.15
 m/s of resolution (0.147 s) would be impossible above about 10 m/s of coverage, and
-0.2 m/s (0.22 s) at any coverage.
+0.1 m/s (0.22 s) at any coverage.
 
 NOT a bound, deliberately: clutter residue. Measured on the dumps the replica comb
 grows 2.45 dB per dB of t_span, against the 1.0 that concentrating a fixed amount of
@@ -581,7 +581,7 @@ holds, and limiting it keeps the cost of a path independent of the map size. */
    Measured on an outdoor window of 116 ms at degree 2: about 5 dB less leak above 2 m/s next
    to the direct path, while a target at 0.5 m/s loses ~2 dB, 1 m/s ~0.3 dB, 0.25 m/s ~15 dB. */
 #ifndef NR_CLUTTER_SLOW_TREND_DEGREE
-#define NR_CLUTTER_SLOW_TREND_DEGREE 2
+#define NR_CLUTTER_SLOW_TREND_DEGREE 0
 #endif
 /// highest degree NR_CLUTTER_SLOW_TREND_DEGREE may take
 #define NR_CLUTTER_SLOW_TREND_MAX 3

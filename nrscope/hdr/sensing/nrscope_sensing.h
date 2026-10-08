@@ -93,6 +93,20 @@ typedef struct {
   starts after the gap, so a map is only built from a window without a hole and short
   maps from a few snapshots cannot happen. 0 disables it. */
   double map_max_gap_ms;
+  /* record_estimates: file to write every grant's DM-RS channel estimates to, at the
+  input of nrscope_sensing_push_estimates(), for sensing_offline to replay through the
+  rest of the pipeline (see nrscope_sensing_record.h). Empty for none. The live maps
+  are built as usual. About 50-60 MB/s per chain and layer at full band. */
+  char   record_estimates[256];
+  /* geometry: where the gNB and the receiver are, for the bistatic localisation and
+  velocity (nr_ue_localize.h). Positions in metres in any planar frame, x east and y
+  north suggested; boresight_deg is the bearing of the receive array's normal in that
+  frame, counterclockwise from +x. Without it (geometry false) the AoA cells are not
+  localised. */
+  bool   geometry;
+  double gnb_xy[2];
+  double rx_xy[2];
+  double boresight_deg;
 } nrscope_sensing_args_t;
 
 /// Most maps avg_maps may average over
@@ -147,8 +161,42 @@ int nrscope_sensing_process_grant(nrscope_sensing_t*          s,
                                   uint32_t                    sfn,
                                   uint32_t                    slot_idx);
 
+/* The sensing half of nrscope_sensing_process_grant(): one layer's DM-RS channel
+   estimates of one grant on one chain, from the per-slot stage (random drop,
+   alignment, taper, delay transform, history) to the map trigger. The live receiver
+   reaches it through nrscope_sensing_process_grant(); sensing_offline calls it with
+   the estimates sensing.record_estimates wrote, so both run the same code.
+   Calls must keep the live order: a slot's chains in chain order, chain 0 first, and
+   for each chain its layers in order.
+   ports, n_layers : the grant's DM-RS port bitmap and its number of layers
+   slot_abs   : absolute slot index, unwrapped across the SFN period
+   dmrs_mask  : bit l set = OFDM symbol l carries DM-RS
+   H, valid   : [SRSRAN_NSYMB_PER_SLOT_NR][n_sc_grid] estimates and their mask; only
+                the rows of dmrs_mask are read
+   Returns snapshots pushed. */
+int nrscope_sensing_push_estimates(nrscope_sensing_t* s,
+                                   uint32_t           aarx,
+                                   uint16_t           ports,
+                                   int                layer,
+                                   int                n_layers,
+                                   uint32_t           sfn,
+                                   uint32_t           slot_idx,
+                                   uint64_t           slot_abs,
+                                   uint16_t           dmrs_mask,
+                                   const cf_t*        H,
+                                   const bool*        valid,
+                                   uint32_t           n_sc_grid);
+
+/* Offline replay: a full map queue makes the caller wait for room instead of
+   dropping the map, since the input then comes faster than real time. */
+void nrscope_sensing_set_offline(nrscope_sensing_t* s, bool offline);
+
 /* Block until every queued map is built and dumped. For tests. */
 void nrscope_sensing_wait_maps(nrscope_sensing_t* s);
+
+/* Write out what sensing.record_estimates still holds in memory and close the file.
+   Call before exiting; a no-op when nothing is being recorded. */
+void nrscope_sensing_record_close(void);
 
 /* DM-RS ports behind the DCI's antenna-ports value, TS 38.212 table 7.3.1.2.2-1
    (configuration type 1, maxLength 1, one codeword): a bitmap, bit i meaning

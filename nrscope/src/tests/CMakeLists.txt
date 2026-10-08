@@ -99,3 +99,19 @@ target_link_libraries(tdd_detect_test nrscope_libs
                                       m)
 add_test(nrscope_tdd_detect tdd_detect_test)
 add_test(nrscope_sensing_selftest sensing_selftest)
+
+# Replays a sensing.record_estimates file through the sensing pipeline, offline: the
+# recorded run's channel estimates, impairments included, through the live code.
+add_executable(sensing_offline sensing_offline.cc)
+target_link_libraries(sensing_offline srsue_phy
+                                      srsran_common
+                                      srsran_phy
+                                      srsran_radio
+                                      rrc_nr_asn1
+                                      nrscope_libs
+                                      ${SRSUE_SOURCES}
+                                      ${SRSRAN_SOURCES}
+                                      ${CMAKE_THREAD_LIBS_INIT}
+                                      ${Boost_LIBRARIES}
+                                      ${YAML_CPP_LIBRARIES}
+                                      m)

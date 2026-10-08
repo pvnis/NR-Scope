@@ -34,6 +34,78 @@ int get_nof_usrp(std::string file_name)
   }
 }
 
+/* sensing: block, OAI's --sensing-* options under the same names without the
+  prefix (dashes as underscores). Off unless enabled; see nrscope_sensing.h. */
+void load_sensing_config(const YAML::Node& config_yaml)
+{
+  nrscope_sensing_default_args(&nrscope_sensing_args);
+  snprintf(nrscope_sensing_args.dump, sizeof(nrscope_sensing_args.dump), "%s/sensing/map2d.csv", NRSCOPE_ROOT_DIR);
+  if (config_yaml["sensing"]) {
+    const YAML::Node sn = config_yaml["sensing"];
+    auto flag = [&sn](const char* key, bool* v) {
+      if (sn[key]) {
+        *v = sn[key].as<bool>();
+      }
+    };
+    flag("enable", &nrscope_sensing_args.enable);
+    if (sn["symbols"]) {
+      nrscope_sensing_args.symbols = sn["symbols"].as<int>();
+      // the upper end, NR_SENSING_HISTORY_DEPTH, is checked where the histories are made
+      if (nrscope_sensing_args.symbols < 32) { // NR_SENSING_MIN_SNAPSHOTS
+        std::cerr << "sensing: symbols must be at least 32, got " << nrscope_sensing_args.symbols << std::endl;
+        exit(EXIT_FAILURE);
+      }
+    }
+    if (sn["max_speed"]) {
+      nrscope_sensing_args.max_speed_ms = sn["max_speed"].as<double>();
+    }
+    if (sn["dump"]) {
+      snprintf(nrscope_sensing_args.dump, sizeof(nrscope_sensing_args.dump), "%s", sn["dump"].as<std::string>().c_str());
+    }
+    flag("clutter_removal", &nrscope_sensing_args.clutter_removal);
+    flag("clutter_kernel", &nrscope_sensing_args.clutter_kernel);
+    flag("antenna_avg", &nrscope_sensing_args.antenna_avg);
+    flag("layer_avg", &nrscope_sensing_args.layer_avg);
+    flag("random_drop", &nrscope_sensing_args.random_drop);
+    flag("tdd_detect", &nrscope_sensing_args.tdd_detect);
+    flag("music", &nrscope_sensing_args.music);
+    flag("mirror_reject", &nrscope_sensing_args.mirror_reject);
+
+    flag("test_record_samples", &nrscope_sensing_args.test_record_samples);
+    if (sn["record_max_files"])
+      nrscope_sensing_args.record_max_files = sn["record_max_files"].as<int>();
+    if (sn["avg_maps"]) {
+      nrscope_sensing_args.avg_maps = sn["avg_maps"].as<int>();
+      if (nrscope_sensing_args.avg_maps < 1 || nrscope_sensing_args.avg_maps > NR_SENSING_AVG_MAX) {
+        std::cerr << "sensing: avg_maps must be 1.." << NR_SENSING_AVG_MAX << ", got "
+                  << nrscope_sensing_args.avg_maps << std::endl;
+        exit(EXIT_FAILURE);
+      }
+    }
+    flag("avg_vcomp", &nrscope_sensing_args.avg_vcomp);
+    if (sn["map_max_gap_ms"])
+      nrscope_sensing_args.map_max_gap_ms = sn["map_max_gap_ms"].as<double>();
+    if (sn["record_estimates"])
+      snprintf(nrscope_sensing_args.record_estimates, sizeof(nrscope_sensing_args.record_estimates), "%s",
+               sn["record_estimates"].as<std::string>().c_str());
+    /* geometry: gnb and rx as [x, y] in metres, boresight_deg the array normal's
+    bearing. All three or none: a partial geometry would localise on made-up numbers. */
+    if (sn["geometry"]) {
+      const YAML::Node g = sn["geometry"];
+      if (!g["gnb"] || !g["rx"] || !g["boresight_deg"] || g["gnb"].size() != 2 || g["rx"].size() != 2) {
+        std::cerr << "sensing: geometry needs gnb: [x, y], rx: [x, y] and boresight_deg" << std::endl;
+        exit(EXIT_FAILURE);
+      }
+      for (int i = 0; i < 2; i++) {
+        nrscope_sensing_args.gnb_xy[i] = g["gnb"][i].as<double>();
+        nrscope_sensing_args.rx_xy[i]  = g["rx"][i].as<double>();
+      }
+      nrscope_sensing_args.boresight_deg = g["boresight_deg"].as<double>();
+      nrscope_sensing_args.geometry      = true;
+    }
+  }
+}
+
 int load_config(std::vector<Radio>& radios, std::string file_name)
 {
   /*To get the config from file, including the number of usrp devices,
@@ -285,56 +357,7 @@ int load_config(std::vector<Radio>& radios, std::string file_name)
   RunRecorder::enable_pdcch_candidates(config_yaml[setting_name]["record_pdcch_candidates"] &&
                                        config_yaml[setting_name]["record_pdcch_candidates"].as<bool>());
 
-  /* sensing: block, OAI's --sensing-* options under the same names without the
-  prefix (dashes as underscores). Off unless enabled; see nrscope_sensing.h. */
-  nrscope_sensing_default_args(&nrscope_sensing_args);
-  snprintf(nrscope_sensing_args.dump, sizeof(nrscope_sensing_args.dump), "%s/sensing/map2d.csv", NRSCOPE_ROOT_DIR);
-  if (config_yaml["sensing"]) {
-    const YAML::Node sn = config_yaml["sensing"];
-    auto flag = [&sn](const char* key, bool* v) {
-      if (sn[key]) {
-        *v = sn[key].as<bool>();
-      }
-    };
-    flag("enable", &nrscope_sensing_args.enable);
-    if (sn["symbols"]) {
-      nrscope_sensing_args.symbols = sn["symbols"].as<int>();
-      // the upper end, NR_SENSING_HISTORY_DEPTH, is checked where the histories are made
-      if (nrscope_sensing_args.symbols < 32) { // NR_SENSING_MIN_SNAPSHOTS
-        std::cerr << "sensing: symbols must be at least 32, got " << nrscope_sensing_args.symbols << std::endl;
-        exit(EXIT_FAILURE);
-      }
-    }
-    if (sn["max_speed"]) {
-      nrscope_sensing_args.max_speed_ms = sn["max_speed"].as<double>();
-    }
-    if (sn["dump"]) {
-      snprintf(nrscope_sensing_args.dump, sizeof(nrscope_sensing_args.dump), "%s", sn["dump"].as<std::string>().c_str());
-    }
-    flag("clutter_removal", &nrscope_sensing_args.clutter_removal);
-    flag("clutter_kernel", &nrscope_sensing_args.clutter_kernel);
-    flag("antenna_avg", &nrscope_sensing_args.antenna_avg);
-    flag("layer_avg", &nrscope_sensing_args.layer_avg);
-    flag("random_drop", &nrscope_sensing_args.random_drop);
-    flag("tdd_detect", &nrscope_sensing_args.tdd_detect);
-    flag("music", &nrscope_sensing_args.music);
-    flag("mirror_reject", &nrscope_sensing_args.mirror_reject);
-
-    flag("test_record_samples", &nrscope_sensing_args.test_record_samples);
-    if (sn["record_max_files"])
-      nrscope_sensing_args.record_max_files = sn["record_max_files"].as<int>();
-    if (sn["avg_maps"]) {
-      nrscope_sensing_args.avg_maps = sn["avg_maps"].as<int>();
-      if (nrscope_sensing_args.avg_maps < 1 || nrscope_sensing_args.avg_maps > NR_SENSING_AVG_MAX) {
-        std::cerr << "sensing: avg_maps must be 1.." << NR_SENSING_AVG_MAX << ", got "
-                  << nrscope_sensing_args.avg_maps << std::endl;
-        exit(EXIT_FAILURE);
-      }
-    }
-    flag("avg_vcomp", &nrscope_sensing_args.avg_vcomp);
-    if (sn["map_max_gap_ms"])
-      nrscope_sensing_args.map_max_gap_ms = sn["map_max_gap_ms"].as<double>();
-  }
+  load_sensing_config(config_yaml);
 
   if (config_yaml[setting_name]["push_to_google"]) {
     for (int i = 0; i < nof_usrp; i++) {

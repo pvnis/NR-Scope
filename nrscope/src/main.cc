@@ -8,6 +8,7 @@
 
 #include "nrscope/hdr/nrscope_def.h"
 #include "nrscope/hdr/load_config.h"
+#include "nrscope/hdr/sensing/nrscope_sensing.h"
 
 #include "srsran/common/band_helper.h"
 #include "srsran/phy/common/phy_common_nr.h"
@@ -55,6 +56,8 @@ int main(int argc, char** argv){
     for (auto& r : radios) {
       r.StopStreams();
     }
+    // the estimates still queued for sensing.record_estimates, before _exit drops them
+    nrscope_sensing_record_close();
     printf("Radio streams stopped, exiting\n");
     fflush(nullptr);
     _exit(0);

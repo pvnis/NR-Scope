@@ -33,10 +33,12 @@
 #include <math.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <sys/stat.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "nrscope/hdr/sensing/nr_ue_dmrs_despread.h"
+#include "nrscope/hdr/sensing/nr_ue_localize.h"
 #include "nrscope/hdr/sensing/nr_ue_map.h"
 #include "nrscope/hdr/sensing/nr_ue_sensing.h"
 #include "nrscope/hdr/sensing/nr_ue_sensing_align.h"
@@ -603,6 +605,9 @@ static void test_glue(void)
   nrscope_sensing_args.tdd_detect     = true;
   nrscope_sensing_args.antenna_avg    = true; // one map per layer, averaged over the chains
   snprintf(nrscope_sensing_args.dump, sizeof(nrscope_sensing_args.dump), "%s/map2d.csv", dir);
+  // and the estimates, which sensing_offline can replay into the same maps
+  snprintf(nrscope_sensing_args.record_estimates, sizeof(nrscope_sensing_args.record_estimates), "%s/estimates.bin",
+           dir);
   nr_sensing_tdd_period_slots = 10; // 7 D, 1 S, 2 U: the Benetel cell, as SIB1 sets it
   char rm[128];
   snprintf(rm, sizeof(rm), "rm -rf %s", dir);
@@ -740,6 +745,14 @@ static void test_glue(void)
   }
 
   nrscope_sensing_wait_maps(s);
+  nrscope_sensing_record_close();
+  {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/estimates.bin", dir);
+    struct stat st;
+    check(stat(path, &st) == 0 && st.st_size > 0, "estimates recorded", stat(path, &st) == 0 && st.st_size > 0, 1,
+          0);
+  }
 
   /* OAI's one-shot snapshot dump, written with the 10th map (NR_SENSING_SNAP_DUMP_MAP):
     one layer's snapshots, direct path and target on their own */
@@ -926,6 +939,66 @@ static void* idft_worker(void* arg)
   return (void*)bad;
 }
 
+/* Bistatic localisation and velocity against a geometry worked out by hand.
+
+   Each target is placed at a known point with a known velocity; what the map would
+   report for it (excess range, angle off the array normal, speed = -(dR_b/dt) / 2) is
+   computed from that, handed to nr_ue_target_position(), and the position and the
+   velocity along the inward bisector are compared with the truth. Signs are the
+   point: a mirrored angle or a flipped velocity would still give plausible numbers. */
+static void test_localize(void)
+{
+  printf("\nBistatic localisation and velocity, known geometry\n");
+  const float gnb[2] = {0.0f, 0.0f}, rx[2] = {20.0f, 0.0f};
+  const float boresight = 90.0f; // array normal pointing +y
+  const struct {
+    double px, py, vx, vy;
+  } tg[] = {
+      {10.0, 15.0, 0.0, -1.0},  // above the middle of the baseline, walking towards it
+      {30.0, 10.0, 0.7, 0.4},   // off to the side, walking away obliquely
+      {12.0, 1.0, 0.0, 1.0},    // just above the baseline: bistatic angle near 180 deg
+  };
+  const int n = sizeof(tg) / sizeof(tg[0]);
+  nr_sensing_aoa_t    in[3];
+  nr_sensing_target_t out[3];
+  double              v_truth[3];
+  for (int i = 0; i < n; i++) {
+    const double tx = tg[i].px - gnb[0], ty = tg[i].py - gnb[1];
+    const double rxv = tg[i].px - rx[0], ryv = tg[i].py - rx[1];
+    const double nt = hypot(tx, ty), nr = hypot(rxv, ryv), L = hypot(rx[0] - gnb[0], rx[1] - gnb[1]);
+    const double ex = tx / nt + rxv / nr, ey = ty / nt + ryv / nr;
+    const double rate = tg[i].vx * ex + tg[i].vy * ey; // dR_b/dt
+    double ang = atan2(ryv, rxv) * 180.0 / M_PI - boresight;
+    while (ang > 180.0) ang -= 360.0;
+    while (ang < -180.0) ang += 360.0;
+    in[i] = (nr_sensing_aoa_t){.range_m = (float)(nt + nr - L), .speed_ms = (float)(-rate / 2.0),
+                               .angle_deg = (float)ang};
+    v_truth[i] = -(tg[i].vx * ex + tg[i].vy * ey) / hypot(ex, ey); // along the inward bisector
+  }
+  const int got = nr_ue_target_position(in, n, gnb, rx, boresight, out);
+  check(got == n, "targets localised", got, n, 0);
+  if (got != n)
+    return;
+  for (int i = 0; i < 2; i++) {
+    check(hypot(out[i].pos_x - tg[i].px, out[i].pos_y - tg[i].py) < 1e-3, "position error under 1 mm",
+          hypot(out[i].pos_x - tg[i].px, out[i].pos_y - tg[i].py), 0, 1e-3);
+    check(out[i].vel_valid, "bistatic velocity valid", out[i].vel_valid, 1, 0);
+    check(fabs(out[i].v_bisector_ms - v_truth[i]) < 1e-4, "velocity along the bisector, m/s", out[i].v_bisector_ms,
+          v_truth[i], 1e-4);
+  }
+  check(out[0].v_bisector_ms > 0, "walking towards the baseline reads positive", out[0].v_bisector_ms > 0, 1, 0);
+  check(!out[2].vel_valid, "no velocity near the baseline", out[2].vel_valid, 0, 0);
+
+  /* Monostatic limit: gNB on the receiver, beta = 0, and the bisector velocity is the
+  map's speed itself, the convention the map was written in. */
+  const float same[2] = {0.0f, 0.0f};
+  nr_sensing_aoa_t    m  = {.range_m = 20.0f, .speed_ms = 1.5f, .angle_deg = 30.0f};
+  nr_sensing_target_t mo;
+  nr_ue_target_position(&m, 1, same, same, 0.0f, &mo);
+  check(fabs(mo.v_bisector_ms - 1.5) < 1e-5 && fabs(mo.rho - 10.0) < 1e-4, "monostatic: speed unchanged, rho = dR/2",
+        mo.v_bisector_ms, 1.5, 1e-5);
+}
+
 static void test_idft_threads(void)
 {
   printf("\nDelay transform from 8 threads at once\n");
@@ -1009,6 +1082,7 @@ int main(void)
   test_glue();
   test_align_chains();
   test_idft_threads();
+  test_localize();
 
   nr_ue_sensing_idft_free();
 

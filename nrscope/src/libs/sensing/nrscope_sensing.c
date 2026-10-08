@@ -16,6 +16,7 @@
 #include "nrscope/hdr/sensing/nr_ue_music.h"
 #include "nrscope/hdr/sensing/nr_ue_sensing.h"
 #include "nrscope/hdr/sensing/nr_ue_sensing_align.h"
+#include "nrscope/hdr/sensing/nrscope_sensing_record.h"
 #include "nrscope/hdr/sensing/nr_ue_tdd_detect.h"
 #include "srsran/phy/ch_estimation/dmrs_sch.h"
 #include "srsran/phy/utils/vector.h"
@@ -121,6 +122,10 @@ struct nrscope_sensing_s {
   int             q_head, q_len;
   int             q_busy; // tasks being built
   pthread_cond_t  q_idle;
+  /* Offline replay (nrscope_sensing_set_offline): map_push waits for room rather
+    than dropping, and q_room wakes it. */
+  bool            offline;
+  pthread_cond_t  q_room;
 };
 
 static void* map_thread(void* arg);
@@ -259,6 +264,7 @@ nrscope_sensing_t* nrscope_sensing_get(uint64_t carrier_hz, double srate_hz, uin
       pthread_mutex_init(&s->q_lock, NULL);
       pthread_cond_init(&s->q_cond, NULL);
       pthread_cond_init(&s->q_idle, NULL);
+      pthread_cond_init(&s->q_room, NULL);
       for (int i = 0; i < MAP_THREADS; i++) {
         pthread_create(&s->map_thr[i], NULL, map_thread, s);
         pthread_setname_np(s->map_thr[i], "sensing_map");
@@ -989,33 +995,29 @@ static void nr_ue_sensing_map_task(void *arg)
     //         aoa_out[i].quality_dB);
   }
 
-  /* Bistatic localisation of the cells that got an angle. Guarded rather than
-  returned from: the map dump below and the frees at the end of this task run
-  whether or not any cell cleared the AoA threshold. */
-  if (n_aoa > 0) {
-    /* TODO placeholder geometry. Until these come from the UE configuration the
-    positions below are made up and so is every coordinate derived from them. */
-    const float gnb[2] = {0.0f, 0.0f};
-    const float ue[2] = {0.0f, 0.0f};
-
-    // This is the angle of the ULA with respect to the reference frame of the map
-    const float boresight_deg = 0.0f;
-
+  /* Bistatic localisation and velocity of the cells that got an angle, with the
+  geometry of the yaml's sensing.geometry. Without it there is nothing to localise
+  against. Guarded rather than returned from: the map dump below and the frees at the
+  end of this task run either way. Logged only, not dumped, for now. */
+  if (n_aoa > 0 && t->args->geometry) {
+    const float gnb[2] = {(float)t->args->gnb_xy[0], (float)t->args->gnb_xy[1]};
+    const float rx[2]  = {(float)t->args->rx_xy[0], (float)t->args->rx_xy[1]};
     nr_sensing_target_t targets[NR_SENSING_AOA_MAX];
-    const int n_tgt_pos = nr_ue_target_position(aoa_out, n_aoa, gnb, ue, boresight_deg, targets);
-    // for (int i = 0; i < n_tgt_pos; i++)
-    //   LOG_I(NR_PHY,
-    //         "SENSING POS %d.%d ports 0x%x layer %d: (%.1f, %.1f) m, %.1f m from the UE, "
-    //         "from %.1f m %+.1f deg\n",
-    //         t->frame,
-    //         t->slot,
-    //         t->stream.ports,
-    //         t->stream.layer,
-    //         targets[i].pos_x,
-    //         targets[i].pos_y,
-    //         targets[i].rho,
-    //         aoa_out[targets[i].aoa_index].range_m,
-    //         aoa_out[targets[i].aoa_index].angle_deg);
+    const int n_tgt_pos = nr_ue_target_position(aoa_out, n_aoa, gnb, rx, (float)t->args->boresight_deg, targets);
+    for (int i = 0; i < n_tgt_pos; i++) {
+      const nr_sensing_target_t* p = &targets[i];
+      const nr_sensing_aoa_t*    a = &aoa_out[p->aoa_index];
+      char vel[96];
+      if (p->vel_valid)
+        snprintf(vel, sizeof(vel), "%+.2f m/s along %.0f deg", p->v_bisector_ms, p->bisector_deg);
+      else
+        snprintf(vel, sizeof(vel), "unknown (near the baseline)");
+      LOG_I(NR_PHY,
+            "SENSING POS %d.%d ports 0x%x layer %d: (%.1f, %.1f) m, %.1f m from rx, from %.1f m %+.1f deg; "
+            "bistatic angle %.0f deg, velocity %s\n",
+            t->frame, t->slot, t->stream.ports, t->stream.layer, p->pos_x, p->pos_y, p->rho, a->range_m,
+            a->angle_deg, p->beta_deg, vel);
+    }
   }
 
   /* Dump the all data for plotting everything */
@@ -1132,6 +1134,7 @@ static void* map_thread(void* arg)
     s->q_head = (s->q_head + 1) % MAP_QUEUE;
     s->q_len--;
     s->q_busy++;
+    pthread_cond_signal(&s->q_room);
     pthread_mutex_unlock(&s->q_lock);
     nr_ue_sensing_map_task(t);
     pthread_mutex_lock(&s->q_lock);
@@ -1146,6 +1149,9 @@ static void* map_thread(void* arg)
 static void map_push(nrscope_sensing_t* s, nr_sensing_map_task_t* t)
 {
   pthread_mutex_lock(&s->q_lock);
+  while (s->offline && s->q_len == MAP_QUEUE) {
+    pthread_cond_wait(&s->q_room, &s->q_lock);
+  }
   if (s->q_len == MAP_QUEUE) {
     pthread_mutex_unlock(&s->q_lock);
     LOG_W(NR_PHY, "sensing: map threads behind, map %d.%d dropped\n", t->frame, t->slot);
@@ -1157,6 +1163,15 @@ static void map_push(nrscope_sensing_t* s, nr_sensing_map_task_t* t)
   s->q[(s->q_head + s->q_len) % MAP_QUEUE] = t;
   s->q_len++;
   pthread_cond_signal(&s->q_cond);
+  pthread_mutex_unlock(&s->q_lock);
+}
+
+void nrscope_sensing_set_offline(nrscope_sensing_t* s, bool offline)
+{
+  if (s == NULL)
+    return;
+  pthread_mutex_lock(&s->q_lock);
+  s->offline = offline;
   pthread_mutex_unlock(&s->q_lock);
 }
 
@@ -1353,6 +1368,247 @@ static void maybe_map(nrscope_sensing_t* s, int aarx, uint16_t ports, int layer,
   map_push(s, t);
 }
 
+/* sensing.record_estimates: the estimates of every grant, written to a file at the
+   input of nrscope_sensing_push_estimates() (format: nrscope_sensing_record.h).
+
+   The workers only copy a record into a block and queue it; one writer thread does the
+   file I/O, so a slow disk never holds up decoding. At full band that is some 50-60 MB/s
+   per chain and layer, which a page cache under writeback pressure can stall on for
+   tens of milliseconds. Past REC_MAX_QUEUED bytes waiting, records are dropped and
+   counted rather than queued: a dropped record is a missed grant to the replay, the
+   same as one the sniffer missed. */
+#define REC_MAX_QUEUED ((size_t)512 << 20)
+
+typedef struct rec_block_s {
+  struct rec_block_s* next;
+  size_t              len;
+  uint8_t             data[];
+} rec_block_t;
+
+static struct {
+  pthread_mutex_t lock;
+  pthread_cond_t  cond;
+  bool            opened; // an open was attempted
+  bool            stop;
+  FILE*           f;
+  pthread_t       thr;
+  rec_block_t *   head, *tail;
+  size_t          queued;
+  uint64_t        n_records, n_dropped, n_bytes;
+} rec = {.lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER};
+
+static void* rec_thread(void* arg)
+{
+  (void)arg;
+  pthread_mutex_lock(&rec.lock);
+  for (;;) {
+    while (rec.head == NULL && !rec.stop) {
+      pthread_cond_wait(&rec.cond, &rec.lock);
+    }
+    if (rec.head == NULL) {
+      break;
+    }
+    // take the whole list, write it without the lock
+    rec_block_t* b = rec.head;
+    rec.head = rec.tail = NULL;
+    pthread_mutex_unlock(&rec.lock);
+    size_t done = 0;
+    bool   ok   = true;
+    while (b != NULL) {
+      rec_block_t* next = b->next;
+      ok   = ok && fwrite(b->data, 1, b->len, rec.f) == b->len;
+      done += b->len;
+      free(b);
+      b = next;
+    }
+    pthread_mutex_lock(&rec.lock);
+    rec.queued -= done;
+    if (ok) {
+      rec.n_bytes += done;
+    } else if (!rec.stop) {
+      LOG_E(NR_PHY, "sensing: writing the estimates failed, recording stops\n");
+      rec.stop = true;
+    }
+  }
+  pthread_mutex_unlock(&rec.lock);
+  fclose(rec.f);
+  return NULL;
+}
+
+// Open the file and start the writer, once; called with rec.lock held
+static void rec_open(const nrscope_sensing_t* s, uint32_t n_sc_grid)
+{
+  rec.opened = true;
+  rec.f      = fopen(s->args.record_estimates, "wb");
+  if (rec.f == NULL) {
+    LOG_E(NR_PHY, "sensing: cannot open %s for the estimates\n", s->args.record_estimates);
+    rec.stop = true;
+    return;
+  }
+  setvbuf(rec.f, NULL, _IOFBF, 8 << 20);
+  nrsr_file_hdr_t h = {0};
+  memcpy(h.magic, NRSR_MAGIC, sizeof(NRSR_MAGIC));
+  h.version      = NRSR_VERSION;
+  h.nof_antennas = s->nof_antennas;
+  h.carrier_hz   = s->carrier_hz;
+  h.srate_hz     = (double)s->samples_per_slot * 1000.0 * (s->scs_hz / 15000);
+  h.ofdm_size    = s->ofdm_size;
+  h.scs_hz       = s->scs_hz;
+  h.n_sc_grid    = n_sc_grid;
+  if (fwrite(&h, sizeof(h), 1, rec.f) != 1 || pthread_create(&rec.thr, NULL, rec_thread, NULL) != 0) {
+    LOG_E(NR_PHY, "sensing: cannot start recording the estimates to %s\n", s->args.record_estimates);
+    fclose(rec.f);
+    rec.f    = NULL;
+    rec.stop = true;
+    return;
+  }
+  pthread_setname_np(rec.thr, "sensing_rec");
+  LOG_I(NR_PHY, "sensing: recording the estimates to %s\n", s->args.record_estimates);
+}
+
+static void rec_grant(const nrscope_sensing_t* s, uint32_t aarx, uint16_t ports, int layer, int n_layers, uint32_t sfn,
+                      uint32_t slot_idx, uint64_t slot_abs, uint16_t dmrs_mask, const cf_t* H, const bool* valid,
+                      uint32_t n_sc_grid)
+{
+  const size_t n_bitmap = (n_sc_grid + 7) / 8;
+  uint32_t     n_valid[NSYMB] = {0};
+  size_t       len            = sizeof(nrsr_rec_hdr_t);
+  for (int l = 0; l < NSYMB; l++) {
+    if (!(dmrs_mask & (1u << l)))
+      continue;
+    const bool* v = &valid[(size_t)l * n_sc_grid];
+    for (uint32_t k = 0; k < n_sc_grid; k++)
+      n_valid[l] += v[k];
+    len += sizeof(uint32_t) + n_bitmap + (size_t)n_valid[l] * sizeof(cf_t);
+  }
+
+  rec_block_t* b = malloc(sizeof(*b) + len);
+  if (b == NULL)
+    return;
+  b->next          = NULL;
+  b->len           = len;
+  uint8_t*       w = b->data;
+  nrsr_rec_hdr_t h = {0};
+  h.magic            = NRSR_REC_MAGIC;
+  h.aarx             = (uint16_t)aarx;
+  h.ports            = ports;
+  h.layer            = (uint8_t)layer;
+  h.n_layers         = (uint8_t)n_layers;
+  h.tdd_period_slots = (uint8_t)NR_SENSING_TDD_PERIOD_SLOTS;
+  h.dmrs_mask        = dmrs_mask;
+  h.sfn              = sfn;
+  h.slot_idx         = slot_idx;
+  h.slot_abs         = slot_abs;
+  memcpy(w, &h, sizeof(h));
+  w += sizeof(h);
+  for (int l = 0; l < NSYMB; l++) {
+    if (!(dmrs_mask & (1u << l)))
+      continue;
+    const bool* v  = &valid[(size_t)l * n_sc_grid];
+    const cf_t* hl = &H[(size_t)l * n_sc_grid];
+    memcpy(w, &n_valid[l], sizeof(uint32_t));
+    w += sizeof(uint32_t);
+    memset(w, 0, n_bitmap);
+    for (uint32_t k = 0; k < n_sc_grid; k++)
+      if (v[k])
+        w[k / 8] |= (uint8_t)(1u << (k % 8));
+    w += n_bitmap;
+    for (uint32_t k = 0; k < n_sc_grid; k++)
+      if (v[k]) {
+        memcpy(w, &hl[k], sizeof(cf_t));
+        w += sizeof(cf_t);
+      }
+  }
+
+  pthread_mutex_lock(&rec.lock);
+  if (!rec.opened)
+    rec_open(s, n_sc_grid);
+  if (rec.stop) {
+    pthread_mutex_unlock(&rec.lock);
+    free(b);
+    return;
+  }
+  if (rec.queued + len > REC_MAX_QUEUED) {
+    const uint64_t n = ++rec.n_dropped;
+    pthread_mutex_unlock(&rec.lock);
+    free(b);
+    if (n == 1 || n % 1000 == 0)
+      LOG_W(NR_PHY, "sensing: the disk is behind, %lu estimate record(s) dropped\n", (unsigned long)n);
+    return;
+  }
+  if (rec.tail != NULL)
+    rec.tail->next = b;
+  else
+    rec.head = b;
+  rec.tail = b;
+  rec.queued += len;
+  rec.n_records++;
+  pthread_cond_signal(&rec.cond);
+  pthread_mutex_unlock(&rec.lock);
+}
+
+void nrscope_sensing_record_close(void)
+{
+  pthread_mutex_lock(&rec.lock);
+  const bool running = rec.opened && rec.f != NULL;
+  rec.stop           = true;
+  pthread_cond_signal(&rec.cond);
+  pthread_mutex_unlock(&rec.lock);
+  if (!running)
+    return;
+  pthread_join(rec.thr, NULL);
+  rec.f = NULL;
+  printf("sensing: %lu estimate records written (%.1f MB), %lu dropped\n", (unsigned long)rec.n_records,
+         rec.n_bytes / 1e6, (unsigned long)rec.n_dropped);
+}
+
+int nrscope_sensing_push_estimates(nrscope_sensing_t* s,
+                                   uint32_t           aarx,
+                                   uint16_t           ports,
+                                   int                layer,
+                                   int                n_layers,
+                                   uint32_t           sfn,
+                                   uint32_t           slot_idx,
+                                   uint64_t           slot_abs,
+                                   uint16_t           dmrs_mask,
+                                   const cf_t*        H,
+                                   const bool*        valid,
+                                   uint32_t           n_sc_grid)
+{
+  if (s == NULL || H == NULL || valid == NULL || n_sc_grid == 0) {
+    return 0;
+  }
+  uint64_t t_sample[NSYMB] = {0};
+  int      l_last          = -1;
+  for (int l = 0; l < NSYMB; l++) {
+    if (dmrs_mask & (1u << l)) {
+      t_sample[l] = symbol_time(slot_abs, (uint32_t)l, s->samples_per_slot, s->ofdm_size);
+      l_last      = l;
+    }
+  }
+  if (l_last < 0) {
+    return 0;
+  }
+
+  /* OAI's per-slot stage, unchanged: the DM-RS symbols of this layer become
+    delay responses pushed into the history (grants under half the carrier are
+    dropped there). The other symbols are masked out. */
+  const cf_t(*H_grid)[n_sc_grid] = (const cf_t(*)[n_sc_grid])H;
+  const bool(*V_grid)[n_sc_grid] = (const bool(*)[n_sc_grid])valid;
+  pilot_lattice_t       lat      = {0};
+  uint16_t              used     = 0;
+  nr_sensing_history_t* hist     = hist_of(s, (int)aarx, ports, layer);
+  const int idft = nr_ue_sensing_slot_profile(NSYMB, (int)n_sc_grid, H_grid, V_grid, t_sample, hist,
+                                              (nr_sensing_stream_t){.ports = ports, .layer = (uint8_t)layer},
+                                              slot_abs, s->args.random_drop, (uint16_t)~dmrs_mask, &lat, &used);
+  if (idft <= 0) {
+    return 0;
+  }
+  // this slot's newest reference symbol, which is where the map trigger reads the time
+  maybe_map(s, (int)aarx, ports, layer, n_layers, &lat, sfn, slot_idx, t_sample[l_last]);
+  return __builtin_popcount(used);
+}
+
 int nrscope_sensing_process_grant(nrscope_sensing_t*          s,
                                   nrscope_sensing_scratch_t*  sc,
                                   uint32_t                    aarx,
@@ -1397,16 +1653,9 @@ int nrscope_sensing_process_grant(nrscope_sensing_t*          s,
   }
 
   const uint64_t      slot_abs = slot_abs_of(s, sfn, slot_idx);
-  uint64_t            t_sample[NSYMB] = {0};
-  srsran_carrier_nr_t carrier         = {.pci = pci};
-  for (int i = 0; i < n_dmrs; i++) {
-    t_sample[dmrs_symbols[i]] = symbol_time(slot_abs, dmrs_symbols[i], s->samples_per_slot, s->ofdm_size);
-  }
-  // this slot's newest reference symbol, which is where the map trigger reads the time
-  const uint64_t t_newest = t_sample[dmrs_symbols[n_dmrs - 1]];
+  srsran_carrier_nr_t carrier  = {.pci = pci};
 
-  int             n_pushed = 0;
-  pilot_lattice_t lats[2]  = {{0}};
+  int n_pushed = 0;
   for (int layer = 0; layer < lay.n_ports && layer < 2; layer++) {
     memset(sc->valid, 0, (size_t)NSYMB * n_sc_grid * sizeof(bool));
     for (int i = 0; i < n_dmrs; i++) {
@@ -1415,20 +1664,11 @@ int nrscope_sensing_process_grant(nrscope_sensing_t*          s,
       nr_ue_dmrs_estimate_symbol(&lay, layer, cinit, &cfg->grant, place, &grid[(size_t)l * n_sc_grid], (int)n_sc_grid,
                                  &sc->H[(size_t)l * n_sc_grid], &sc->valid[(size_t)l * n_sc_grid]);
     }
-    /* OAI's per-slot stage, unchanged: the DM-RS symbols of this layer become
-      delay responses pushed into the history (grants under half the carrier are
-      dropped there). The other symbols are masked out. */
-    const cf_t(*H_grid)[n_sc_grid] = (const cf_t(*)[n_sc_grid])sc->H;
-    const bool(*V_grid)[n_sc_grid] = (const bool(*)[n_sc_grid])sc->valid;
-    uint16_t used = 0;
-    nr_sensing_history_t* hist = hist_of(s, (int)aarx, ports, layer);
-    const int idft = nr_ue_sensing_slot_profile(NSYMB, (int)n_sc_grid, H_grid, V_grid, t_sample, hist,
-                                                (nr_sensing_stream_t){.ports = ports, .layer = (uint8_t)layer},
-                                                slot_abs, s->args.random_drop, (uint16_t)~dmrs_mask, &lats[layer], &used);
-    if (idft > 0) {
-      n_pushed += __builtin_popcount(used);
-      maybe_map(s, (int)aarx, ports, layer, lay.n_ports, &lats[layer], sfn, slot_idx, t_newest);
+    if (s->args.record_estimates[0] != 0) {
+      rec_grant(s, aarx, ports, layer, lay.n_ports, sfn, slot_idx, slot_abs, dmrs_mask, sc->H, sc->valid, n_sc_grid);
     }
+    n_pushed += nrscope_sensing_push_estimates(s, aarx, ports, layer, lay.n_ports, sfn, slot_idx, slot_abs, dmrs_mask,
+                                               sc->H, sc->valid, n_sc_grid);
   }
 
   return n_pushed;
