@@ -121,7 +121,10 @@ int load_config(std::vector<Radio>& radios, std::string file_name)
     std::string setting_name = "usrp_setting_" + to_string(i);
     std::cout << "USRP Device: " << i << std::endl;
     if (config_yaml[setting_name]) {
-      srsran::rf_args_t rf_args = {};
+      // Zero the radio's own args: the band-pass edges (ch_rx_bands / ch_tx_bands) are never
+      // set from the config and were left as stack garbage, so with a non-zero edge the radio
+      // found no channel for the carrier and silently discarded every sample (seen on ZMQ).
+      radios[i].rf_args = {};
       if (config_yaml[setting_name]["rf_args"]) {
         std::string rf_args_config    = config_yaml[setting_name]["rf_args"].as<string>();
         radios[i].rf_args.device_args = rf_args_config;
