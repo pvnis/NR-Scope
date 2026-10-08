@@ -20,6 +20,8 @@
 #include "nrscope/hdr/radio_nr.h"
 #include "nrscope/hdr/rrc_recfg_parse.h"
 
+extern "C" int nr_sensing_los_margin_bins; // nrscope/hdr/sensing/nr_ue_sensing.h
+
 #include "srsran/phy/ue/srsgui_plot.h"
 
 using namespace std;
@@ -85,6 +87,10 @@ void load_sensing_config(const YAML::Node& config_yaml)
     flag("avg_vcomp", &nrscope_sensing_args.avg_vcomp);
     if (sn["map_max_gap_ms"])
       nrscope_sensing_args.map_max_gap_ms = sn["map_max_gap_ms"].as<double>();
+    if (sn["los_margin_bins"]) {
+      nr_sensing_los_margin_bins = sn["los_margin_bins"].as<int>();
+      std::cout << "    sensing.los_margin_bins: " << nr_sensing_los_margin_bins << std::endl;
+    }
     if (sn["record_estimates"])
       snprintf(nrscope_sensing_args.record_estimates, sizeof(nrscope_sensing_args.record_estimates), "%s",
                sn["record_estimates"].as<std::string>().c_str());

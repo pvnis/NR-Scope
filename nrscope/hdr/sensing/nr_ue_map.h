@@ -194,6 +194,11 @@ struct nr_sensing_history_s {
   } since_last_map[NR_SENSING_MAX_STREAMS];
   int scs_hz;
   int ofdm_symbol_size;
+  /* Roll of the delay axis that puts this stream's direct path at NR_SENSING_LOS_MARGIN_BINS
+  (see there), and the symbols that disagreed with it in a row. Set from the first symbol. */
+  bool los_roll_valid;
+  int los_roll;
+  int los_roll_votes;
   /// DL carrier frequency in Hz, needed to turn the Doppler axis into speeds
   uint64_t carrier_hz;
   /* Several DL actors (--num-dl-actors) push into the same history at the same time, and

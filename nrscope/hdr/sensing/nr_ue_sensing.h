@@ -45,6 +45,23 @@ and every smaller k_step is excluded by construction. */
 /* A symbol is only used when its grant covers at least this fraction of the
 carrier, expressed as a numerator over NR_SENSING_MIN_BAND_DEN. */
 #define NR_SENSING_MIN_BAND_NUM 1
+
+/* Where the direct path can be put on the delay axis, in bins (see nr_sensing_los_margin_bins). The raw delay response has its
+origin where the receiver's symbol timing is, and that is not where the direct path is: on
+a ZMQ capture of an OCUDU cell the direct path sat at bin -32 (the timing was 32 samples
+late), so the map, which keeps bins 0 to n_bins-1, held neither the direct path nor the
+clutter around it nor any target closer than about 78 m of excess range, only leakage 77 dB
+down that any noise buried. Each stream's response is therefore rolled by a whole number of
+bins so its strongest bin, the direct path, lands here: the bins below it hold its leading
+sidelobes, the ones above it the excess range. An integer roll only renames bins, so phases
+and the Doppler axis are untouched. */
+#define NR_SENSING_LOS_MARGIN_BINS 8
+/* Run-time switch for that roll (sensing.los_margin_bins in the config): the bin the direct
+path is put at, or -1 to leave the delay axis where the symbol timing puts it (the default,
+as before). NR_SENSING_LOS_MARGIN_BINS is the suggested value. */
+extern int nr_sensing_los_margin_bins;
+/// consecutive symbols that must place the direct path elsewhere before the roll follows
+#define NR_SENSING_LOS_ROLL_VOTES 16
 #define NR_SENSING_MIN_BAND_DEN 2
 
 /* Random drop: one slot in NR_SENSING_DROP_ONE_IN, drawn independently per slot, loses

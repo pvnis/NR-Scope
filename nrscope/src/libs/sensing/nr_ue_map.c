@@ -27,6 +27,9 @@ bool nr_ue_sensing_history_init(nr_sensing_history_t *hist,
   hist->depth = depth;
   hist->head = 0;
   hist->count = 0;
+  hist->los_roll_valid = false;
+  hist->los_roll = 0;
+  hist->los_roll_votes = 0;
   hist->scs_hz = scs_hz;
   hist->ofdm_symbol_size = ofdm_symbol_size;
   hist->carrier_hz = carrier_hz;

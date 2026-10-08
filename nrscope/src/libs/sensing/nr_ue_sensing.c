@@ -13,6 +13,7 @@
 #include "nrscope/hdr/sensing/nr_ue_sensing_align.h"
 
 int nr_sensing_tdd_period_slots = 10;
+int nr_sensing_los_margin_bins = -1;
 
 bool nr_ue_sensing_extract_lattice(int n_sc,
                                    const cf_t H_row[n_sc],
@@ -292,6 +293,53 @@ static bool nr_ue_sensing_restrict_lattice(pilot_lattice_t *lat, cf_t *pilots, i
 
 #endif
 
+/* Roll h[0..n) so its strongest bin, the direct path, sits at nr_sensing_los_margin_bins.
+The roll is kept per stream (hist) and only follows the direct path once
+NR_SENSING_LOS_ROLL_VOTES symbols in a row put it more than one bin away, so one symbol
+where something else is stronger cannot move the whole axis. */
+static void nr_ue_sensing_roll_to_los(nr_sensing_history_t *hist, int n, cf_t *h)
+{
+  int peak = 0;
+  float best = -1.0f;
+  for (int b = 0; b < n; b++) {
+    const float p = crealf(h[b]) * crealf(h[b]) + cimagf(h[b]) * cimagf(h[b]);
+    if (p > best) {
+      best = p;
+      peak = b;
+    }
+  }
+  const int want = ((nr_sensing_los_margin_bins - peak) % n + n) % n;
+
+  pthread_mutex_lock(&hist->lock);
+  if (!hist->los_roll_valid) {
+    hist->los_roll_valid = true;
+    hist->los_roll = want;
+    hist->los_roll_votes = 0;
+    LOG_I(NR_PHY, "sensing: direct path at raw delay bin %d, axis rolled by %d so it sits at bin %d\n",
+          peak <= n / 2 ? peak : peak - n, want, nr_sensing_los_margin_bins);
+  } else {
+    int d = abs(want - hist->los_roll);
+    d = d < n - d ? d : n - d;
+    if (d <= 1) {
+      hist->los_roll_votes = 0;
+    } else if (++hist->los_roll_votes >= NR_SENSING_LOS_ROLL_VOTES) {
+      LOG_I(NR_PHY, "sensing: direct path moved to raw delay bin %d, axis roll %d -> %d\n",
+            peak <= n / 2 ? peak : peak - n, hist->los_roll, want);
+      hist->los_roll = want;
+      hist->los_roll_votes = 0;
+    }
+  }
+  const int roll = hist->los_roll;
+  pthread_mutex_unlock(&hist->lock);
+
+  if (roll == 0)
+    return;
+  cf_t tmp[NR_SENSING_MAX_IDFT];
+  for (int b = 0; b < n; b++)
+    tmp[(b + roll) % n] = h[b];
+  memcpy(h, tmp, n * sizeof(*h));
+}
+
 int nr_ue_sensing_slot_profile(int n_sym,
                                int n_sc,
                                const cf_t H_est_ant[n_sym][n_sc],
@@ -425,6 +473,8 @@ int nr_ue_sensing_slot_profile(int n_sym,
     Doppler needs, so the order matters. */
     __attribute__((aligned(32))) cf_t h_time[NR_SENSING_MAX_IDFT];
     nr_ue_sensing_delay_response(lat.n_lattice, pilots, idft_size, h_time);
+    if (hist && nr_sensing_los_margin_bins >= 0)
+      nr_ue_sensing_roll_to_los(hist, idft_size, h_time);
 
     /* If we store the complex response, then we store the time of the symbol as well,
     so that the Doppler transform can be done later. The random drop leaves out at most
