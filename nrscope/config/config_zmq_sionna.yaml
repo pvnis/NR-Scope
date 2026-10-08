@@ -1,0 +1,173 @@
+# NR-Scope over ZMQ for the Sionna simulation: copy of config_x410_benetel.yaml with the
+# radio section changed for the OCUDU gNB of ocudu/isac_configs/sionna_zmq.yml (n78, 100 MHz, 30 kHz, PDSCH 64QAM: no rrc_recfg_config, so the 64QAM table is used).
+# Rebuild with -DENABLE_ZEROMQ=ON (done on branch zmq-nr-scope).
+nof_usrp_dev: 1
+usrp_setting_0:
+  device_name: zmq
+  ssb_freq: 3374400000 # SSB arfcn 624960 of ocudu/isac_configs/sionna_zmq.yml
+  
+  # Where the radio tunes. The 273-PRB carrier spans 3400.86 - 3499.14 MHz, so at
+  # 122.88 Msps only its centre captures all of it; tuned to the SSB, PRBs 193 and
+  # up were never captured. Must be a whole number of 30 kHz from ssb_freq. NR-Scope
+  # prints the carrier's centre once SIB1 is decoded.
+  rx_center_freq: 3414990000 # carrier centre, dl_arfcn 627666, 100 MHz
+  band_list: [78]
+  pci: 1
+  rf_args: "rx_port=tcp://127.0.0.1:4560,base_srate=122.88e6" # reads the Sionna bridge, not the gNB directly (a REP socket serves one reader)
+  
+  # Fixed so the amplitude stays constant from slot to slot, as sensing needs.
+  # Chosen with agc: true under a full 600 Mb/s downlink, where the AGC settled
+  # at 25.4-27.4 dB: peak about -9 dBFS, mean about -26 dBFS. At 45 the X410
+  # clipped (peak pinned at +3 dBFS) once the gNB filled the carrier, which broke
+  # PBCH and sync. Re-check the status line's RX peak if the geometry changes.
+  rx_gain: 0 # ZMQ: no RF front-end
+  min_rx_gain: 0
+  max_rx_gain: 60
+  srate_hz: 122880000 # 4096-point FFT x 30 kHz, same as the gNB
+  srsran_srate_hz: 122880000
+  nof_carriers: 1 # srsRAN rf setting, always set to be 1 for now.
+  
+  # Receive chains captured in parallel, 1 to 4, all four supported end to end (the
+  # sensing selftest covers the map, the null and the alignment at four). Only chain 0 is
+  # synchronised and decoded -- SIB, RACH and DCI all read it alone -- so raising this
+  # does not improve sniffing. The extra chains are captured for the sensing path, which
+  # needs a spatial baseline to estimate angle of arrival.
+  #
+  # Before raising this to 4 on the X410, check with uhd_usrp_probe that the loaded FPGA
+  # image exposes four Rx channels: CG_400 has only two. The cost is one slot of IQ per
+  # chain in every queued slot (see NRSCOPE_SLOT_QUEUE_DEPTH: 240 MiB at four chains,
+  # 122.88 Msps), one grid FFT per chain in each worker, and ~15.7 Gbps on the fronthaul.
+  #
+  # The chains must share a clock or they are not phase coherent and the angle estimate
+  # is meaningless. On the X410 chains 2 and 3 sit on the second ZBX daughterboard, whose
+  # LO settles at an arbitrary phase against the first board's on every retune: measure
+  # the per-chain offsets with scripts/sensing/rx_pair_check.py (it prints the
+  # NR_AOA_CAL_DEG line to paste into nr_ue_aoa.h) before trusting any angle.
+  nof_antennas: 1
+
+  scs_index: 1 #(0: 15kHz, 1: 30kHz, ..., the u in standard)
+  rf_log_level: "info"
+  nof_rnti_worker_groups: 1 # number of of threads for DCI decoding, each will divide the UEs into small groups
+  nof_bwps: 1 # number of BWP of the cell
+  nof_workers: 8 # using worker pool to asynchronously process the slot data
+  cpu_affinity: false # this machine has 8 CPUs; the pinning below is for sens7 (20 CPUs)
+  
+  # sens7 (Core Ultra 7 265): P-cores 0-7, E-cores 8-19. CPUs 1-2 are isolated for
+  # the DPDK lcores (uhd.conf) and CPU 0 takes the IRQs, so the serial stages get
+  # P-cores 3-5 and the workers, with the RACH/DCI threads they spawn, share 6-19.
+  fetch_cpu: 3
+  consumer_cpu: 4
+  dispatcher_cpu: 5
+  results_cpu: 0
+  
+  worker_cpus: [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+  
+  # skip CFO compensation in sync; keep false on the bladeRF, its clock drifts too much
+  disable_cfo: true
+  
+  # Time in seconds before removing a RNTI from the list if its idle
+  rnti_expiry_s: 30
+  
+  agc: false # fixed rx_gain. AGC changes the gain from the real-time capture thread and breaks slot-to-slot amplitude for sensing
+
+  log_name: "logs_nrscope_zmq_sionna.csv"
+  google_dataset_id: "ngscope5g_dci_log_wanhr"
+
+log_config: 
+
+  # Record MSG4, DCIs in csv files
+  recording_mode: false
+
+  # Keep the terminal to the same curated lines recording_mode shows -- [status] once a
+  # second, SYNC lost/regained, "Found DCI" and "rrc_setup, hooray" -- without writing the
+  # CSVs. Set it with recording_mode off and the output is identical to a recording run,
+  # which is what you want for a capture whose cost matters (no grant dumps, no JSON, no
+  # msg4_bytes.log). The [status] and SYNC lines print either way; this only silences the
+  # per-grant dumps.
+  quiet: true
+
+  # Debug: every PDCCH candidate tried for a known RNTI, with its DM-RS EPRE and
+  # correlation and the gate it stopped at, to PDCCH/. Tens of thousands of rows
+  # a second: for short diagnostic runs only.
+  record_pdcch_candidates: false
+
+  # garbage
+  local_log: true
+  push_to_google: false
+  google_service_account_credential: "/home/wanhr/Downloads/nsf-2223556-222187-02b924918c95.json"
+  enable_gui: false
+
+sensing:
+  # Put the direct path at this delay bin (-1: leave the axis where the symbol timing puts it).
+  # Over ZMQ/OCUDU the timing puts the direct path at bin -32, outside the map's bins 0..n_bins-1.
+  los_margin_bins: 8
+  enable: true
+  dump: "/tmp/map2d.csv"
+  symbols: 2048            # cost cap only, not the trigger: a map is built once its
+                           # observation window is complete (NR_SENSING_TARGET_DV_MS
+                           # sets it: 0.145 s at 0.30 m/s, about 640 symbols here).
+                           # At most NR_SENSING_HISTORY_DEPTH.
+  max_speed: 10
+  clutter_removal: true
+  clutter_kernel: true
+  antenna_avg: true 
+  layer_avg: false
+  random_drop: true
+  tdd_detect: true
+
+  # Doppler MUSIC alongside the DFT map, to <dump>.music.csv. Its observations are the
+  # (chain x layer) pairs the map gathered, so the chain count is what makes it worth
+  # running: a rank-1 grant gives a 6-column Gram matrix on two chains and 12 on four,
+  # and only four chains make the NR_MUSIC_MAX_ORDER = 4 model order reachable. Needs
+  # antenna_avg for the chains to reach it at all.
+  music: false
+
+  mirror_reject: true  # set aside a detection with an equally strong mirror at -v (not drawn); false keeps them all
+  
+  # Map averaging: each map becomes the power mean of the last avg_maps maps of its stream
+  # (1 = off, max 16). Steadies the noise background; 2-4 suits a passing target. Affects the
+  # dumped map and, with tdd_detect off, the AoA's own CFAR; NOT the TDD detector, which works
+  # on the window's own samples. avg_vcomp shifts older maps' Doppler columns by their range
+  # rate so a mover stays in its cell (no measurable gain yet on the lab runs).
+  avg_maps: 1
+  avg_vcomp: false
+  # A jump of more than this between a stream's snapshots means samples were lost upstream:
+  # the filling window is dropped and the next starts after the gap (0 = off).
+  map_max_gap_ms: 20
+
+  # Bistatic geometry, for localising the AoA cells and their velocity (nr_ue_localize.h).
+  # Positions in metres in any planar frame (x east, y north suggested), as [x, y].
+  # boresight_deg: bearing of the receive array's normal in that frame, counterclockwise
+  # from +x (90 = facing +y); a cell's direction from rx is boresight_deg + its AoA angle.
+  # All three keys or none; without the block nothing is localised. Each localised cell
+  # is logged as "SENSING POS": position, bistatic angle, and the velocity along the
+  # inward bistatic bisector (positive towards gNB and rx), not dumped yet.
+  # Fill in the measured positions, then uncomment:
+  # geometry:
+  #   gnb: [0.0, 0.0]
+  #   rx: [20.0, 0.0]
+  #   boresight_deg: 90.0
+
+
+  # Record-only mode: for each window, write every (chain, layer) of its raw OFDM-symbol
+  # slow-time samples to <dump>.rec.NNNNN.csv (up to record_max_files) and SKIP live map
+  # building entirely (no clutter removal, detector, AoA or map dump -- all the map
+  # compute is saved). Rebuild the maps and sweep any parameter offline, no recapture:
+  #   scripts/sensing/replay_samples.py --rec '/tmp/map2d.csv.rec.*.csv' \
+  #       --sweep trend_degree --lo 0 --hi 3 --step 1 --out-dir /tmp/sweep_out
+  test_record_samples: false
+  record_max_files: 400
+
+  # replays: build/nrscope/src/tests/sensing_offline <config.yaml> estimates.bin --dump <out>/map2d.csv
+  
+  # build/nrscope/src/tests/sensing_offline config.yaml estimates.bin --dump out/map2d.csv \
+    # --inject range=8,speed=0.5,level=-25
+  # python3 scripts/sensing/score_injection.py out/map2d.csv          # add --per-map for details
+ 
+  # --swing and period make a back-and-forth walk;
+  # --angle sets the direction;
+  # --start and --stop, in seconds, set when the target is present. 
+  #
+  #
+
+  # record_estimates: "/home/sens/runs/test/estimates.bin"
