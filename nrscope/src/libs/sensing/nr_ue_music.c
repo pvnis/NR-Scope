@@ -214,7 +214,7 @@ int nr_ue_music_doppler(const nr_sensing_slowtime_t *obs, int n_obs, nr_sensing_
   const double df = (n_freq > 1) ? (2.0 * f_max) / (n_freq - 1) : 0.0;
 
   // the subspace the clutter stage removed, see nr_ue_music.h
-  double q[NR_CLUTTER_SLOW_TREND_MAX + 1][NR_SENSING_HISTORY_DEPTH];
+  double q[NR_CLUTTER_BASIS_ROWS][NR_SENSING_HISTORY_DEPTH];
   const int n_q = nr_ue_sensing_slow_basis(t, n, obs[ref].trend_degree, q);
 
   /* Steering vectors a(f)[i] = exp(j*2*pi*f*t_i), the signal the DFT correlates against,

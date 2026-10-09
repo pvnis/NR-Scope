@@ -718,10 +718,40 @@ q is the output of the grahm-schmidt procedure (which is useful for the dot prod
 Look that we normalize the time axis [-1,1] for numerical stability and center it.
 Shared with the MUSIC stage, which has to project its steering vectors on the same subspace.
 */
+double nr_sensing_eca_batch_s = 0.0;
+
 int nr_ue_sensing_slow_basis(const double *t, int n, int degree, double q[][NR_SENSING_HISTORY_DEPTH])
 {
   if (degree < 0 || n <= 0)
     return 0;
+
+  /* ECA-B: one unit-norm indicator per batch; batches do not overlap, so these are already
+  orthonormal. See nr_sensing_eca_batch_s in nr_ue_map.h. */
+  if (nr_sensing_eca_batch_s > 0.0) {
+    const double tb = nr_sensing_eca_batch_s;
+    const double span = t[n - 1] - t[0];
+    int n_b = (int)floor(span / tb) + 1;
+    if (n_b > 1 && span - (n_b - 1) * tb < 0.5 * tb)
+      n_b--; // a short tail joins the batch before it
+    if (n_b > NR_CLUTTER_BASIS_ROWS)
+      n_b = NR_CLUTTER_BASIS_ROWS;
+    int count[NR_CLUTTER_BASIS_ROWS] = {0};
+    int batch_of[NR_SENSING_HISTORY_DEPTH];
+    for (int i = 0; i < n; i++) {
+      int k = (int)floor((t[i] - t[0]) / tb);
+      batch_of[i] = k < n_b ? k : n_b - 1;
+      count[batch_of[i]]++;
+    }
+    int n_q = 0, row_of[NR_CLUTTER_BASIS_ROWS];
+    for (int k = 0; k < n_b; k++)
+      row_of[k] = count[k] > 0 ? n_q++ : -1;
+    for (int r = 0; r < n_q; r++)
+      for (int i = 0; i < n; i++)
+        q[r][i] = 0.0;
+    for (int i = 0; i < n; i++)
+      q[row_of[batch_of[i]]][i] = 1.0 / sqrt((double)count[batch_of[i]]);
+    return n_q;
+  }
   if (degree > NR_CLUTTER_SLOW_TREND_MAX)
     degree = NR_CLUTTER_SLOW_TREND_MAX;
 
@@ -1584,7 +1614,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
   The residual holds the result, gain applied, so everything below reads it as is. */
 
   const int trend_degree = (clutter_mode == NR_CLUTTER_NONE) ? -1 : p->trend_degree;
-  double q[NR_CLUTTER_SLOW_TREND_MAX + 1][NR_SENSING_HISTORY_DEPTH];
+  double q[NR_CLUTTER_BASIS_ROWS][NR_SENSING_HISTORY_DEPTH];
   const int n_q = nr_ue_sensing_slow_basis(t, n, trend_degree, q);
 
   /*

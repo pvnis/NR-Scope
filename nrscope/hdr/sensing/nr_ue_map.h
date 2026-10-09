@@ -392,7 +392,7 @@ typedef struct {
 /* Orthonormal basis of the slow trend of degree `degree` on the sample times t[0..n-1]:
    the polynomials 1, tau, ..., tau^degree with tau = t centred and scaled to [-1, 1],
    made orthonormal by Gram-Schmidt. This is the subspace the clutter stage removes from
-   every bin. q needs room for NR_CLUTTER_SLOW_TREND_MAX + 1 vectors of n entries.
+   every bin. q needs room for NR_CLUTTER_BASIS_ROWS vectors of n entries.
    Returns the number of vectors written, 0 when degree < 0. */
 int nr_ue_sensing_slow_basis(const double *t, int n, int degree, double q[][NR_SENSING_HISTORY_DEPTH]);
 
@@ -590,6 +590,26 @@ holds, and limiting it keeps the cost of a path independent of the map size. */
 #endif
 /// highest degree NR_CLUTTER_SLOW_TREND_DEGREE may take
 #define NR_CLUTTER_SLOW_TREND_MAX 3
+
+/* ECA-B (sensing.clutter_eca_batch_ms, extern nr_sensing_eca_batch_s).
+
+The slow-trend stage projects each range bin's slow-time samples off a small basis of time
+functions. By default that basis is a polynomial of degree trend_degree (0: the window's mean).
+With a batch length T_b > 0 it is instead one indicator per batch of T_b seconds: the window
+is cut into consecutive batches and each bin loses its own mean in every batch. That is ECA-B
+(the Extensive Cancellation Algorithm by Batches) with a zero-Doppler clutter subspace, in the
+domain of the DM-RS delay response, where the delays are already separated: the static scene
+may now change from one batch to the next (a precoder change, a timing correction, a slow
+drift) and is still removed, at the cost of a notch about 1/T_b wide around zero Doppler, so a
+target slower than about lambda / (2 T_b) is attenuated with it. A batch shorter than half T_b
+at the end of the window is merged into the one before it. One batch covering the whole window
+gives back trend_degree 0.
+
+The same function builds the basis for the map, the TDD detector and MUSIC, so all three model
+a target the way the data holds it. 0 (the default) keeps the polynomial. */
+extern double nr_sensing_eca_batch_s;
+/// rows the slow-time basis may have: polynomial degree + 1, or ECA-B batches
+#define NR_CLUTTER_BASIS_ROWS 16
 #if NR_CLUTTER_SLOW_TREND_DEGREE < 0 || NR_CLUTTER_SLOW_TREND_DEGREE > NR_CLUTTER_SLOW_TREND_MAX
 #error "NR_CLUTTER_SLOW_TREND_DEGREE must be between 0 and NR_CLUTTER_SLOW_TREND_MAX"
 #endif

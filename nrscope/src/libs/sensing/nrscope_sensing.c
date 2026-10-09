@@ -846,7 +846,7 @@ static void nr_ue_sensing_map_task(void *arg)
     /* The subspace the slow-trend filter removed from these samples, so the detector
     models a target the way the data holds it. Same basis, from the same function, as
     the filter itself; laid out [n_q][n_snap] for the detector. */
-    double q_basis[NR_CLUTTER_SLOW_TREND_MAX + 1][NR_SENSING_HISTORY_DEPTH];
+    double q_basis[NR_CLUTTER_BASIS_ROWS][NR_SENSING_HISTORY_DEPTH];
     const int trend_n_q = nr_ue_sensing_slow_basis(det->t_s, det->n_snap, det->trend_degree, q_basis);
     double *trend_q = trend_n_q > 0 ? malloc_or_fail((size_t)trend_n_q * det->n_snap * sizeof(*trend_q)) : NULL;
     for (int k = 0; k < trend_n_q; k++)

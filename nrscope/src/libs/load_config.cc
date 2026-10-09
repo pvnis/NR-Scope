@@ -21,6 +21,7 @@
 #include "nrscope/hdr/rrc_recfg_parse.h"
 
 extern "C" int nr_sensing_los_margin_bins; // nrscope/hdr/sensing/nr_ue_sensing.h
+extern "C" double nr_sensing_eca_batch_s;  // nrscope/hdr/sensing/nr_ue_map.h
 
 #include "srsran/phy/ue/srsgui_plot.h"
 
@@ -71,6 +72,10 @@ void load_sensing_config(const YAML::Node& config_yaml)
     flag("random_drop", &nrscope_sensing_args.random_drop);
     flag("tdd_detect", &nrscope_sensing_args.tdd_detect);
     flag("doppler_clean", &nrscope_sensing_args.doppler_clean);
+    if (sn["clutter_eca_batch_ms"]) {
+      nr_sensing_eca_batch_s = sn["clutter_eca_batch_ms"].as<double>() * 1e-3;
+      std::cout << "    sensing.clutter_eca_batch_ms: " << nr_sensing_eca_batch_s * 1e3 << std::endl;
+    }
     if (sn["doppler_clean_max"])
       nrscope_sensing_args.doppler_clean_max = sn["doppler_clean_max"].as<int>();
     if (sn["doppler_clean_thr_db"])
