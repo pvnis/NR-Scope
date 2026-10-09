@@ -920,6 +920,25 @@ static void nr_ue_sensing_map_task(void *arg)
       n_tgt = n_kept;
     }
 
+    /* Set aside the targets within detect_los_guard_bins of the direct path, see
+    NR_TDD_VERDICT_LOS_GUARD. Their removal from the map stays: it only takes out
+    direct-path residue. */
+    if (t->args->detect_los_guard_bins > 0) {
+      const double b_min = t->map.bin_los + t->args->detect_los_guard_bins;
+      int n_kept = 0;
+      for (int i = 0; i < n_tgt; i++) {
+        if (tgt[i].bin < b_min) {
+          if (n_rej < NR_TDD_MAX_REJECTED) {
+            rej[n_rej] = tgt[i];
+            rej[n_rej++].verdict = NR_TDD_VERDICT_LOS_GUARD;
+          }
+        } else {
+          tgt[n_kept++] = tgt[i];
+        }
+      }
+      n_tgt = n_kept;
+    }
+
     // LOG_I(NR_PHY,
     //       "SENSING DETECT %d.%d rx%d ports 0x%x layer %d: %d target(s) from %d snapshots, "
     //       "grid +-%.0f Hz x %d, replicas every %.0f Hz (%.1f m/s)\n",

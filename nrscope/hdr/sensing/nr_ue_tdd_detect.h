@@ -119,6 +119,10 @@ typedef enum {
   limbs of a person walking with no radial speed look like. Which one it is cannot be
   told from the map, so it is neither accepted nor thrown out, and not localised. */
   NR_TDD_VERDICT_UNCERTAIN = 3,
+  /* set aside: closer to the direct path than detect_los_guard_bins (runtime parameter),
+  where what is left of the direct path after clutter removal can pass the CFAR. Like
+  UNCERTAIN, drawn as a marker but not localised. */
+  NR_TDD_VERDICT_LOS_GUARD = 4,
 } nr_tdd_verdict_t;
 
 /* How close in power, in dB, a target's mirror cell at -f must be for the target to be

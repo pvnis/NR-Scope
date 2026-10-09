@@ -79,6 +79,11 @@ typedef struct {
   detection whose mirror at -v on the same range is within NR_TDD_MIRROR_DB of it. Off
   keeps every detection the TDD detector accepts. */
   bool mirror_reject;
+  /* NR-Scope only, > 0: set aside (verdict 4) a detection within this many range bins
+  after the direct path (bin_los), where the direct path's residue lives. 0 (default)
+  keeps them. The AoA stage has its own guard (NR_AOA_LOS_GUARD_MIN), so this one
+  matters for the markers and anything that reads them. */
+  int detect_los_guard_bins;
   /* test_record_samples: record-only mode. Write one file per window holding every
   (chain, layer) of its slow-time samples to <dump>.rec.<NNNNN>.csv, up to
   record_max_files, and skip the whole live map pipeline (range_doppler, detector, AoA,

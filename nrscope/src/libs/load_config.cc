@@ -82,6 +82,10 @@ void load_sensing_config(const YAML::Node& config_yaml)
       nrscope_sensing_args.doppler_clean_thr_db = sn["doppler_clean_thr_db"].as<double>();
     flag("music", &nrscope_sensing_args.music);
     flag("mirror_reject", &nrscope_sensing_args.mirror_reject);
+    if (sn["detect_los_guard_bins"]) {
+      nrscope_sensing_args.detect_los_guard_bins = sn["detect_los_guard_bins"].as<int>();
+      std::cout << "    sensing.detect_los_guard_bins: " << nrscope_sensing_args.detect_los_guard_bins << std::endl;
+    }
 
     flag("test_record_samples", &nrscope_sensing_args.test_record_samples);
     if (sn["record_max_files"])
