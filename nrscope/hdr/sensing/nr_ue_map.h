@@ -605,6 +605,28 @@ holds, and limiting it keeps the cost of a path independent of the map size. */
  capacity; the transform
  asserts the ones that size arrays.
 --------------------------------------------------------------------------- */
+/* DOPPLER CLEAN (sensing.doppler_clean).
+
+The Doppler axis is a direct DFT of each range bin's slow-time samples at their own times
+t_i, which are not uniform: DM-RS symbols 2, 7 and 11 of each DL slot, nothing in the UL
+part of every 5 ms TDD period, and holes wherever a slot had no grant. A tone of amplitude a
+at f0 therefore shows up as a * W(f - f0), W(f) = (1/n) sum_i exp(-j 2 pi f t_i), the
+spectral window of those times. W is the same for every bin of a map and has replicas at
+multiples of 1/T_TDD (200 Hz, -9 dB on a measured window) and, from the irregular holes, a
+floor of sidelobes over the whole axis (-36 dB median): every strong target smears that
+much of itself over all speeds at its range, which no taper removes.
+
+CLEAN (Hogbom) takes it out. In each range bin whose peak stands more than
+doppler_clean_thr_db over the map's noise floor: find the strongest Doppler cell, refine
+its frequency, take the least-squares amplitude of a tone there and subtract that tone
+from the bin's samples, which removes a * W(f - f0) exactly, replicas and floor included;
+repeat up to doppler_clean_max times. The map is then the transform of what is left plus
+each component put back as the main lobe of a uniform window of the same span, at its own
+height. The samples handed to the AoA and MUSIC are taken before this and are unchanged. */
+#define NR_SENSING_DOPPLER_CLEAN_CAP 32
+#define NR_SENSING_DOPPLER_CLEAN_MAX 8
+#define NR_SENSING_DOPPLER_CLEAN_THR_DB 12.0
+
 typedef struct {
   nr_sensing_clutter_t clutter_mode; ///< NONE / MEAN / KERNEL
   int    max_paths;          ///< kernel mode: static paths fitted, 1..NR_CLUTTER_MAX_PATHS
@@ -620,6 +642,9 @@ typedef struct {
   int    comb_harmonic;      ///< harmonics removed, 1..NR_COMB_MAX_HARMONIC
   int    comb_tdd_multiple;  ///< comb fundamental = 1/(this * T_TDD)
   int    comb_power_iters;   ///< power iterations for the rank-1 comb
+  bool   doppler_clean;      ///< Doppler CLEAN of each range bin, see NR_SENSING_DOPPLER_CLEAN
+  int    doppler_clean_max;  ///< components per range bin, 1..NR_SENSING_DOPPLER_CLEAN_CAP
+  double doppler_clean_thr_db; ///< stop below this over the map's noise floor
 } nr_sensing_params_t;
 
 /// Fill p with the compile-time defaults (clutter_mode left at KERNEL; the caller sets it).
@@ -639,6 +664,9 @@ static inline void nr_sensing_params_default(nr_sensing_params_t *p)
   p->comb_harmonic     = NR_COMB_MAX_HARMONIC;
   p->comb_tdd_multiple = NR_COMB_TDD_MULTIPLE;
   p->comb_power_iters  = NR_COMB_POWER_ITERS;
+  p->doppler_clean        = false;
+  p->doppler_clean_max    = NR_SENSING_DOPPLER_CLEAN_MAX;
+  p->doppler_clean_thr_db = NR_SENSING_DOPPLER_CLEAN_THR_DB;
 }
 
 /* Delay response (IDFT) of one grant's Hann window, sampled at u = b - u0.

@@ -760,6 +760,181 @@ int nr_ue_sensing_slow_basis(const double *t, int n, int degree, double q[][NR_S
   return n_q;
 }
 
+static int nr_ue_sensing_cmp_double(const void *a, const void *b);
+
+/* One bin's slow-time samples x[0..n-1] (re, im) transformed at freq: sum_i x_i exp(-j 2 pi f t_i),
+with the phase reduced modulo one turn as in the map's own transform. */
+static void nr_ue_sensing_dft_at(const double *t, const double *xr, const double *xi, int n, double freq,
+                                 double *ar_out, double *ai_out)
+{
+  double ar = 0.0, ai = 0.0;
+  for (int i = 0; i < n; i++) {
+    const double turns = freq * t[i];
+    const double ph = -2.0 * M_PI * (turns - trunc(turns));
+    const double c = cos(ph), sn = sin(ph);
+    ar += xr[i] * c - xi[i] * sn;
+    ai += xr[i] * sn + xi[i] * c;
+  }
+  *ar_out = ar;
+  *ai_out = ai;
+}
+
+/* DOPPLER CLEAN, see NR_SENSING_DOPPLER_CLEAN in nr_ue_map.h.
+
+power holds the dirty map (n_bins x n_freq, before the noise-floor scaling), res the slow-time
+samples it was transformed from, t their times, dft_norm the transform's 1/n^2. Bins whose peak
+clears the threshold are cleaned and rewritten in place. Returns the components removed. */
+static int nr_ue_sensing_doppler_clean(const nr_sensing_params_t *p,
+                                       const double *t,
+                                       int n,
+                                       int n_bins,
+                                       const float *res_re,
+                                       const float *res_im,
+                                       int n_freq,
+                                       double f_max,
+                                       double df,
+                                       double dft_norm,
+                                       float *power)
+{
+  if (n < 2 || n_freq < 3)
+    return 0;
+  int max_comp = p->doppler_clean_max;
+  if (max_comp < 1)
+    max_comp = 1;
+  if (max_comp > NR_SENSING_DOPPLER_CLEAN_CAP)
+    max_comp = NR_SENSING_DOPPLER_CLEAN_CAP;
+
+  /* The noise floor the threshold is measured from: the median cell of the dirty map, as the
+  normalisation below takes it, on an odd stride. */
+  const int n_cells = n_bins * n_freq;
+  double samp[NR_SENSING_MAP_NORM_SAMPLES];
+  int n_samp = 0;
+  int stride = (n_cells + NR_SENSING_MAP_NORM_SAMPLES - 1) / NR_SENSING_MAP_NORM_SAMPLES;
+  if (stride < 1)
+    stride = 1;
+  stride |= 1;
+  for (int c = 0; c < n_cells && n_samp < NR_SENSING_MAP_NORM_SAMPLES; c += stride)
+    samp[n_samp++] = power[c];
+  qsort(samp, n_samp, sizeof(samp[0]), nr_ue_sensing_cmp_double);
+  const double noise = (n_samp > 0) ? samp[n_samp / 2] : 0.0;
+  if (!(noise > 0.0))
+    return 0;
+  const double thr = noise * pow(10.0, p->doppler_clean_thr_db / 10.0);
+
+  /* The grid's transform kernels, shared by every bin. */
+  double *kc = malloc((size_t)n_freq * n * sizeof(double));
+  double *ks = malloc((size_t)n_freq * n * sizeof(double));
+  double *xr = malloc((size_t)n * sizeof(double));
+  double *xi = malloc((size_t)n * sizeof(double));
+  if (kc == NULL || ks == NULL || xr == NULL || xi == NULL) {
+    LOG_E(NR_PHY, "sensing: cannot allocate the Doppler CLEAN, map left dirty\n");
+    free(kc), free(ks), free(xr), free(xi);
+    return 0;
+  }
+  for (int f = 0; f < n_freq; f++) {
+    const double freq = -f_max + f * df;
+    for (int i = 0; i < n; i++) {
+      const double turns = freq * t[i];
+      const double ph = -2.0 * M_PI * (turns - trunc(turns));
+      kc[(size_t)f * n + i] = cos(ph);
+      ks[(size_t)f * n + i] = sin(ph);
+    }
+  }
+  /* Main lobe width of the restoring beam: a uniform window over the same span. */
+  const double span = t[n - 1] - t[0];
+
+  int n_total = 0;
+  for (int b = 0; b < n_bins; b++) {
+    float pk = 0.0f;
+    for (int f = 0; f < n_freq; f++)
+      pk = fmaxf(pk, power[b * n_freq + f]);
+    if (pk < thr)
+      continue;
+
+    for (int i = 0; i < n; i++) {
+      xr[i] = res_re[(size_t)i * n_bins + b];
+      xi[i] = res_im[(size_t)i * n_bins + b];
+    }
+    double comp_f[NR_SENSING_DOPPLER_CLEAN_CAP], comp_p[NR_SENSING_DOPPLER_CLEAN_CAP];
+    int n_comp = 0;
+    while (n_comp < max_comp) {
+      int kmax = 0;
+      double pmax = -1.0;
+      for (int f = 0; f < n_freq; f++) {
+        const double *c = kc + (size_t)f * n, *sn = ks + (size_t)f * n;
+        double ar = 0.0, ai = 0.0;
+        for (int i = 0; i < n; i++) {
+          ar += xr[i] * c[i] - xi[i] * sn[i];
+          ai += xr[i] * sn[i] + xi[i] * c[i];
+        }
+        const double pw = (ar * ar + ai * ai) * dft_norm;
+        if (pw > pmax) {
+          pmax = pw;
+          kmax = f;
+        }
+      }
+      if (pmax < thr)
+        break;
+
+      /* Refine the frequency inside the cells either side: golden section on |X(f)|. */
+      const double gr = 0.5 * (sqrt(5.0) - 1.0);
+      double lo = -f_max + (kmax - 1) * df, hi = -f_max + (kmax + 1) * df;
+      double f1 = hi - gr * (hi - lo), f2 = lo + gr * (hi - lo), ar, ai;
+      nr_ue_sensing_dft_at(t, xr, xi, n, f1, &ar, &ai);
+      double p1 = ar * ar + ai * ai;
+      nr_ue_sensing_dft_at(t, xr, xi, n, f2, &ar, &ai);
+      double p2 = ar * ar + ai * ai;
+      for (int it = 0; it < 24; it++) {
+        if (p1 > p2) {
+          hi = f2, f2 = f1, p2 = p1, f1 = hi - gr * (hi - lo);
+          nr_ue_sensing_dft_at(t, xr, xi, n, f1, &ar, &ai);
+          p1 = ar * ar + ai * ai;
+        } else {
+          lo = f1, f1 = f2, p1 = p2, f2 = lo + gr * (hi - lo);
+          nr_ue_sensing_dft_at(t, xr, xi, n, f2, &ar, &ai);
+          p2 = ar * ar + ai * ai;
+        }
+      }
+      const double f0 = 0.5 * (lo + hi);
+
+      /* Least-squares amplitude of a tone at f0 on these sample times, then subtract it. */
+      nr_ue_sensing_dft_at(t, xr, xi, n, f0, &ar, &ai);
+      const double alr = ar / n, ali = ai / n;
+      for (int i = 0; i < n; i++) {
+        const double turns = f0 * t[i];
+        const double ph = 2.0 * M_PI * (turns - trunc(turns));
+        const double c = cos(ph), sn = sin(ph);
+        xr[i] -= alr * c - ali * sn;
+        xi[i] -= alr * sn + ali * c;
+      }
+      comp_f[n_comp] = f0;
+      comp_p[n_comp] = alr * alr + ali * ali;
+      n_comp++;
+    }
+
+    /* The bin's map: what is left, plus every component as a sidelobe-free main lobe. */
+    for (int f = 0; f < n_freq; f++) {
+      const double *c = kc + (size_t)f * n, *sn = ks + (size_t)f * n;
+      double ar = 0.0, ai = 0.0;
+      for (int i = 0; i < n; i++) {
+        ar += xr[i] * c[i] - xi[i] * sn[i];
+        ai += xr[i] * sn[i] + xi[i] * c[i];
+      }
+      double pw = (ar * ar + ai * ai) * dft_norm;
+      const double freq = -f_max + f * df;
+      for (int k = 0; k < n_comp; k++) {
+        const double u = (freq - comp_f[k]) * span;
+        if (fabs(u) < 1.0)
+          pw += comp_p[k] * (u == 0.0 ? 1.0 : pow(sin(M_PI * u) / (M_PI * u), 2));
+      }
+      power[b * n_freq + f] = (float)pw;
+    }
+    n_total += n_comp;
+  }
+  free(kc), free(ks), free(xr), free(xi);
+  return n_total;
+}
+
 /* Orthonormal basis of the comb tones on the sample times t[0..n-1], for
 NR_CLUTTER_COMB_REMOVE.
 
@@ -1659,6 +1834,12 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
       }
       map->power[b * n_freq + f] = (float)((ar * ar + ai * ai) * dft_norm);
     }
+  }
+
+  if (p->doppler_clean) {
+    const int n_clean =
+        nr_ue_sensing_doppler_clean(p, t, n, n_bins, res_re, res_im, n_freq, f_max, df, dft_norm, map->power);
+    LOG_D(NR_PHY, "sensing: Doppler CLEAN took out %d component(s)\n", n_clean);
   }
 
   /* Scale the finished map to its own noise floor, so maps can be compared with each

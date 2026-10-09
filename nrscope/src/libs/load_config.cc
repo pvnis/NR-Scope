@@ -70,6 +70,11 @@ void load_sensing_config(const YAML::Node& config_yaml)
     flag("layer_avg", &nrscope_sensing_args.layer_avg);
     flag("random_drop", &nrscope_sensing_args.random_drop);
     flag("tdd_detect", &nrscope_sensing_args.tdd_detect);
+    flag("doppler_clean", &nrscope_sensing_args.doppler_clean);
+    if (sn["doppler_clean_max"])
+      nrscope_sensing_args.doppler_clean_max = sn["doppler_clean_max"].as<int>();
+    if (sn["doppler_clean_thr_db"])
+      nrscope_sensing_args.doppler_clean_thr_db = sn["doppler_clean_thr_db"].as<double>();
     flag("music", &nrscope_sensing_args.music);
     flag("mirror_reject", &nrscope_sensing_args.mirror_reject);
 

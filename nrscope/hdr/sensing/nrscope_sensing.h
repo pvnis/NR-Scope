@@ -66,6 +66,13 @@ typedef struct {
   bool random_drop;
   /// --sensing-tdd-detect: run the TDD detector on each map
   bool tdd_detect;
+  /* sensing.doppler_clean: deconvolve each range bin's Doppler spectrum from the slow-time
+  sampling's spectral window (see NR_SENSING_DOPPLER_CLEAN in nr_ue_map.h). Off by default. */
+  bool doppler_clean;
+  /// sensing.doppler_clean_max: most components taken out of one range bin
+  int doppler_clean_max;
+  /// sensing.doppler_clean_thr_db: stop when a bin's peak is less than this over the map's noise
+  double doppler_clean_thr_db;
   /// --sensing-music: also build each map with Doppler MUSIC
   bool music;
   /* NR-Scope only, on: set aside as uncertain (verdict 3, not drawn, not localised) a

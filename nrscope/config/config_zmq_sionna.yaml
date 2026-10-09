@@ -98,6 +98,10 @@ log_config:
   enable_gui: false
 
 sensing:
+  # Deconvolve each range bin's Doppler spectrum from the slow-time sampling's spectral window
+  # (NR_SENSING_DOPPLER_CLEAN in nr_ue_map.h): measured here, a target's smear over its row
+  # drops 11-25 dB. Changes the map only; the TDD detector and the AoA read the samples.
+  doppler_clean: true
   # Put the direct path at this delay bin (-1: leave the axis where the symbol timing puts it).
   # Over ZMQ/OCUDU the timing puts the direct path at bin -32, outside the map's bins 0..n_bins-1.
   los_margin_bins: 8
