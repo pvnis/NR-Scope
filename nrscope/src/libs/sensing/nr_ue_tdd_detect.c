@@ -78,6 +78,9 @@ void nr_tdd_cfg_default(nr_tdd_cfg_t *cfg)
   cfg->cfar_guard_freq = 1;
   cfg->cfar_train_bin = 4;
   cfg->cfar_train_freq = 8;
+  /* 0.75: cell averaging missed 74% of the people walking near others on a busy walkway
+  (their neighbours in its ring), the 75th percentile 11% (maps of a recorded run). */
+  cfg->cfar_os = 0.75;
 
   /* Eq. (23). The paper uses 0 in simulation, where removal is near perfect, and
   0.5 on measurements to survive residual clutter. This pipeline refines delay only
@@ -355,6 +358,50 @@ int nr_tdd_cfar(const nr_tdd_cmap_t *map,
   return n_found;
 }
 
+/* Ordered-statistic CFAR helpers. Exponential (square-law) noise: the false alarm rate of
+   p > alpha * x_(k), x_(k) the k-th smallest of N training cells, is
+       Pfa = prod_{i=0}^{k-1} (N - i) / (N - i + alpha)
+   (Rohling 1983), solved here for alpha by bisection on its logarithm. */
+static int nr_tdd_os_k(double q, int n)
+{
+  int k = (int)(q * n + 0.5);
+  return k < 1 ? 1 : (k > n ? n : k);
+}
+
+static double nr_tdd_os_alpha(int n, int k, double pfa)
+{
+  double lo = 1e-3, hi = 1e7;
+  for (int it = 0; it < 200; it++) {
+    const double mid = sqrt(lo * hi);
+    double lp = 0.0;
+    for (int i = 0; i < k; i++)
+      lp += log((n - i) / (n - i + mid));
+    if (lp > log(pfa))
+      lo = mid;   // not strict enough yet
+    else
+      hi = mid;
+  }
+  return sqrt(lo * hi);
+}
+
+static double nr_tdd_kth(double *a, int n, int k)   // k-th smallest (1-based), partial quickselect
+{
+  int l = 0, r = n - 1;
+  const int t = k - 1;
+  while (l < r) {
+    const double piv = a[(l + r) / 2];
+    int i = l, j = r;
+    while (i <= j) {
+      while (a[i] < piv) i++;
+      while (a[j] > piv) j--;
+      if (i <= j) { const double x = a[i]; a[i] = a[j]; a[j] = x; i++; j--; }
+    }
+    if (t <= j) r = j; else if (t >= i) l = i; else break;
+  }
+  return a[t];
+}
+
+
 int nr_tdd_cfar_power(const float *power,
                       int n_bins,
                       int n_freq,
@@ -369,6 +416,12 @@ int nr_tdd_cfar_power(const float *power,
   const int hb = gb + cfg->cfar_train_bin;
   const int hf = gf + cfg->cfar_train_freq;
   int n_found = 0;
+  const bool os = cfg->cfar_os > 0.0 && cfg->cfar_os < 1.0;
+  const int ring_max = (2 * hb + 1) * (2 * hf + 1);
+  double ring[ring_max];
+  double os_alpha[ring_max + 1];   // per ring size (smaller at the map's edges), computed once
+  for (int i = 0; i <= ring_max; i++)
+    os_alpha[i] = -1.0;
 
   for (int b = 0; b < n_bins; b++) {
     for (int f = 0; f < n_freq; f++) {
@@ -409,19 +462,27 @@ int nr_tdd_cfar_power(const float *power,
           const int ff = f + df;
           if (bb < 0 || bb >= n_bins || ff < 0 || ff >= n_freq)
             continue;
-          sum += power[bb * n_freq + ff];
+          ring[nt] = power[bb * n_freq + ff];
+          sum += ring[nt];
           nt++;
         }
       }
       if (nt < 8)
         continue; // too few training cells to estimate anything
 
-      const double noise = sum / nt;
+      double noise, alpha;
+      if (os) {   // the k-th smallest of the ring, and its factor for the same false alarm rate
+        const int k = nr_tdd_os_k(cfg->cfar_os, nt);
+        noise = nr_tdd_kth(ring, nt, k);
+        if (os_alpha[nt] < 0.0)
+          os_alpha[nt] = nr_tdd_os_alpha(nt, k, cfg->pfa);
+        alpha = os_alpha[nt];
+      } else {    // cell averaging
+        noise = sum / nt;
+        alpha = nt * (pow(cfg->pfa, -1.0 / nt) - 1.0);
+      }
       if (noise <= 0.0)
         continue;
-
-      // cell averaging threshold factor for the requested per cell false alarm rate
-      const double alpha = nt * (pow(cfg->pfa, -1.0 / nt) - 1.0);
       if (p <= alpha * noise)
         continue;
 

@@ -98,7 +98,7 @@
 #define NR_TDD_MAX_TARGETS 32
 
 /// Candidate peaks the CFAR stage may return
-#define NR_TDD_MAX_CANDIDATES 128
+#define NR_TDD_MAX_CANDIDATES 256
 
 /// Rejected candidates reported back, so a plot can show what was thrown away
 #define NR_TDD_MAX_REJECTED 32
@@ -230,6 +230,10 @@ typedef struct {
   /// training cells either side, beyond the guard band
   int cfar_train_bin;
   int cfar_train_freq;
+  /* Ordered-statistic CFAR: the noise is this quantile (0..1) of the training ring rather than
+  its mean (0 = cell averaging). In a crowd the neighbours sit in each other's ring and raise
+  a mean; a quantile ignores them while they fill less than 1 - cfar_os of it. */
+  double cfar_os;
 
   /// required fractional power drop at a replica for a peak to be accepted, Eq. (23)
   double gamma;
