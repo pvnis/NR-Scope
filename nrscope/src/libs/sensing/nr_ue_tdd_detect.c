@@ -91,8 +91,11 @@ void nr_tdd_cfg_default(nr_tdd_cfg_t *cfg)
   cfg->focus_zoom = 16;
   cfg->focus_span = 2;
 
-  cfg->max_targets = 8;
-  cfg->max_iter = 64;
+  /* A busy scene (a walkway, a road) has 10-15 movers in view at once: 8 dropped the weakest
+  ones (detection fell from ~97% to ~80% above 8 targets in view). Each target can cost a few
+  iterations on its replicas, hence max_iter. */
+  cfg->max_targets = 24;
+  cfg->max_iter = 160;
 }
 
 /* ------------------------------------------------------------------------- */

@@ -95,7 +95,7 @@
 #include <stdint.h>
 
 /// Hard cap on reported targets, so callers can use plain arrays
-#define NR_TDD_MAX_TARGETS 16
+#define NR_TDD_MAX_TARGETS 32
 
 /// Candidate peaks the CFAR stage may return
 #define NR_TDD_MAX_CANDIDATES 128
