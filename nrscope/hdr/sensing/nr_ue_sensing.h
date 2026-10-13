@@ -12,9 +12,6 @@
 /// Max number of CDM groups in csi_mapping_parms_t (see get_csi_mapping_parms())
 #define NR_SENSING_MAX_CSI_CDM 16
 
-/// Max delay taps reported per profile by nr_ue_sensing_find_peaks()
-#define NR_SENSING_MAX_PEAKS 8
-
 /* The delay axis is pinned by the product idft_size * k_step, not by the IDFT size
 alone.
 

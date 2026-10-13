@@ -384,9 +384,7 @@ int nr_tdd_detect(const nr_tdd_obs_t *obs,
  *   2. fill an nr_tdd_obs_t with the same normalised, clutter removed snapshots it
  *      already has in hand, plus the taper from nr_ue_sensing_apply_hann() and the
  *      lattice start,
- *   3. call nr_tdd_detect() and report the survivors instead of, or alongside,
- *      nr_ue_sensing_find_peaks(), which has no notion of replicas and reports
- *      every one of them as a target.
+ *   3. call nr_tdd_detect() and report the survivors.
  *
  * The taper is the one thing not currently kept anywhere: nr_ue_sensing_apply_hann()
  * applies it in place and forgets it. Either regenerate it from win_len or have that

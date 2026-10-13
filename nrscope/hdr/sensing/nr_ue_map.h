@@ -436,10 +436,10 @@ typedef enum {
 } nr_sensing_clutter_t;
 
 /// Distinct (n_m, a_m) pairs a window is expected to hold; see NR_CLUTTER_KERNEL
-#define NR_CLUTTER_MAX_KERNELS 512
+#define NR_CLUTTER_MAX_KERNELS 64
 
 /// Static paths NR_CLUTTER_KERNEL fits at most, the direct path included
-#define NR_CLUTTER_MAX_PATHS 4
+#define NR_CLUTTER_MAX_PATHS 12
 
 /// Minimum S = |mean|^2 / mean(|r|^2) for a peak to be taken as static; 1 is perfectly static
 #define NR_CLUTTER_STATIC_MIN 0.8
