@@ -101,6 +101,10 @@ void load_sensing_config(const YAML::Node& config_yaml)
     flag("avg_vcomp", &nrscope_sensing_args.avg_vcomp);
     if (sn["map_max_gap_ms"])
       nrscope_sensing_args.map_max_gap_ms = sn["map_max_gap_ms"].as<double>();
+    if (sn["map_overlap"]) {
+      nrscope_sensing_args.map_overlap = sn["map_overlap"].as<double>();
+      std::cout << "    sensing.map_overlap: " << nrscope_sensing_args.map_overlap << std::endl;
+    }
     if (sn["los_margin_bins"]) {
       nr_sensing_los_margin_bins = sn["los_margin_bins"].as<int>();
       std::cout << "    sensing.los_margin_bins: " << nr_sensing_los_margin_bins << std::endl;

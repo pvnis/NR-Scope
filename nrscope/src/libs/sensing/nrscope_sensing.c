@@ -41,6 +41,7 @@ void nrscope_sensing_default_args(nrscope_sensing_args_t* args)
   args->record_max_files = 100;
   args->avg_maps         = 1;
   args->map_max_gap_ms   = 20.0;
+  args->map_overlap      = 0.0;
   args->doppler_clean        = false;
   args->doppler_clean_max    = NR_SENSING_DOPPLER_CLEAN_MAX;
   args->doppler_clean_thr_db = NR_SENSING_DOPPLER_CLEAN_THR_DB;
@@ -95,6 +96,7 @@ struct nrscope_sensing_s {
       granted inside it. */
     bool                 armed;
     uint64_t             t_map_end;
+    uint64_t             t_win_start;   // where the current run of snapshots began (start, or after a gap)
     /* Newest snapshot time seen on this stream, to spot a hole in the capture. */
     uint64_t             t_last;
   } hist[NR_AOA_MAX_ANT][NR_SENSING_MAX_STREAMS];
@@ -157,6 +159,8 @@ static bool map_due(nrscope_sensing_t* s, const nr_sensing_history_t* hist, int 
   }
 
   const int64_t window_samples = (int64_t)(window_s * fs);
+  const double  overlap        = s->args.map_overlap > 0.0 ? fmin(s->args.map_overlap, 0.9) : 0.0;
+  const int64_t hop_samples    = (int64_t)(window_s * (1.0 - overlap) * fs);
   const int64_t gap_samples    = s->args.map_max_gap_ms > 0.0 ? (int64_t)(s->args.map_max_gap_ms * 1e-3 * fs) : 0;
 
   bool due = false;
@@ -168,8 +172,9 @@ static bool map_due(nrscope_sensing_t* s, const nr_sensing_history_t* hist, int 
     if (!s->hist[aarx][i].armed) {
       // the first snapshot of this stream opens the first window
       s->hist[aarx][i].armed     = true;
-      s->hist[aarx][i].t_map_end = t_now;
-      s->hist[aarx][i].t_last    = t_now;
+      s->hist[aarx][i].t_map_end   = t_now;
+      s->hist[aarx][i].t_win_start = t_now;
+      s->hist[aarx][i].t_last      = t_now;
     } else if (gap_samples > 0 && t_now > s->hist[aarx][i].t_last
                && (int64_t)(t_now - s->hist[aarx][i].t_last) > gap_samples) {
       /* A hole in the capture: the samples between were lost upstream, not just
@@ -177,13 +182,15 @@ static bool map_due(nrscope_sensing_t* s, const nr_sensing_history_t* hist, int 
       it, or, as the 4-chain outages showed, with only the few snapshots on one side of
       it. Start the next window after the gap instead. */
       const double gap_ms = (double)(t_now - s->hist[aarx][i].t_last) / fs * 1e3;
-      s->hist[aarx][i].t_map_end = t_now;
-      s->hist[aarx][i].t_last    = t_now;
+      s->hist[aarx][i].t_map_end   = t_now;
+      s->hist[aarx][i].t_win_start = t_now;
+      s->hist[aarx][i].t_last      = t_now;
       const uint64_t n = __sync_add_and_fetch(&nof_gap_restarts, 1);
       if (n == 1 || n % 50 == 0)
         LOG_W(NR_PHY, "sensing: %lu map window(s) restarted after a capture gap (latest %.0f ms on rx%d)\n",
               (unsigned long)n, gap_ms, aarx);
-    } else if ((int64_t)(t_now - s->hist[aarx][i].t_map_end) >= window_samples) {
+    } else if ((int64_t)(t_now - s->hist[aarx][i].t_map_end) >= hop_samples
+               && (int64_t)(t_now - s->hist[aarx][i].t_win_start) >= window_samples) {
       s->hist[aarx][i].t_map_end = t_now;
       due                        = true;
     }

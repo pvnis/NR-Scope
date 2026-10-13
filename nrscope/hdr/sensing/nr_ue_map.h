@@ -28,7 +28,7 @@
 // Remember we assume TDD, 30 KHz SCS and 3.45 GHz
 
 #define NR_SENSING_MIN_SNAPSHOTS  32 
-#define NR_SENSING_TARGET_DV_MS   0.15 // sets the minimum window t_span^min (0.15 m/s: about 0.29 s)
+#define NR_SENSING_TARGET_DV_MS   0.3  // sets the minimum window t_span^min (0.3 m/s: about 0.146 s)
 
 /* How far past NR_SENSING_TARGET_DV_MS a map may land before it is worth a warning.
 The window is aimed at t_span^min itself, and snapshots arrive where the scheduler put

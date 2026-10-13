@@ -109,7 +109,7 @@ sensing:
   dump: "/tmp/map2d.csv"
   symbols: 2048            # cost cap only, not the trigger: a map is built once its
                            # observation window is complete (NR_SENSING_TARGET_DV_MS
-                           # sets it: 0.29 s at 0.15 m/s, about 1280 symbols here).
+                           # sets it: 0.145 s at 0.30 m/s, about 640 symbols here).
                            # At most NR_SENSING_HISTORY_DEPTH.
   max_speed: 20
   clutter_removal: true
@@ -138,6 +138,9 @@ sensing:
   # A jump of more than this between a stream's snapshots means samples were lost upstream:
   # the filling window is dropped and the next starts after the gap (0 = off).
   map_max_gap_ms: 20
+  # Share of each map's window the next map reuses (0 = side by side, up to 0.9). 0.5: a
+  # 0.146 s map every 0.073 s, twice the maps at the same resolution.
+  map_overlap: 0.0
 
   # Bistatic geometry, for localising the AoA cells and their velocity (nr_ue_localize.h).
   # Positions in metres in any planar frame (x east, y north suggested), as [x, y].

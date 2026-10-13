@@ -105,6 +105,11 @@ typedef struct {
   starts after the gap, so a map is only built from a window without a hole and short
   maps from a few snapshots cannot happen. 0 disables it. */
   double map_max_gap_ms;
+  /* map_overlap: share of each map's window that the next map reuses, 0 (default, maps
+  side by side) to 0.9. 0.5 builds a map every half window: the same resolution, twice as
+  many maps, so a passing vehicle gets twice the looks. Each map still needs a full
+  window of snapshots after a start or a capture gap. */
+  double map_overlap;
   /* record_estimates: file to write every grant's DM-RS channel estimates to, at the
   input of nrscope_sensing_push_estimates(), for sensing_offline to replay through the
   rest of the pipeline (see nrscope_sensing_record.h). Empty for none. The live maps
