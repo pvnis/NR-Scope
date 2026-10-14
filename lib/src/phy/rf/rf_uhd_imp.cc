@@ -634,6 +634,12 @@ static int uhd_init(rf_uhd_handler_t* handler, char* args, uint32_t nof_channels
     clock_src = device_addr.pop("clock");
   }
 
+  // Rx antenna port of every channel, e.g. rx_antenna=TX/RX0 on the X410; the device default otherwise
+  std::string rx_antenna;
+  if (device_addr.has_key("rx_antenna")) {
+    rx_antenna = device_addr.pop("rx_antenna");
+  }
+
   // Select same synchronization source only if more than one channel is opened
   std::string sync_src = "internal";
   if (nof_channels > 1) {
@@ -870,6 +876,14 @@ static int uhd_init(rf_uhd_handler_t* handler, char* args, uint32_t nof_channels
   //     return SRSRAN_ERROR;
   //   }
   // }
+
+  if (not rx_antenna.empty()) {
+    for (uint32_t i = 0; i < nof_channels; i++) {
+      if (handler->uhd->set_rx_antenna(i, rx_antenna) != UHD_ERROR_NONE) {
+        return SRSRAN_ERROR;
+      }
+    }
+  }
 
   // Tune LOs if the default frequency is provided
   bool require_wait_rx_lock = false;

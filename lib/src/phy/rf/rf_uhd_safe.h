@@ -183,6 +183,7 @@ public:
   virtual uhd_error get_tx_gain(double& gain)                                                          = 0;
   virtual uhd_error set_tx_freq(uint32_t ch, double target_freq, double& actual_freq)                  = 0;
   virtual uhd_error set_rx_freq(uint32_t ch, double target_freq, double& actual_freq)                  = 0;
+  virtual uhd_error set_rx_antenna(size_t ch, const std::string& antenna) { return UHD_ERROR_NOT_IMPLEMENTED; }
   uhd_error         receive(void**              buffs,
                             const size_t        nsamps_per_buff,
                             uhd::rx_metadata_t& metadata,
