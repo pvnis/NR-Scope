@@ -72,6 +72,7 @@ void load_sensing_config(const YAML::Node& config_yaml)
     flag("random_drop", &nrscope_sensing_args.random_drop);
     flag("tdd_detect", &nrscope_sensing_args.tdd_detect);
     flag("doppler_clean", &nrscope_sensing_args.doppler_clean);
+    flag("clutter_los_norm", &nrscope_sensing_args.los_norm);
     if (sn["clutter_eca_batch_ms"]) {
       nr_sensing_eca_batch_s = sn["clutter_eca_batch_ms"].as<double>() * 1e-3;
       std::cout << "    sensing.clutter_eca_batch_ms: " << nr_sensing_eca_batch_s * 1e3 << std::endl;

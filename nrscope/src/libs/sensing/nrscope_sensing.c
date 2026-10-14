@@ -43,6 +43,7 @@ void nrscope_sensing_default_args(nrscope_sensing_args_t* args)
   args->map_max_gap_ms   = 20.0;
   args->map_overlap      = 0.0;
   args->doppler_clean        = false;
+  args->los_norm             = NR_CLUTTER_LOS_NORM;
   args->doppler_clean_max    = NR_SENSING_DOPPLER_CLEAN_MAX;
   args->doppler_clean_thr_db = NR_SENSING_DOPPLER_CLEAN_THR_DB;
 }
@@ -726,6 +727,7 @@ static void nr_ue_sensing_map_task(void *arg)
   nr_sensing_params_default(&base_params);
   base_params.clutter_mode = clutter;
   base_params.doppler_clean        = t->args->doppler_clean;
+  base_params.los_norm             = t->args->los_norm;
   base_params.doppler_clean_max    = t->args->doppler_clean_max;
   base_params.doppler_clean_thr_db = t->args->doppler_clean_thr_db;
 

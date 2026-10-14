@@ -69,6 +69,10 @@ typedef struct {
   /* sensing.doppler_clean: deconvolve each range bin's Doppler spectrum from the slow-time
   sampling's spectral window (see NR_SENSING_DOPPLER_CLEAN in nr_ue_map.h). Off by default. */
   bool doppler_clean;
+  /* sensing.clutter_los_norm: divide every snapshot by its own direct path before clutter
+  removal (NR_CLUTTER_LOS_NORM in nr_ue_map.h): takes out the common phase and gain drift of a
+  real receiver (residual carrier offset, phase noise). Default the compile-time value. */
+  bool los_norm;
   /// sensing.doppler_clean_max: most components taken out of one range bin
   int doppler_clean_max;
   /// sensing.doppler_clean_thr_db: stop when a bin's peak is less than this over the map's noise
