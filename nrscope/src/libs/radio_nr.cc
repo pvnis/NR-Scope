@@ -1022,7 +1022,10 @@ void Radio::StopStreams()
 {
   srsran::radio* r = dynamic_cast<srsran::radio*>(radio.get());
   if (r != nullptr) {
-    r->reset(); // stop_rx_stream on every RF device, which also flushes it
+    // stop and flush the Rx streams, then close the device: closing releases the X410's
+    // claim and transports, without which the next start is refused ("Someone tried to
+    // claim this device again") or meets stale streams ("blocks timed out during flush")
+    r->stop();
   }
 }
 

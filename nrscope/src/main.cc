@@ -129,5 +129,14 @@ int main(int argc, char** argv){
   }
   RunRecorder::close();
 
-  return NR_SUCCESS;
+  /* Reached only when the radio threads give up (no cell found, an init error). Leave
+    through the shutdown thread, as Ctrl-C does: returning would skip closing the radios,
+    so the next start finds the X410 still claimed, and would run the destructors under
+    the workers that are still running. */
+  if (!nrscope_stop.exchange(true)) {
+    sem_post(&nrscope_stop_sem);
+  }
+  for (;;) {
+    pause();
+  }
 }
