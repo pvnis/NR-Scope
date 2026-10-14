@@ -658,6 +658,14 @@ typedef struct {
   double los_first_db;       ///< how far below the strongest the LOS may sit
   bool   los_norm;           ///< divide each snapshot by its own direct path first
   double los_max_corr_db;    ///< clamp, dB either way, on that division
+  /* The direct-path correction shared by the chains of one array. Each chain divided by its
+  own direct path would zero the direct path's phase on every chain, i.e. take its steering
+  vector out: every angle would then come out relative to the direct path's. So the first
+  chain computes c_i and stores it here (los_c_n snapshots), and the other chains, built
+  from the same snapshots, apply that same c_i (los_c_reuse). NULL: each chain its own. */
+  double *los_c_re, *los_c_im;
+  int    *los_c_n;
+  bool    los_c_reuse;
   bool   comb_remove;        ///< remove the rank-1 TDD replica comb
   int    comb_harmonic;      ///< harmonics removed, 1..NR_COMB_MAX_HARMONIC
   int    comb_tdd_multiple;  ///< comb fundamental = 1/(this * T_TDD)
@@ -679,6 +687,9 @@ static inline void nr_sensing_params_default(nr_sensing_params_t *p)
   p->min_sep_bins      = NR_CLUTTER_MIN_SEP_BINS;
   p->los_first_db      = NR_SENSING_LOS_FIRST_DB;
   p->los_norm          = NR_CLUTTER_LOS_NORM;
+  p->los_c_re = p->los_c_im = NULL;
+  p->los_c_n = NULL;
+  p->los_c_reuse = false;
   p->los_max_corr_db   = NR_CLUTTER_LOS_MAX_CORR_DB;
   p->comb_remove       = NR_CLUTTER_COMB_REMOVE;
   p->comb_harmonic     = NR_COMB_MAX_HARMONIC;

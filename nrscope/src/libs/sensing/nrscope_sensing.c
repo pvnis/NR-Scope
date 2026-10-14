@@ -401,11 +401,21 @@ static int nr_ue_sensing_task_map(const nr_sensing_map_task_t *t,
     for (int k = 0; k < t->n_ant * t->n_layers; k++)
       obs[k].n_snap = 0;
 
+  /* One direct-path correction for the whole array (see los_c_re in nr_ue_map.h): the
+  first chain computes it, the others reuse it, so the angle survives the normalisation. */
+  double los_re[NR_SENSING_HISTORY_DEPTH], los_im[NR_SENSING_HISTORY_DEPTH];
+  int los_n = -1;
+  nr_sensing_params_t p0 = *p, pa = *p;
+  p0.los_c_re = pa.los_c_re = los_re;
+  p0.los_c_im = pa.los_c_im = los_im;
+  p0.los_c_n = pa.los_c_n = &los_n;
+  p0.los_c_reuse = false;
+  pa.los_c_reuse = true;
   int n = nr_ue_sensing_range_doppler(&t->snap[0],
                                       &t->stream,
                                       t->args->symbols,
                                       t->args->max_speed_ms,
-                                      p,
+                                      &p0,
                                       n_freq_first, // 0: the first chain sizes the grid every other map is built on
                                       map,
                                       obs != NULL ? &obs[0] : (n_slow > 0 ? &slow[0] : NULL));
@@ -441,7 +451,7 @@ static int nr_ue_sensing_task_map(const nr_sensing_map_task_t *t,
         /* On the first chain's Doppler grid (map->n_freq), so the maps can be summed cell
         by cell; see n_freq_fixed. */
         if (nr_ue_sensing_range_doppler(&t->snap[a], &st, t->args->symbols, t->args->max_speed_ms,
-                                        p, map->n_freq, other, ob != NULL ? ob : sl) <= 0) {
+                                        &pa, map->n_freq, other, ob != NULL ? ob : sl) <= 0) {
           if (ob != NULL)
             ob->n_snap = 0;
           continue;

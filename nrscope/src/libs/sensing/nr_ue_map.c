@@ -1441,7 +1441,13 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
     c_im[i] = 0.0;
   }
 
-  if (p->los_norm) {
+  const bool shared = p->los_norm && p->los_c_reuse && p->los_c_re != NULL && p->los_c_n != NULL && *p->los_c_n == n;
+  if (shared) {   // another chain of the same array: the first chain's correction, phases kept
+    for (int i = 0; i < n; i++) {
+      c_re[i] = p->los_c_re[i];
+      c_im[i] = p->los_c_im[i];
+    }
+  } else if (p->los_norm) {
     /* Same span as a path removal, so the filter sees the same skirt the kernel mode
     would subtract, clipped to the map. */
     int b_lo = (int)floor(map->bin_los) - p->kernel_half_span;
@@ -1520,6 +1526,13 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
     }
     free(kre);
     free(kim);
+  }
+  if (p->los_norm && !shared && !p->los_c_reuse && p->los_c_re != NULL && p->los_c_n != NULL) {   // the first chain: keep it for the others
+    for (int i = 0; i < n; i++) {
+      p->los_c_re[i] = c_re[i];
+      p->los_c_im[i] = c_im[i];
+    }
+    *p->los_c_n = n;
   }
 
   for (int i = 0; i < n; i++) {
