@@ -1,4 +1,5 @@
 #include "nrscope/hdr/radio_nr.h"
+#include "nrscope/hdr/sensing/nrscope_sensing.h"
 #include <chrono>
 #include <cstdlib>
 #include <liquid/liquid.h>
@@ -982,6 +983,14 @@ int Radio::FetchAndResample()
         labels its slots from this and not from the shared outcome, which by then may
         already describe a later subframe. */
       ring_outcome[produce_idx] = outcome;
+      {
+        /* The map clock: this subframe's first slot and when its samples arrived, a
+          subframe (1 ms) before now, give every map its UTC time (<dump>.time.csv). */
+        struct timespec now;
+        clock_gettime(CLOCK_REALTIME, &now);
+        const uint32_t spf = SRSRAN_NSLOTS_PER_FRAME_NR(arg_scs.scs);
+        nrscope_sensing_set_clock(outcome.sfn, outcome.sf_idx * spf / 10, spf, now.tv_sec + now.tv_nsec * 1e-9 - 1e-3);
+      }
       // a new sf data ready; let decoder consume
       next_produce_at++;
       sem_post(&smph_sf_data_prod_cons);

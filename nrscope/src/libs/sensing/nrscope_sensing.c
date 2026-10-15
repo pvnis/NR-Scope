@@ -21,6 +21,60 @@
 #include "srsran/phy/ch_estimation/dmrs_sch.h"
 #include "srsran/phy/utils/vector.h"
 
+/* The map clock (nrscope_sensing_set_clock): one (sfn, slot) of the cell and the UTC
+   time it was received at. Slots then follow at the numerology's fixed rate, so any
+   recent (frame, slot) converts by its signed slot distance to the anchor, which is
+   unambiguous within half the 1024-frame SFN period (5.12 s at 30 kHz) of it. */
+static pthread_mutex_t clock_lock   = PTHREAD_MUTEX_INITIALIZER;
+static bool            clock_set    = false;
+static uint32_t        clock_sfn, clock_slot, clock_spf;
+static double          clock_unix_s;
+
+void nrscope_sensing_set_clock(uint32_t sfn, uint32_t slot, uint32_t slots_per_frame, double unix_s)
+{
+  pthread_mutex_lock(&clock_lock);
+  clock_sfn    = sfn;
+  clock_slot   = slot;
+  clock_spf    = slots_per_frame;
+  clock_unix_s = unix_s;
+  clock_set    = true;
+  pthread_mutex_unlock(&clock_lock);
+}
+
+/* One line of <dump>.time.csv per map, written right after its dump line. */
+static void sensing_dump_time(const char* dump, int frame, int slot, int aarx)
+{
+  pthread_mutex_lock(&clock_lock);
+  const bool     have = clock_set;
+  const uint32_t a_sfn = clock_sfn, a_slot = clock_slot, spf = clock_spf;
+  const double   a_t  = clock_unix_s;
+  pthread_mutex_unlock(&clock_lock);
+  if (!have || spf == 0)
+    return;
+  const int64_t period = 1024 * (int64_t)spf;
+  int64_t       d      = ((int64_t)frame * spf + slot - ((int64_t)a_sfn * spf + a_slot)) % period;
+  if (d < 0)
+    d += period;
+  if (d >= period / 2)
+    d -= period; // the map's slot is usually before the anchor: it was built from earlier samples
+  const double t = a_t + (double)d * (10e-3 / spf);
+
+  static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+  static bool            started = false;
+  char                   path[300];
+  snprintf(path, sizeof(path), "%s.time.csv", dump);
+  pthread_mutex_lock(&lock);
+  FILE* f = fopen(path, started ? "a" : "w");
+  if (f != NULL) {
+    if (!started)
+      fprintf(f, "frame,slot,aarx,unix_s\n");
+    started = true;
+    fprintf(f, "%d,%d,%d,%.6f\n", frame, slot, aarx, t);
+    fclose(f);
+  }
+  pthread_mutex_unlock(&lock);
+}
+
 #define NSYMB SRSRAN_NSYMB_PER_SLOT_NR
 #define SLOTS_PER_FRAME_30KHZ 20
 #define SLOTS_PER_HYPERFRAME (1024 * SLOTS_PER_FRAME_30KHZ)
@@ -1076,6 +1130,8 @@ static void nr_ue_sensing_map_task(void *arg)
     else in a dump changes */
     nr_ue_sensing_dump_map(t->args->dump[0] ? t->args->dump : NULL, t->frame, t->slot,
                            t->aarx, &t->map, markers, n_markers, aoa_out, n_aoa);
+    if (t->args->dump[0])
+      sensing_dump_time(t->args->dump, t->frame, t->slot, t->aarx);
 
     /* The MUSIC map of the same window, on the same grid, written to its own file one line
     per map in the same order as the DFT dump, so line i of both files is the same window.

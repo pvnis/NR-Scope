@@ -208,6 +208,15 @@ int nrscope_sensing_push_estimates(nrscope_sensing_t* s,
                                    const bool*        valid,
                                    uint32_t           n_sc_grid);
 
+/* Map timestamps. The capture thread calls this for every subframe it receives in
+   sync: (sfn, slot) is the subframe's first slot, unix_s the computer's UTC clock
+   (CLOCK_REALTIME) at its first sample. With a dump set, each map then gets a line
+   "frame,slot,aarx,unix_s" in <dump>.time.csv, in the same order as the dump, unix_s
+   being its (frame, slot) on that clock: what an outdoor capture needs to line the
+   maps up with a ground truth logged on another device (keep the computer on NTP or
+   GPS time). Never called (offline replay): no time file. */
+void nrscope_sensing_set_clock(uint32_t sfn, uint32_t slot, uint32_t slots_per_frame, double unix_s);
+
 /* Offline replay: a full map queue makes the caller wait for room instead of
    dropping the map, since the input then comes faster than real time. */
 void nrscope_sensing_set_offline(nrscope_sensing_t* s, bool offline);
