@@ -1547,6 +1547,14 @@ static void rec_grant(const nrscope_sensing_t* s, uint32_t aarx, uint16_t ports,
   pthread_mutex_unlock(&rec.lock);
 }
 
+int nrscope_sensing_set_aoa_cal_deg(const double* deg, int n)
+{
+  if (n > NR_AOA_MAX_ANT)
+    return -1;
+  nr_ue_aoa_set_cal_deg(deg, n);
+  return 0;
+}
+
 void nrscope_sensing_record_close(void)
 {
   pthread_mutex_lock(&rec.lock);

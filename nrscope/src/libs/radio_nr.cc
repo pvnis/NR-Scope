@@ -613,10 +613,16 @@ int Radio::RadioInitandStart()
     radio->release_freq(0);
     radio->set_rx_freq(0, rx_center_hz);
 
-    /* The radio stays on this frequency from here on: calibrate the chains now (calibration.h). */
-    if (nrscope_calibration_args.enable && !calibrated) {
+    /* The radio stays on this frequency from here on. --calibrate measures the chains
+      here and ends the run; a normal run takes the saved calibration (calibration.h). */
+    if (nrscope_calibrate_only) {
+      run_tone_calibration(
+          *radio, nof_antennas, rx_center_hz, rf_args.rx_gain, rf_args.srate_hz, pre_resampling_slot_sz);
+      return SRSRAN_SUCCESS;
+    }
+    if (!calibrated) {
       calibrated = true;
-      run_tone_calibration(*radio, nof_antennas, rx_center_hz, rf_args.srate_hz, pre_resampling_slot_sz);
+      apply_saved_calibration(rx_center_hz, rf_args.rx_gain);
     }
 
     srsran::rf_buffer_t rf_buffer = {};

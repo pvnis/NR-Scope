@@ -34,18 +34,22 @@
 /// Rx antennas the spatial stage handles, the sensing library's chain ceiling
 #define NR_AOA_MAX_ANT NR_SENSING_MAX_RX
 
-/* Element spacing of the receive ULA, in wavelengths, and the per-chain phase
+/* Element spacing of the receive ULA, in wavelengths, and the default per-chain phase
 offsets removed before the steering vector is applied, in degrees.
 
 The calibration is the blocking assumption of this whole module. The four X410 chains
-share a sample clock, but the daughterboard LOs can settle at an arbitrary relative
-phase on every retune, and until that offset is known and constant the steering vector
-below describes an array that does not exist. Measure it from the direct path, which
-is static and strong: arg(h_a[b_direct]) - arg(h_0[b_direct]) should be constant
-across slots. If it is, it goes here. If it drifts within a run, this needs to become
-a per-map estimate instead of a constant. */
+share a sample clock, but their LOs settle at their own phases, and until those offsets
+are known and constant the steering vector below describes an array that does not
+exist. The X410 now tunes on whole seconds so the offsets repeat from run to run; the
+tone calibration (calibration.h) measures them, and sensing.aoa_cal_deg sets them at
+run time (nr_ue_aoa_set_cal_deg). If they drift within a run, this needs to become a
+per-map estimate instead. */
 #define NR_AOA_ELEMENT_SPACING 0.5
 #define NR_AOA_CAL_DEG {0.0, 0.0, 0.0, 0.0}
+
+/* Per-chain phase offsets, degrees: chain a is rotated by exp(-j*deg[a]), so deg[a] is
+the phase chain a carries in excess of chain 0. Chains beyond n keep NR_AOA_CAL_DEG. */
+void nr_ue_aoa_set_cal_deg(const double *deg, int n);
 
 /* Points of the spatial spectrum, uniform in sin(theta) over [-1, 1].
 

@@ -36,10 +36,10 @@ usrp_setting_0:
   # 122.88 Msps), one grid FFT per chain in each worker, and ~15.7 Gbps on the fronthaul.
   #
   # The chains must share a clock or they are not phase coherent and the angle estimate
-  # is meaningless. On the X410 chains 2 and 3 sit on the second ZBX daughterboard, whose
-  # LO settles at an arbitrary phase against the first board's on every retune: measure
-  # the per-chain offsets with scripts/sensing/rx_pair_check.py (it prints the
-  # NR_AOA_CAL_DEG line to paste into nr_ue_aoa.h) before trusting any angle.
+  # is meaningless. Each chain's LO also settles at its own phase; the X410 tunes on whole
+  # seconds so the offsets repeat from run to run. Measure them with the tone calibration
+  # (nrscope --calibrate, see calibration: below), which later runs apply, or with
+  # scripts/sensing/rx_pair_check.py, which prints the sensing.aoa_cal_deg line to paste.
   nof_antennas: 2
 
   scs_index: 1 #(0: 15kHz, 1: 30kHz, ..., the u in standard)
@@ -116,6 +116,10 @@ sensing:
   # antenna_avg for the chains to reach it at all.
   music: false
 
+  # Per-chain phase offsets the AoA removes, degrees, chain 0 first. The saved
+  # calibration (nrscope --calibrate) replaces them; these are for when there is none. Unset chains keep NR_AOA_CAL_DEG (zeros).
+  # aoa_cal_deg: [0.0, 0.0, 0.0, 0.0]
+
   mirror_reject: true  # set aside a detection with an equally strong mirror at -v (not drawn); false keeps them all
   
   # Map averaging: each map becomes the power mean of the last avg_maps maps of its stream
@@ -165,17 +169,24 @@ sensing:
   #
 
   # record_estimates: "/home/sens/runs/test/estimates.bin"
-# Tone calibration of the receive chains (nrscope/hdr/calibration.h), or run with --calibrate.
-# Once the radio is tuned, a bladeRF sends a CW tone; nrscope logs each chain's tone power
-# and its phase against chain 0, beside what distances_mm predicts, then carries on sniffing.
-# The tone must be inside the capture and outside the carrier: 3503 MHz sits 3.9 MHz above
-# the 273-PRB carrier's top edge (3499.14 MHz) and 8 MHz inside the capture's (3511.44 MHz).
+# Tone calibration of the receive chains (nrscope/hdr/calibration.h). Run once with
+#   sudo ./nrscope <this config> --calibrate
+# to measure the chains with the bladeRF tone and save the result in <repo>/calibration/
+# (calibration.yaml, the one in use; history.csv, every attempt). Every normal run then
+# loads it and the AoA removes its phase offsets. Recalibrate whenever you like: a failed
+# attempt keeps the previous calibration.
+# The tone sits on the carrier's centre, where the AoA uses the offsets: 53 MHz away, in the
+# guard band, ch3's offset came out ~90 degrees different (2026-10-16). It overlaps the cell
+# for the calibration's half second. 3450.0 and 3451.0 MHz agreed within 1.5 degrees, so the
+# X410's DC point does not bias it.
 calibration:
-  enable: false
-  tone_freq_hz: 3503000000
+  tone_freq_hz: 3450000000
   bladerf_device: ""        # libbladeRF identifier, e.g. "*:serial=8a2"; empty: the first bladeRF found
   bladerf_tx_gain: 40       # dB
   duration_ms: 200          # tone measured over this long, the background over as long again
   # bladeRF antenna to chain 0..3, mm (provisional: the bladeRF antenna is not in place yet)
   distances_mm: [295.18, 307.51, 325.22, 347.50]
-  output: "calibration.csv" # one row per chain per run, appended
+  # To pass, every chain needs both. Coherence: how steady its phase against chain 0
+  # stays from slot to slot, 1 for a clean tone (noise alone gives ~0.99 at 16 dB SNR).
+  min_coherence: 0.95
+  min_snr_db: 10

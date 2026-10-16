@@ -84,6 +84,19 @@ void load_sensing_config(const YAML::Node& config_yaml)
       }
     }
     flag("avg_vcomp", &nrscope_sensing_args.avg_vcomp);
+    // per-chain phase offsets for the AoA, chain 0 first, e.g. the tone calibration's line
+    if (sn["aoa_cal_deg"]) {
+      const std::vector<double> cal = sn["aoa_cal_deg"].as<std::vector<double> >();
+      if (nrscope_sensing_set_aoa_cal_deg(cal.data(), (int)cal.size()) != 0) {
+        std::cerr << "sensing: aoa_cal_deg has more values than chains the AoA handles: " << cal.size() << std::endl;
+        exit(EXIT_FAILURE);
+      }
+      std::cout << "sensing: AoA phase offsets";
+      for (double d : cal) {
+        std::cout << " " << d;
+      }
+      std::cout << " deg" << std::endl;
+    }
     if (sn["map_max_gap_ms"])
       nrscope_sensing_args.map_max_gap_ms = sn["map_max_gap_ms"].as<double>();
     if (sn["record_estimates"])

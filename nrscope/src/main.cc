@@ -25,7 +25,8 @@ int main(int argc, char** argv){
   srslog::init();
 
   /* Usage: nrscope [--calibrate] [config file], defaults to config.yaml in the working
-    directory. --calibrate runs the tone calibration even if the config does not enable it. */
+    directory. --calibrate measures the receive chains with the bladeRF tone, saves the
+    calibration that later runs use, and exits (calibration.h). */
   std::string file_name = "config.yaml";
   bool        calibrate = false;
   for (int i = 1; i < argc; i++) {
@@ -79,7 +80,7 @@ int main(int argc, char** argv){
     std::cout << "Load config fail." << std::endl;
     return NR_FAILURE;
   }
-  nrscope_calibration_args.enable |= calibrate;
+  nrscope_calibrate_only = calibrate;
 
   /* Keep every thread that does not pin itself off the serial capture stages' CPUs.
     UHD starts its own threads unpinned during the radio init, inheriting this thread's
