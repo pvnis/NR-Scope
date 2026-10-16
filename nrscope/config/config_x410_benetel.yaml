@@ -117,7 +117,8 @@ sensing:
   music: false
 
   # Per-chain phase offsets the AoA removes, degrees, chain 0 first. The saved
-  # calibration (nrscope --calibrate) replaces them; these are for when there is none. Unset chains keep NR_AOA_CAL_DEG (zeros).
+  # calibration (nrscope --calibrate) replaces them; these are for when there is none.
+  # Unset chains keep NR_AOA_CAL_DEG (zeros).
   # aoa_cal_deg: [0.0, 0.0, 0.0, 0.0]
 
   mirror_reject: true  # set aside a detection with an equally strong mirror at -v (not drawn); false keeps them all
