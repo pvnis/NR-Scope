@@ -6,6 +6,7 @@
 #include <sched.h>
 #include <thread>
 
+#include "nrscope/hdr/calibration.h"
 #include "nrscope/hdr/nrscope_def.h"
 #include "nrscope/hdr/load_config.h"
 #include "nrscope/hdr/sensing/nrscope_sensing.h"
@@ -23,8 +24,17 @@ int main(int argc, char** argv){
   // Initialise logging infrastructure
   srslog::init();
 
-  // Usage: nrscope [config file], defaults to config.yaml in the working directory
-  std::string file_name = (argc > 1) ? argv[1] : "config.yaml";
+  /* Usage: nrscope [--calibrate] [config file], defaults to config.yaml in the working
+    directory. --calibrate runs the tone calibration even if the config does not enable it. */
+  std::string file_name = "config.yaml";
+  bool        calibrate = false;
+  for (int i = 1; i < argc; i++) {
+    if (std::string(argv[i]) == "--calibrate") {
+      calibrate = true;
+    } else {
+      file_name = argv[i];
+    }
+  }
   if (access(file_name.c_str(), R_OK) != 0) {
     std::cout << "Cannot read config file: " << file_name << std::endl;
     return NR_FAILURE;
@@ -52,6 +62,7 @@ int main(int argc, char** argv){
   std::thread([&radios]() {
     while (sem_wait(&nrscope_stop_sem) != 0) {
     }
+    stop_calibration_tone();
     usleep(300000);
     for (auto& r : radios) {
       r.StopStreams();
@@ -68,6 +79,7 @@ int main(int argc, char** argv){
     std::cout << "Load config fail." << std::endl;
     return NR_FAILURE;
   }
+  nrscope_calibration_args.enable |= calibrate;
 
   /* Keep every thread that does not pin itself off the serial capture stages' CPUs.
     UHD starts its own threads unpinned during the radio init, inheriting this thread's

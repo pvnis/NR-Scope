@@ -1,4 +1,5 @@
 #include "nrscope/hdr/radio_nr.h"
+#include "nrscope/hdr/calibration.h"
 #include <chrono>
 #include <cstdlib>
 #include <liquid/liquid.h>
@@ -562,6 +563,7 @@ int Radio::RadioInitandStart()
                                       rrc_recfg);
 
   std::cout << "Task scheduler started..." << std::endl;
+  bool calibrated = false;
   while (not ss.end()) {
     // Get SSB center frequency
     cs_args.ssb_freq_hz = ss.get_frequency();
@@ -610,6 +612,12 @@ int Radio::RadioInitandStart()
 
     radio->release_freq(0);
     radio->set_rx_freq(0, rx_center_hz);
+
+    /* The radio stays on this frequency from here on: calibrate the chains now (calibration.h). */
+    if (nrscope_calibration_args.enable && !calibrated) {
+      calibrated = true;
+      run_tone_calibration(*radio, nof_antennas, rx_center_hz, rf_args.srate_hz, pre_resampling_slot_sz);
+    }
 
     srsran::rf_buffer_t rf_buffer = {};
     rf_buffer.set_nof_samples(pre_resampling_slot_sz);

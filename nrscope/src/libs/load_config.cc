@@ -14,6 +14,7 @@
 #include <boost/program_options.hpp>
 #include <boost/program_options/parsers.hpp>
 
+#include "nrscope/hdr/calibration.h"
 #include "nrscope/hdr/load_config.h"
 #include "nrscope/hdr/run_recorder.h"
 #include "nrscope/hdr/nrscope_def.h"
@@ -358,6 +359,7 @@ int load_config(std::vector<Radio>& radios, std::string file_name)
                                        config_yaml[setting_name]["record_pdcch_candidates"].as<bool>());
 
   load_sensing_config(config_yaml);
+  load_calibration_config(config_yaml);
 
   if (config_yaml[setting_name]["push_to_google"]) {
     for (int i = 0; i < nof_usrp; i++) {

@@ -19,7 +19,10 @@
  *
  */
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <mutex>
 #include <string>
@@ -153,6 +156,7 @@ struct rf_uhd_handler_t {
   std::array<double, SRSRAN_MAX_CHANNELS> tx_freq             = {};
   std::array<double, SRSRAN_MAX_CHANNELS> rx_freq             = {};
   double                                  cur_rx_gain_ch0     = 0;
+  bool                                    timed_tune          = false; //< see uhd_init
 
   std::mutex                                                 tx_gain_mutex;
   std::array<std::pair<double, double>, SRSRAN_MAX_CHANNELS> tx_gain_db = {};
@@ -634,10 +638,17 @@ static int uhd_init(rf_uhd_handler_t* handler, char* args, uint32_t nof_channels
     clock_src = device_addr.pop("clock");
   }
 
-  // Rx antenna port of every channel, e.g. rx_antenna=TX/RX0 on the X410; the device default otherwise
-  std::string rx_antenna;
+  // Rx antenna port: rx_antenna=<port> for every channel, rx_antenna<i>=<port> for channel i alone,
+  // e.g. rx_antenna=RX1,rx_antenna0=TX/RX0 on the X410; the device default otherwise
+  std::vector<std::string> rx_antenna(nof_channels);
   if (device_addr.has_key("rx_antenna")) {
-    rx_antenna = device_addr.pop("rx_antenna");
+    rx_antenna.assign(nof_channels, device_addr.pop("rx_antenna"));
+  }
+  for (uint32_t i = 0; i < nof_channels; i++) {
+    std::string key = "rx_antenna" + std::to_string(i);
+    if (device_addr.has_key(key)) {
+      rx_antenna[i] = device_addr.pop(key);
+    }
   }
 
   // Select same synchronization source only if more than one channel is opened
@@ -860,8 +871,17 @@ static int uhd_init(rf_uhd_handler_t* handler, char* args, uint32_t nof_channels
   //   return SRSRAN_ERROR;
   // }
 
-  // Reset timestamps
-  if (nof_channels > 1 and clock_src != "gpsdo") {
+  // Reset timestamps. A multi-channel X410 instead starts its time at a PPS edge and from then on tunes every
+  // channel with one command on a whole second (rf_uhd_tune_rx_timed). Otherwise each tune leaves the chains at
+  // random relative phases, and at 3.45 GHz the FE1 chains (ch1, ch3) land in one of three states 120 degrees
+  // apart: UHD offsets their LO2 by PRC/3 and resets time at an arbitrary phase of the 61.44 MHz PRC.
+  handler->timed_tune = nof_channels > 1 and device_addr.has_key("type") and device_addr["type"] == "x4xx";
+  if (handler->timed_tune) {
+    if (handler->uhd->set_time_next_pps(uhd::time_spec_t(0.0)) != UHD_ERROR_NONE) {
+      return SRSRAN_ERROR;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+  } else if (nof_channels > 1 and clock_src != "gpsdo") {
     handler->uhd->set_time_unknown_pps(uhd::time_spec_t());
   }
 
@@ -877,11 +897,9 @@ static int uhd_init(rf_uhd_handler_t* handler, char* args, uint32_t nof_channels
   //   }
   // }
 
-  if (not rx_antenna.empty()) {
-    for (uint32_t i = 0; i < nof_channels; i++) {
-      if (handler->uhd->set_rx_antenna(i, rx_antenna) != UHD_ERROR_NONE) {
-        return SRSRAN_ERROR;
-      }
+  for (uint32_t i = 0; i < nof_channels; i++) {
+    if (not rx_antenna[i].empty() and handler->uhd->set_rx_antenna(i, rx_antenna[i]) != UHD_ERROR_NONE) {
+      return SRSRAN_ERROR;
     }
   }
 
@@ -1238,12 +1256,38 @@ static bool rf_uhd_set_freq_ch(rf_uhd_handler_t* handler, uint32_t ch, double& f
   return true;
 }
 
+// Tunes every Rx channel to freq with one command timed on a whole second at least 0.5 s ahead, so the chains'
+// relative phases come out the same on every tune and in every session (see timed_tune in uhd_init). Blocks
+// until the tune has happened, 0.8 to 1.8 s.
+static void rf_uhd_tune_rx_timed(rf_uhd_handler_t* handler, double freq)
+{
+  uhd::time_spec_t now;
+  handler->uhd->get_time_now(now);
+  const uhd::time_spec_t t_cmd(std::floor(now.get_real_secs() + 0.5) + 1.0);
+  handler->uhd->set_command_time(t_cmd);
+  for (uint32_t i = 0; i < handler->nof_rx_channels; i++) {
+    handler->uhd->set_rx_freq(i, freq, handler->rx_freq[i]);
+  }
+  handler->uhd->clear_command_time();
+  handler->uhd->get_time_now(now);
+  std::this_thread::sleep_for(std::chrono::duration<double>(std::max((t_cmd - now).get_real_secs(), 0.0) + 0.3));
+}
+
 double rf_uhd_set_rx_freq(void* h, uint32_t ch, double freq)
 {
   bool require_rx_wait_lo_locked = false;
 
   rf_uhd_handler_t* handler = (rf_uhd_handler_t*)h;
-  if (ch < handler->nof_rx_channels) {
+  if (handler->timed_tune) {
+    // All channels share one frequency in this mode, so the first call tunes them all and the others find
+    // their channel already there.
+    for (uint32_t i = 0; i < handler->nof_rx_channels; i++) {
+      require_rx_wait_lo_locked |= round(freq) != round(handler->rx_freq[i]);
+    }
+    if (require_rx_wait_lo_locked) {
+      rf_uhd_tune_rx_timed(handler, freq);
+    }
+  } else if (ch < handler->nof_rx_channels) {
     require_rx_wait_lo_locked |= rf_uhd_set_freq_ch(handler, ch, freq, false);
   } else {
     for (uint32_t i = 0; i < handler->nof_rx_channels; i++) {

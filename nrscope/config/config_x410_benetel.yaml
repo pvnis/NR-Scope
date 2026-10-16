@@ -165,3 +165,17 @@ sensing:
   #
 
   # record_estimates: "/home/sens/runs/test/estimates.bin"
+# Tone calibration of the receive chains (nrscope/hdr/calibration.h), or run with --calibrate.
+# Once the radio is tuned, a bladeRF sends a CW tone; nrscope logs each chain's tone power
+# and its phase against chain 0, beside what distances_mm predicts, then carries on sniffing.
+# The tone must be inside the capture and outside the carrier: 3503 MHz sits 3.9 MHz above
+# the 273-PRB carrier's top edge (3499.14 MHz) and 8 MHz inside the capture's (3511.44 MHz).
+calibration:
+  enable: false
+  tone_freq_hz: 3503000000
+  bladerf_device: ""        # libbladeRF identifier, e.g. "*:serial=8a2"; empty: the first bladeRF found
+  bladerf_tx_gain: 40       # dB
+  duration_ms: 200          # tone measured over this long, the background over as long again
+  # bladeRF antenna to chain 0..3, mm (provisional: the bladeRF antenna is not in place yet)
+  distances_mm: [295.18, 307.51, 325.22, 347.50]
+  output: "calibration.csv" # one row per chain per run, appended

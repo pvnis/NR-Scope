@@ -4,6 +4,12 @@ add_library(nrscope_libs STATIC ${SOURCES})
 # not the build tree the binary runs from.
 target_compile_definitions(nrscope_libs PRIVATE NRSCOPE_ROOT_DIR="${CMAKE_SOURCE_DIR}")
 
+# calibration.cc sends its tone with a bladeRF
+if(BLADERF_FOUND)
+  target_compile_definitions(nrscope_libs PRIVATE NRSCOPE_HAVE_BLADERF)
+  target_link_libraries(nrscope_libs ${BLADERF_LIBRARIES})
+endif()
+
 # message(${PROJECT_SOURCE_DIR})
 # target_include_directories(ngscope_dci PUBLIC ${PROJECT_SOURCE_DIR}/ngscope/hdr)
 

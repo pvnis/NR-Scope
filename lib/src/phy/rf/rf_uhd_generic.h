@@ -289,6 +289,11 @@ public:
     Debug("Setting Time at next PPS...");
     SRSRAN_UHD_SAFE_C_LOG_ERROR(usrp->set_time_unknown_pps(timespec);)
   }
+  uhd_error set_time_next_pps(const uhd::time_spec_t& timespec) override
+  {
+    Debug("Setting Time at next PPS...");
+    SRSRAN_UHD_SAFE_C_LOG_ERROR(usrp->set_time_next_pps(timespec);)
+  }
   uhd_error get_time_now(uhd::time_spec_t& timespec) override
   {
     SRSRAN_UHD_SAFE_C_LOG_ERROR(timespec = usrp->get_time_now();)
@@ -325,6 +330,7 @@ public:
   {
     SRSRAN_UHD_SAFE_C_LOG_ERROR(usrp->set_command_time(timespec);)
   }
+  uhd_error clear_command_time() override { SRSRAN_UHD_SAFE_C_LOG_ERROR(usrp->clear_command_time();) }
   uhd_error get_rx_stream(size_t& max_num_samps) override
   {
     Debug("Creating Rx stream");
