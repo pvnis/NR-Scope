@@ -145,6 +145,7 @@ public:
   virtual uhd_error get_sensor(const std::string& sensor_name, bool& sensor_value)       = 0;
   virtual uhd_error get_rx_sensor(const std::string& sensor_name, bool& sensor_value)    = 0;
   virtual uhd_error set_time_unknown_pps(const uhd::time_spec_t& timespec)               = 0;
+  virtual uhd_error set_time_next_pps(const uhd::time_spec_t& timespec) { return UHD_ERROR_NOT_IMPLEMENTED; }
   virtual uhd_error get_time_now(uhd::time_spec_t& timespec)                             = 0;
   uhd_error         start_rx_stream(double delay)
   {
@@ -175,6 +176,7 @@ public:
   virtual uhd_error set_rx_rate(double rate)                                                           = 0;
   virtual uhd_error set_tx_rate(double rate)                                                           = 0;
   virtual uhd_error set_command_time(const uhd::time_spec_t& timespec)                                 = 0;
+  virtual uhd_error clear_command_time() { return UHD_ERROR_NOT_IMPLEMENTED; }
   virtual uhd_error get_rx_stream(size_t& max_num_samps)                                               = 0;
   virtual uhd_error get_tx_stream(size_t& max_num_samps)                                               = 0;
   virtual uhd_error set_tx_gain(size_t ch, double gain)                                                = 0;
@@ -183,6 +185,7 @@ public:
   virtual uhd_error get_tx_gain(double& gain)                                                          = 0;
   virtual uhd_error set_tx_freq(uint32_t ch, double target_freq, double& actual_freq)                  = 0;
   virtual uhd_error set_rx_freq(uint32_t ch, double target_freq, double& actual_freq)                  = 0;
+  virtual uhd_error set_rx_antenna(size_t ch, const std::string& antenna) { return UHD_ERROR_NOT_IMPLEMENTED; }
   uhd_error         receive(void**              buffs,
                             const size_t        nsamps_per_buff,
                             uhd::rx_metadata_t& metadata,

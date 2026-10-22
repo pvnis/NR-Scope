@@ -23,4 +23,7 @@ gnb.log
 /PDCCH/
 /sensing/
 
+# The chain calibration nrscope --calibrate saves and later runs load
+/calibration/
+
 *.png

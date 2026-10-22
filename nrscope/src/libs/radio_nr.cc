@@ -1,7 +1,9 @@
 #include "nrscope/hdr/radio_nr.h"
+#include "nrscope/hdr/calibration.h"
 #include "nrscope/hdr/sensing/nrscope_sensing.h"
 #include <chrono>
 #include <cstdlib>
+#include <strings.h>
 #include <liquid/liquid.h>
 #include <pthread.h>
 #include <sched.h>
@@ -563,6 +565,7 @@ int Radio::RadioInitandStart()
                                       rrc_recfg);
 
   std::cout << "Task scheduler started..." << std::endl;
+  bool calibrated = false;
   while (not ss.end()) {
     // Get SSB center frequency
     cs_args.ssb_freq_hz = ss.get_frequency();
@@ -611,6 +614,20 @@ int Radio::RadioInitandStart()
 
     radio->release_freq(0);
     radio->set_rx_freq(0, rx_center_hz);
+
+    /* The radio stays on this frequency from here on. --calibrate measures the chains
+      here and ends the run; a normal run takes the saved calibration (calibration.h). */
+    if (nrscope_calibrate_only) {
+      run_tone_calibration(
+          *radio, nof_antennas, rx_center_hz, rf_args.rx_gain, rf_args.srate_hz, pre_resampling_slot_sz);
+      return SRSRAN_SUCCESS;
+    }
+    /* Not over ZMQ: the saved offsets are the X410 chains', and in the Sionna simulation
+      they would rotate a perfect array. */
+    if (!calibrated && strcasecmp(rf_args.device_name.c_str(), "zmq") != 0) {
+      calibrated = true;
+      apply_saved_calibration(rx_center_hz, rf_args.rx_gain);
+    }
 
     srsran::rf_buffer_t rf_buffer = {};
     rf_buffer.set_nof_samples(pre_resampling_slot_sz);
@@ -1031,7 +1048,10 @@ void Radio::StopStreams()
 {
   srsran::radio* r = dynamic_cast<srsran::radio*>(radio.get());
   if (r != nullptr) {
-    r->reset(); // stop_rx_stream on every RF device, which also flushes it
+    // stop and flush the Rx streams, then close the device: closing releases the X410's
+    // claim and transports, without which the next start is refused ("Someone tried to
+    // claim this device again") or meets stale streams ("blocks timed out during flush")
+    r->stop();
   }
 }
 

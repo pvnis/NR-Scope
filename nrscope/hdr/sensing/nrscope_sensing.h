@@ -228,6 +228,11 @@ void nrscope_sensing_wait_maps(nrscope_sensing_t* s);
    Call before exiting; a no-op when nothing is being recorded. */
 void nrscope_sensing_record_close(void);
 
+/* Per-chain phase offsets the AoA removes, degrees, chain 0 first (sensing.aoa_cal_deg;
+   see nr_ue_aoa_set_cal_deg). Call before sensing starts. Returns -1 for more values
+   than the AoA has chains. */
+int nrscope_sensing_set_aoa_cal_deg(const double* deg, int n);
+
 /* DM-RS ports behind the DCI's antenna-ports value, TS 38.212 table 7.3.1.2.2-1
    (configuration type 1, maxLength 1, one codeword): a bitmap, bit i meaning
    antenna port 1000 + i. Sets *cdm_groups to the CDM groups without data the same

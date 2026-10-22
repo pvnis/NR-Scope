@@ -6,6 +6,7 @@
 #include <sched.h>
 #include <thread>
 
+#include "nrscope/hdr/calibration.h"
 #include "nrscope/hdr/nrscope_def.h"
 #include "nrscope/hdr/load_config.h"
 #include "nrscope/hdr/sensing/nrscope_sensing.h"
@@ -23,8 +24,18 @@ int main(int argc, char** argv){
   // Initialise logging infrastructure
   srslog::init();
 
-  // Usage: nrscope [config file], defaults to config.yaml in the working directory
-  std::string file_name = (argc > 1) ? argv[1] : "config.yaml";
+  /* Usage: nrscope [--calibrate] [config file], defaults to config.yaml in the working
+    directory. --calibrate measures the receive chains with the bladeRF tone, saves the
+    calibration that later runs use, and exits (calibration.h). */
+  std::string file_name = "config.yaml";
+  bool        calibrate = false;
+  for (int i = 1; i < argc; i++) {
+    if (std::string(argv[i]) == "--calibrate") {
+      calibrate = true;
+    } else {
+      file_name = argv[i];
+    }
+  }
   if (access(file_name.c_str(), R_OK) != 0) {
     std::cout << "Cannot read config file: " << file_name << std::endl;
     return NR_FAILURE;
@@ -52,6 +63,7 @@ int main(int argc, char** argv){
   std::thread([&radios]() {
     while (sem_wait(&nrscope_stop_sem) != 0) {
     }
+    stop_calibration_tone();
     usleep(300000);
     for (auto& r : radios) {
       r.StopStreams();
@@ -68,6 +80,7 @@ int main(int argc, char** argv){
     std::cout << "Load config fail." << std::endl;
     return NR_FAILURE;
   }
+  nrscope_calibrate_only = calibrate;
 
   /* Keep every thread that does not pin itself off the serial capture stages' CPUs.
     UHD starts its own threads unpinned during the radio init, inheriting this thread's
@@ -129,5 +142,14 @@ int main(int argc, char** argv){
   }
   RunRecorder::close();
 
-  return NR_SUCCESS;
+  /* Reached only when the radio threads give up (no cell found, an init error). Leave
+    through the shutdown thread, as Ctrl-C does: returning would skip closing the radios,
+    so the next start finds the X410 still claimed, and would run the destructors under
+    the workers that are still running. */
+  if (!nrscope_stop.exchange(true)) {
+    sem_post(&nrscope_stop_sem);
+  }
+  for (;;) {
+    pause();
+  }
 }

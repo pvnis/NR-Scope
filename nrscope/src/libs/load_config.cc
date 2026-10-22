@@ -14,6 +14,7 @@
 #include <boost/program_options.hpp>
 #include <boost/program_options/parsers.hpp>
 
+#include "nrscope/hdr/calibration.h"
 #include "nrscope/hdr/load_config.h"
 #include "nrscope/hdr/run_recorder.h"
 #include "nrscope/hdr/nrscope_def.h"
@@ -100,6 +101,19 @@ void load_sensing_config(const YAML::Node& config_yaml)
       }
     }
     flag("avg_vcomp", &nrscope_sensing_args.avg_vcomp);
+    // per-chain phase offsets for the AoA, chain 0 first, e.g. the tone calibration's line
+    if (sn["aoa_cal_deg"]) {
+      const std::vector<double> cal = sn["aoa_cal_deg"].as<std::vector<double> >();
+      if (nrscope_sensing_set_aoa_cal_deg(cal.data(), (int)cal.size()) != 0) {
+        std::cerr << "sensing: aoa_cal_deg has more values than chains the AoA handles: " << cal.size() << std::endl;
+        exit(EXIT_FAILURE);
+      }
+      std::cout << "sensing: AoA phase offsets";
+      for (double d : cal) {
+        std::cout << " " << d;
+      }
+      std::cout << " deg" << std::endl;
+    }
     if (sn["map_max_gap_ms"])
       nrscope_sensing_args.map_max_gap_ms = sn["map_max_gap_ms"].as<double>();
     if (sn["map_overlap"]) {
@@ -386,6 +400,7 @@ int load_config(std::vector<Radio>& radios, std::string file_name)
                                        config_yaml[setting_name]["record_pdcch_candidates"].as<bool>());
 
   load_sensing_config(config_yaml);
+  load_calibration_config(config_yaml);
 
   if (config_yaml[setting_name]["push_to_google"]) {
     for (int i = 0; i < nof_usrp; i++) {

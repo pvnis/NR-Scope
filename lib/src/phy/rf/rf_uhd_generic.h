@@ -289,6 +289,11 @@ public:
     Debug("Setting Time at next PPS...");
     SRSRAN_UHD_SAFE_C_LOG_ERROR(usrp->set_time_unknown_pps(timespec);)
   }
+  uhd_error set_time_next_pps(const uhd::time_spec_t& timespec) override
+  {
+    Debug("Setting Time at next PPS...");
+    SRSRAN_UHD_SAFE_C_LOG_ERROR(usrp->set_time_next_pps(timespec);)
+  }
   uhd_error get_time_now(uhd::time_spec_t& timespec) override
   {
     SRSRAN_UHD_SAFE_C_LOG_ERROR(timespec = usrp->get_time_now();)
@@ -325,6 +330,7 @@ public:
   {
     SRSRAN_UHD_SAFE_C_LOG_ERROR(usrp->set_command_time(timespec);)
   }
+  uhd_error clear_command_time() override { SRSRAN_UHD_SAFE_C_LOG_ERROR(usrp->clear_command_time();) }
   uhd_error get_rx_stream(size_t& max_num_samps) override
   {
     Debug("Creating Rx stream");
@@ -354,6 +360,11 @@ public:
   {
     Debug("Setting channel " << ch << " Rx gain to " << gain << " dB");
     SRSRAN_UHD_SAFE_C_LOG_ERROR(usrp->set_rx_gain(gain, ch);)
+  }
+  uhd_error set_rx_antenna(size_t ch, const std::string& antenna) override
+  {
+    Debug("Setting channel " << ch << " Rx antenna to " << antenna);
+    SRSRAN_UHD_SAFE_C_LOG_ERROR(usrp->set_rx_antenna(antenna, ch);)
   }
   uhd_error get_rx_gain(double& gain) override { SRSRAN_UHD_SAFE_C_LOG_ERROR(gain = usrp->get_rx_gain();) }
   uhd_error get_tx_gain(double& gain) override { SRSRAN_UHD_SAFE_C_LOG_ERROR(gain = usrp->get_tx_gain();) }

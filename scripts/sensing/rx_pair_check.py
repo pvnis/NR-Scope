@@ -10,9 +10,9 @@ steady the relative phase stays over time.
 The last block is the one the four-chain AoA needs. The X410's chains share a sample
 clock, but each ZBX daughterboard settles its LO at an arbitrary phase on every retune,
 and chains 2 and 3 are on the second board: until those offsets are known and constant,
-the steering vector in nr_ue_aoa.h describes an array that does not exist. Feed one
+the AoA's steering vector (nr_ue_aoa.h) describes an array that does not exist. Feed one
 source into every input through equal-length cables, run this, and if the phase is steady
-(small spread, little drift) paste the printed line into NR_AOA_CAL_DEG. If it drifts
+(small spread, little drift) paste the printed line under sensing: in the config. If it drifts
 within a run, the calibration has to become a per-map estimate instead of a constant.
 
   rx_pair_check.py usrp_samples.0.dat usrp_samples.1.dat --rate 122.88e6 --bw 98.28e6
@@ -122,7 +122,7 @@ def main():
         phase = np.unwrap(np.angle(c))
         fit = np.polyfit(t, phase, 1)
         ratio = db(e[i] / e[0])
-        # The offset rx{i} carries in excess of rx0, which is what NR_AOA_CAL_DEG removes:
+        # The offset rx{i} carries in excess of rx0, which is what sensing.aoa_cal_deg removes:
         # nr_ue_aoa_cell_vector() multiplies chain a by exp(-j*cal[a]). The cross-spectrum
         # is S0 conj(Si), so its angle is phi0 - phi_i and the offset is the negative of it.
         cal_deg[i] = -np.degrees(np.angle(np.mean(c / np.abs(c))))
@@ -133,10 +133,10 @@ def main():
               f"power {np.median(ratio):+5.1f} dB "
               f"({np.percentile(ratio, 5):+.1f} .. {np.percentile(ratio, 95):+.1f}), |rho| {rho:.3f}")
 
-    print("\nper-chain phase offsets for nr_ue_aoa.h, if the spread and drift above are small:")
-    cal = [f"{v:.1f}" for v in cal_deg] + ["0.0"] * (MAX_RX - nc)
-    tail = "" if nc == MAX_RX else f"  // rx{nc} and up were not captured, left at 0"
-    print("#define NR_AOA_CAL_DEG {" + ", ".join(cal) + "}" + tail)
+    print("\nper-chain phase offsets for the config's sensing: block, if the spread and drift above are small:")
+    cal = [f"{v:.1f}" for v in cal_deg]
+    tail = "" if nc == MAX_RX else f"  # rx{nc} and up were not captured and keep their default"
+    print("  aoa_cal_deg: [" + ", ".join(cal) + "]" + tail)
 
 
 if __name__ == "__main__":

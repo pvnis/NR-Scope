@@ -9,8 +9,14 @@
 #include "nrscope/hdr/sensing/nr_ue_aoa.h"
 #include "nrscope/hdr/sensing/nr_ue_tdd_detect.h"
 
-/* Per-chain phase offsets, see NR_AOA_CAL_DEG. */
-static const double nr_aoa_cal_deg[NR_AOA_MAX_ANT] = NR_AOA_CAL_DEG;
+/* Per-chain phase offsets, see NR_AOA_CAL_DEG; set before sensing starts. */
+static double nr_aoa_cal_deg[NR_AOA_MAX_ANT] = NR_AOA_CAL_DEG;
+
+void nr_ue_aoa_set_cal_deg(const double *deg, int n)
+{
+  for (int a = 0; a < n && a < NR_AOA_MAX_ANT; a++)
+    nr_aoa_cal_deg[a] = deg[a];
+}
 
 void nr_ue_aoa_cell_vector(const nr_sensing_slowtime_t *slow,
                            int n_ant,
