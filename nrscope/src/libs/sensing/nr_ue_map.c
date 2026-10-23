@@ -1441,12 +1441,28 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
     c_im[i] = 0.0;
   }
 
-  const bool shared = p->los_norm && p->los_c_reuse && p->los_c_re != NULL && p->los_c_n != NULL && *p->los_c_n == n;
-  if (shared) {   // another chain of the same array: the first chain's correction, phases kept
+  const bool shared = p->los_norm && p->los_c_reuse && p->los_c_re != NULL && p->los_c_n != NULL && p->los_c_t != NULL;
+  if (shared) {
+    /* Another chain of the same array: the first chain's correction, phases kept, matched
+    by t_sample (both lists in time order). Its own normalisation instead would take the
+    direct path's steering vector out and turn every angle relative to the gNB's. A
+    snapshot the first chain did not have is left out (c = 0). */
+    int k = 0, n_miss = 0;
     for (int i = 0; i < n; i++) {
-      c_re[i] = p->los_c_re[i];
-      c_im[i] = p->los_c_im[i];
+      const uint64_t t = hist->ring[idx[i]].t_sample;
+      while (k < *p->los_c_n && p->los_c_t[k] < t)
+        k++;
+      if (k < *p->los_c_n && p->los_c_t[k] == t) {
+        c_re[i] = p->los_c_re[k];
+        c_im[i] = p->los_c_im[k];
+        k++;
+      } else {
+        c_re[i] = c_im[i] = 0.0;
+        n_miss++;
+      }
     }
+    if (n_miss > 0)
+      LOG_D(NR_PHY, "sensing: %d of %d snapshots not on the first chain, left out\n", n_miss, n);
   } else if (p->los_norm) {
     /* Same span as a path removal, so the filter sees the same skirt the kernel mode
     would subtract, clipped to the map. */
@@ -1527,10 +1543,11 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
     free(kre);
     free(kim);
   }
-  if (p->los_norm && !shared && !p->los_c_reuse && p->los_c_re != NULL && p->los_c_n != NULL) {   // the first chain: keep it for the others
+  if (p->los_norm && !p->los_c_reuse && p->los_c_re != NULL && p->los_c_n != NULL && p->los_c_t != NULL) {   // the first chain: keep it for the others
     for (int i = 0; i < n; i++) {
       p->los_c_re[i] = c_re[i];
       p->los_c_im[i] = c_im[i];
+      p->los_c_t[i] = hist->ring[idx[i]].t_sample;
     }
     *p->los_c_n = n;
   }

@@ -458,10 +458,12 @@ static int nr_ue_sensing_task_map(const nr_sensing_map_task_t *t,
   /* One direct-path correction for the whole array (see los_c_re in nr_ue_map.h): the
   first chain computes it, the others reuse it, so the angle survives the normalisation. */
   double los_re[NR_SENSING_HISTORY_DEPTH], los_im[NR_SENSING_HISTORY_DEPTH];
-  int los_n = -1;
+  uint64_t los_t[NR_SENSING_HISTORY_DEPTH];
+  int los_n = 0;
   nr_sensing_params_t p0 = *p, pa = *p;
   p0.los_c_re = pa.los_c_re = los_re;
   p0.los_c_im = pa.los_c_im = los_im;
+  p0.los_c_t = pa.los_c_t = los_t;
   p0.los_c_n = pa.los_c_n = &los_n;
   p0.los_c_reuse = false;
   pa.los_c_reuse = true;

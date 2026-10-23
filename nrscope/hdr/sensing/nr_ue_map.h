@@ -661,9 +661,11 @@ typedef struct {
   /* The direct-path correction shared by the chains of one array. Each chain divided by its
   own direct path would zero the direct path's phase on every chain, i.e. take its steering
   vector out: every angle would then come out relative to the direct path's. So the first
-  chain computes c_i and stores it here (los_c_n snapshots), and the other chains, built
-  from the same snapshots, apply that same c_i (los_c_reuse). NULL: each chain its own. */
+  chain computes c_i and stores it here (los_c_n snapshots, los_c_t their t_sample), and the
+  other chains apply that same c_i (los_c_reuse), matched by t_sample: a chain's history can
+  hold a snapshot more or less than the first's. NULL: each chain its own. */
   double *los_c_re, *los_c_im;
+  uint64_t *los_c_t;
   int    *los_c_n;
   bool    los_c_reuse;
   bool   comb_remove;        ///< remove the rank-1 TDD replica comb
@@ -688,6 +690,7 @@ static inline void nr_sensing_params_default(nr_sensing_params_t *p)
   p->los_first_db      = NR_SENSING_LOS_FIRST_DB;
   p->los_norm          = NR_CLUTTER_LOS_NORM;
   p->los_c_re = p->los_c_im = NULL;
+  p->los_c_t = NULL;
   p->los_c_n = NULL;
   p->los_c_reuse = false;
   p->los_max_corr_db   = NR_CLUTTER_LOS_MAX_CORR_DB;
