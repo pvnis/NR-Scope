@@ -12,14 +12,14 @@ usrp_setting_0:
   rx_center_freq: 3450000000
   band_list: [78]
   pci: 1
-  rf_args: "type=x4xx,master_clock_rate=245760000,recv_buff_size=1004857600,addr=192.168.20.2,mgmt_addr=192.168.118.190,use_dpdk=1234,num_send_frames=512,rx_antenna=RX1" # antennas on the RX1 ports since 2026-10-15  
+  rf_args: "type=x4xx,master_clock_rate=245760000,recv_buff_size=1004857600,addr=192.168.20.2,mgmt_addr=192.168.118.190,use_dpdk=1234,num_send_frames=512,rx_antenna=RX1,rx_antenna2=TX/RX0" # antennas on the RX1 ports, chain 2 on TX/RX0 (since 2026-10-29)  
   
   # Fixed so the amplitude stays constant from slot to slot, as sensing needs.
   # Chosen with agc: true under a full 600 Mb/s downlink, where the AGC settled
   # at 25.4-27.4 dB: peak about -9 dBFS, mean about -26 dBFS. At 45 the X410
   # clipped (peak pinned at +3 dBFS) once the gNB filled the carrier, which broke
   # PBCH and sync. Re-check the status line's RX peak if the geometry changes.
-  rx_gain: 30 # indoors 2026-10-07: SSB ~40 dB weaker than outdoors; <=30 is ADC-noise limited and PBCH fails
+  rx_gain: 45 # indoors 2026-10-07: SSB ~40 dB weaker than outdoors; <=30 is ADC-noise limited and PBCH fails
   min_rx_gain: 0
   max_rx_gain: 60
   srate_hz: 122880000 # the sampling rate of USRP, integer division of 200MHz for TwinRX, and 5G sampling rate for CBX: 11520000 or 23040000
@@ -106,10 +106,11 @@ sensing:
   max_speed: 10
   clutter_removal: true
   clutter_kernel: true
-  antenna_avg: true 
+  antenna_avg: true
   layer_avg: false
-  random_drop: true
+  random_drop: false
   tdd_detect: true
+  detect_all_chains: true   # detect on every chain and merge, not rx0 only (outside_2901: runner tracked 30% -> 53% in 2D)
 
   # Doppler MUSIC alongside the DFT map, to <dump>.music.csv. Its observations are the
   # (chain x layer) pairs the map gathered, so the chain count is what makes it worth
@@ -135,6 +136,31 @@ sensing:
   # A jump of more than this between a stream's snapshots means samples were lost upstream:
   # the filling window is dropped and the next starts after the gap (0 = off).
   map_max_gap_ms: 20
+
+  # Deconvolve each range bin's Doppler spectrum from the slow-time sampling's spectral window
+  # (NR_SENSING_DOPPLER_CLEAN in nr_ue_map.h): measured here, a target's smear over its row
+  # drops 11-25 dB. Changes the map only; the TDD detector and the AoA read the samples.
+  doppler_clean: true
+
+  # Put the direct path at this delay bin (-1: leave the axis where the symbol timing puts it).
+  # Over ZMQ/OCUDU the timing puts the direct path at bin -32, outside the map's bins 0..n_bins-1.
+  los_margin_bins: 8
+
+  # Set aside (verdict 4: drawn as a marker, not localised) a detection within this many
+  # range bins after the direct path (bin_los), where what is left of the direct path after
+  # clutter removal can still pass the CFAR. 0 (default) keeps them. The AoA has its own
+  # guard (NR_AOA_LOS_GUARD_MIN), so this one matters for the markers and what reads them.
+  # 3 bins = ~7 m of excess range at 2.44 m/bin: a target closer than that to the
+  # gNB-rx line is not reported.
+  detect_los_guard_bins: 3
+
+  # Divide every snapshot by its own direct path before clutter removal (NR_CLUTTER_LOS_NORM
+  # in nr_ue_map.h): takes out the phase and gain drift common to all paths of a real
+  # receiver (residual carrier offset, phase noise), so the static scene stays static from
+  # snapshot to snapshot. Does not fix what is not common to all paths (a scatterer that
+  # really fluctuates). Needs a clear direct path to divide by. Default off (compile-time).
+  clutter_los_norm: true
+
 
   # Bistatic geometry, for localising the AoA cells and their velocity (nr_ue_localize.h).
   # Positions in metres in any planar frame (x east, y north suggested), as [x, y].
@@ -171,7 +197,10 @@ sensing:
   #
   #
 
-  # record_estimates: "/home/sens/runs/test/estimates.bin"
+  # record_estimates: record every grant's raw DM-RS estimates and build NO live maps (the
+  # replay, build/nrscope/src/tests/sensing_offline, makes them from the recording). Comment
+  # it out to get live maps instead. run_real.sh puts the file in real/<TEST>/.
+  record_estimates: "/home/sens/runs/test/estimates.bin"
 
 # Tone calibration of the receive chains (nrscope/hdr/calibration.h). Run once with
 #   sudo ./nrscope <this config> --calibrate
