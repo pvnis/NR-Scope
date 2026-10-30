@@ -19,6 +19,8 @@ bool nr_ue_sensing_history_init(nr_sensing_history_t *hist,
                                 uint64_t carrier_hz)
 {
   pthread_mutex_init(&hist->lock, NULL);
+  hist->los_leader = NULL;
+  hist->los_n = 0;
   hist->ring = calloc(depth, sizeof(*hist->ring));
   if (hist->ring == NULL) {
     LOG_E(NR_PHY, "sensing: cannot allocate history of %d snapshots\n", depth);
@@ -263,38 +265,37 @@ static int nr_ue_sensing_gather(const nr_sensing_history_t *hist,
   is ever converted to double. fs is the OFDM sample clock t_sample is counted on. */
   const uint64_t span_samples =
       (max_span_s > 0.0 && fs > 0.0) ? (uint64_t)(max_span_s * fs) : UINT64_MAX;
+
+  /* The window is set by time, not by push order. The DL actors finish their slots in
+  any order (--num-dl-actors > 1), so each chain's ring holds the same snapshots in a
+  slightly different order; walking it newest-pushed first and stopping at the first one
+  out of the window gave each chain its own newest snapshot and its own cut, a few
+  snapshots apart, and the AoA then refused the map ("rx1 gathered 463 snapshots against
+  462 on rx0": 108 of 125 maps on outside_2901). So: the latest time first, then every
+  snapshot within the span of it. */
   uint64_t t_newest = 0;
   bool have_newest = false;
-
-  int n = 0;
-  for (int k = 1; k <= hist->count && n < n_snap_max; k++) {
+  for (int k = 1; k <= hist->count; k++) {
     const int i = (hist->head - k + hist->depth) % hist->depth;
-    if (!nr_ue_sensing_stream_eq(&hist->ring[i].stream, stream))
-      continue;
-
-    const uint64_t t = hist->ring[i].t_sample;
-    if (!have_newest) {
-      t_newest = t;
+    if (nr_ue_sensing_stream_eq(&hist->ring[i].stream, stream) && (!have_newest || hist->ring[i].t_sample > t_newest)) {
+      t_newest = hist->ring[i].t_sample;
       have_newest = true;
-    } else if (t < t_newest && t_newest - t > span_samples) {
-      /* Older than the window. Guarded on t < t_newest so a snapshot pushed out of
-      sequence, which would make the unsigned difference enormous, is kept rather
-      than read as ancient. */
-      break;
     }
-    idx[n++] = i;
   }
-  // reverse into push order, oldest first
+  int n = 0;
+  for (int k = 1; k <= hist->count; k++) {
+    const int i = (hist->head - k + hist->depth) % hist->depth;
+    if (nr_ue_sensing_stream_eq(&hist->ring[i].stream, stream) && t_newest - hist->ring[i].t_sample <= span_samples)
+      idx[n++] = i;
+  }
+  /* Into time order. The input is nearly sorted (newest pushed first), so reversed it is
+  close to time order and an insertion sort is close to linear; every user of idx[]
+  assumes t_sample increases and computes times as t_sample - t_first without a sign. */
   for (int a = 0, b = n - 1; a < b; a++, b--) {
     const int tmp = idx[a];
     idx[a] = idx[b];
     idx[b] = tmp;
   }
-  /* Then into time order. Push order is not time order: the DL actors finish their slots in
-  any order (--num-dl-actors > 1), so their pushes interleave, while every user of idx[]
-  assumes t_sample increases and computes times as t_sample - t_first without a sign. The
-  input is nearly sorted, so an insertion sort is close to linear; equal times keep their
-  push order. */
   for (int a = 1; a < n; a++) {
     const int cur = idx[a];
     const uint64_t t_cur = hist->ring[cur].t_sample;
@@ -304,6 +305,13 @@ static int nr_ue_sensing_gather(const nr_sensing_history_t *hist,
       b--;
     }
     idx[b + 1] = cur;
+  }
+  /* The cost cap keeps the newest: the oldest are dropped, the same ones on every chain */
+  if (n > n_snap_max) {
+    const int drop = n - n_snap_max;
+    for (int a = 0; a < n_snap_max; a++)
+      idx[a] = idx[a + drop];
+    n = n_snap_max;
   }
   return n;
 }

@@ -59,6 +59,8 @@ as before). NR_SENSING_LOS_MARGIN_BINS is the suggested value. */
 extern int nr_sensing_los_margin_bins;
 /// consecutive symbols that must place the direct path elsewhere before the roll follows
 #define NR_SENSING_LOS_ROLL_VOTES 16
+/// symbols whose roll chain 0 remembers for the other chains (see los_leader in nr_ue_map.h)
+#define NR_SENSING_LOS_ROLL_RECENT 256
 #define NR_SENSING_MIN_BAND_DEN 2
 
 /* Random drop: one slot in NR_SENSING_DROP_ONE_IN, drawn independently per slot, loses

@@ -296,9 +296,36 @@ static bool nr_ue_sensing_restrict_lattice(pilot_lattice_t *lat, cf_t *pilots, i
 /* Roll h[0..n) so its strongest bin, the direct path, sits at nr_sensing_los_margin_bins.
 The roll is kept per stream (hist) and only follows the direct path once
 NR_SENSING_LOS_ROLL_VOTES symbols in a row put it more than one bin away, so one symbol
-where something else is stronger cannot move the whole axis. */
-static void nr_ue_sensing_roll_to_los(nr_sensing_history_t *hist, int n, cf_t *h)
+where something else is stronger cannot move the whole axis.
+A chain other than the first takes the first chain's roll for the same symbol (t_sample),
+see los_leader, so every chain of the array names the bins alike. */
+static void nr_ue_sensing_roll_to_los(nr_sensing_history_t *hist, uint64_t t_sample, int n, cf_t *h)
 {
+  nr_sensing_history_t *lead = hist->los_leader;
+  if (lead != NULL) {
+    pthread_mutex_lock(&lead->lock);
+    int roll = lead->los_roll_valid ? lead->los_roll : -1;
+    const int k_max = lead->los_n < NR_SENSING_LOS_ROLL_RECENT ? lead->los_n : NR_SENSING_LOS_ROLL_RECENT;
+    for (int k = 1; k <= k_max; k++) {   // newest first: the symbol is usually among the last few
+      const int i = (lead->los_n - k) % NR_SENSING_LOS_ROLL_RECENT;
+      if (lead->los_t[i] == t_sample) {
+        roll = lead->los_r[i];
+        break;
+      }
+    }
+    pthread_mutex_unlock(&lead->lock);
+    if (roll >= 0) {
+      if (roll != 0) {
+        cf_t tmp[NR_SENSING_MAX_IDFT];
+        for (int b = 0; b < n; b++)
+          tmp[(b + roll) % n] = h[b];
+        memcpy(h, tmp, n * sizeof(*h));
+      }
+      return;
+    }
+    // chain 0 has not rolled anything yet: decide alone, as before
+  }
+
   int peak = 0;
   float best = -1.0f;
   for (int b = 0; b < n; b++) {
@@ -330,6 +357,9 @@ static void nr_ue_sensing_roll_to_los(nr_sensing_history_t *hist, int n, cf_t *h
     }
   }
   const int roll = hist->los_roll;
+  hist->los_t[hist->los_n % NR_SENSING_LOS_ROLL_RECENT] = t_sample;
+  hist->los_r[hist->los_n % NR_SENSING_LOS_ROLL_RECENT] = roll;
+  hist->los_n++;
   pthread_mutex_unlock(&hist->lock);
 
   if (roll == 0)
@@ -474,7 +504,7 @@ int nr_ue_sensing_slot_profile(int n_sym,
     __attribute__((aligned(32))) cf_t h_time[NR_SENSING_MAX_IDFT];
     nr_ue_sensing_delay_response(lat.n_lattice, pilots, idft_size, h_time);
     if (hist && nr_sensing_los_margin_bins >= 0)
-      nr_ue_sensing_roll_to_los(hist, idft_size, h_time);
+      nr_ue_sensing_roll_to_los(hist, t_sample[m], idft_size, h_time);
 
     /* If we store the complex response, then we store the time of the symbol as well,
     so that the Doppler transform can be done later. The random drop leaves out at most

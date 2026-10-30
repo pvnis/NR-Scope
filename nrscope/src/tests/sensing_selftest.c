@@ -34,6 +34,8 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -578,10 +580,37 @@ static void test_despread_two_layers(const char* name, const uint32_t runs[][2],
  * moves it is told about, leaving the direct path on its bin in every snapshot.
  * Every DM-RS symbol must reach the history (the count is exact), which guards
  * the second-symbol rejection seen on the first port. That covers placement,
- * lattice, symbol timing, window shifts, alignment and the dump format together. */
-static void test_glue(void)
+ * lattice, symbol timing, window shifts, alignment and the dump format together.
+ * record: run it with sensing.record_estimates set instead, which only records: the
+ * estimates must be written and no map built. */
+static void test_glue(bool record);
+
+/* The recording-only pass in a child process of its own: the sensing context and the
+   recorder are made once per process, as in a live run, so a second pass in this one would
+   reuse the first one's settings. Its failures come back as the exit status. */
+static void test_glue_record_only(void)
 {
-  printf("\nSensing glue: TDD slots through nrscope_sensing_process_grant, dump read back\n");
+  fflush(stdout);
+  const pid_t pid = fork();
+  if (pid == 0) {
+    failures = 0;
+    test_glue(true);
+    fflush(stdout);
+    _exit(failures > 255 ? 255 : failures);
+  }
+  int status = 0;
+  if (pid < 0 || waitpid(pid, &status, 0) != pid || !WIFEXITED(status)) {
+    printf("  recording-only pass did not run\n");
+    failures++;
+    return;
+  }
+  failures += WEXITSTATUS(status);
+}
+
+static void test_glue(bool record)
+{
+  printf("\nSensing glue: TDD slots through nrscope_sensing_process_grant, %s\n",
+         record ? "recording only" : "dump read back");
   const uint32_t nof_prb = 273, n_sc = nof_prb * SRSRAN_NRE;
   const double   f_d_hz  = 120.0; // Doppler of the target
   const int      d_bins  = 23;    // delay of the direct path, in bins of 1 / (4096 * 30 kHz)
@@ -605,15 +634,17 @@ static void test_glue(void)
   nrscope_sensing_args.tdd_detect     = true;
   nrscope_sensing_args.antenna_avg    = true; // one map per layer, averaged over the chains
   snprintf(nrscope_sensing_args.dump, sizeof(nrscope_sensing_args.dump), "%s/map2d.csv", dir);
-  // and the estimates, which sensing_offline can replay into the same maps
-  snprintf(nrscope_sensing_args.record_estimates, sizeof(nrscope_sensing_args.record_estimates), "%s/estimates.bin",
-           dir);
+  // or only the estimates, which sensing_offline replays into the same maps
+  if (record)
+    snprintf(nrscope_sensing_args.record_estimates, sizeof(nrscope_sensing_args.record_estimates), "%s/estimates.bin",
+             dir);
   nr_sensing_tdd_period_slots = 10; // 7 D, 1 S, 2 U: the Benetel cell, as SIB1 sets it
   char rm[128];
   snprintf(rm, sizeof(rm), "rm -rf %s", dir);
   if (system(rm) != 0) {
     printf("  could not clear %s\n", dir);
   }
+  mkdir(dir, 0755); // the map dump writes into it (the recorder makes it too, but only when recording)
   nrscope_sensing_t*         s  = nrscope_sensing_get(3450000000ULL, 122.88e6, 4096, 30000, N_ANT);
   nrscope_sensing_scratch_t* sc = nrscope_sensing_scratch_alloc(n_sc);
   if (s == NULL || sc == NULL) {
@@ -746,12 +777,16 @@ static void test_glue(void)
 
   nrscope_sensing_wait_maps(s);
   nrscope_sensing_record_close();
-  {
+  if (record) {
     char path[512];
     snprintf(path, sizeof(path), "%s/estimates.bin", dir);
     struct stat st;
     check(stat(path, &st) == 0 && st.st_size > 0, "estimates recorded", stat(path, &st) == 0 && st.st_size > 0, 1,
           0);
+    snprintf(path, sizeof(path), "%s/map2d.csv", dir);
+    check(stat(path, &st) != 0, "no live map while recording", stat(path, &st) != 0, 1, 0);
+    nrscope_sensing_args.record_estimates[0] = 0;
+    return;
   }
 
   /* OAI's one-shot snapshot dump, written with the 10th map (NR_SENSING_SNAP_DUMP_MAP):
@@ -1079,7 +1114,8 @@ int main(void)
     test_despread_two_layers("PRBs 33-272, grid and BWP from CRB 5", upper, 1, 5);
   }
 
-  test_glue();
+  test_glue_record_only();
+  test_glue(false);
   test_align_chains();
   test_idft_threads();
   test_localize();

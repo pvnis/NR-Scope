@@ -199,6 +199,15 @@ struct nr_sensing_history_s {
   bool los_roll_valid;
   int los_roll;
   int los_roll_votes;
+  /* The chains of one array must share the roll, or one bin would be another range on each
+  and the AoA would combine different cells (outside_2901: chains rolled to 31 and 32 in the
+  same symbol). Chain 0 decides and remembers its roll per symbol time (los_t, los_r); the
+  other chains point at it (los_leader) and take the roll it gave the same symbol. NULL: this
+  history decides for itself (chain 0, or a single chain). */
+  nr_sensing_history_t *los_leader;
+  uint64_t los_t[NR_SENSING_LOS_ROLL_RECENT];
+  int los_r[NR_SENSING_LOS_ROLL_RECENT];
+  int los_n;
   /// DL carrier frequency in Hz, needed to turn the Doppler axis into speeds
   uint64_t carrier_hz;
   /* Several DL actors (--num-dl-actors) push into the same history at the same time, and

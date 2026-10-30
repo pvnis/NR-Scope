@@ -265,6 +265,7 @@ static nr_sensing_history_t* hist_of(nrscope_sensing_t* s, int aarx, uint16_t po
     return NULL;
   }
   nr_sensing_history_t* h = NULL;
+  bool                  created = false;
   pthread_mutex_lock(&s->hist_lock);
   int free_i = -1;
   for (int i = 0; i < NR_SENSING_MAX_STREAMS && h == NULL; i++) {
@@ -282,8 +283,13 @@ static nr_sensing_history_t* hist_of(nrscope_sensing_t* s, int aarx, uint16_t po
     s->hist[aarx][free_i].ports = ports;
     s->hist[aarx][free_i].layer = (uint8_t)layer;
     h                           = &s->hist[aarx][free_i].h;
+    created                     = true;
   }
   pthread_mutex_unlock(&s->hist_lock);
+  /* A new history of a chain other than the first rolls its delay axis as the first chain
+  does (los_leader in nr_ue_map.h). Looked up after the lock: hist_of() takes it again. */
+  if (created && aarx > 0)
+    h->los_leader = hist_of(s, 0, ports, layer);
   return h;
 }
 
@@ -927,30 +933,61 @@ static void nr_ue_sensing_map_task(void *arg)
     for (int k = 0; k < trend_n_q; k++)
       memcpy(&trend_q[(size_t)k * det->n_snap], q_basis[k], (size_t)det->n_snap * sizeof(*trend_q));
 
-    const nr_tdd_obs_t obs = {
-        .n_snap = det->n_snap,
-        .t_s = det->t_s,
-        .h_re = det->h_re,
-        .h_im = det->h_im,
-        .n_bins = det->n_bins,
-        .idft_size = det->idft_size,
-        .win_len = det->win_len,
-        .win_start = det->win_start,
-        .win = hann,
-        .m_per_bin = det->m_per_bin,
-        .n_freq = n_freq_det,
-        .f_max_hz = f_max_det,
-        .lambda_m = lambda_m,
-        .t_tdd_s = t_tdd_s,
-        .trend_q = trend_q,
-        .trend_n_q = trend_n_q,
-    };
-
     nr_tdd_cfg_t cfg;
     nr_tdd_cfg_default(&cfg);
     nr_tdd_target_t rej[NR_TDD_MAX_REJECTED];
     int n_rej = 0;
-    n_tgt = nr_tdd_detect(&obs, &cfg, tgt, NR_TDD_MAX_TARGETS, rej, &n_rej);
+
+    /* sensing.detect_all_chains: run the detector on every chain's samples, not rx0's only,
+    and keep each target once (the strongest of the chains that found it within a bin and
+    0.6 m/s). Non-coherent: no chain's phase meets another's, so it needs no calibration,
+    and a target in a fade or a null of rx0 is still found on the others. The rejected
+    markers stay rx0's. Costs one detector run per chain. */
+    const int n_det_chains = (t->args->detect_all_chains && aoa) ? n_slow : 1;
+    const double merge_hz = 2.0 * 0.6 / lambda_m;
+    for (int a = 0; a < n_det_chains; a++) {
+      const nr_sensing_slowtime_t *sa = &slow[a];
+      if (a > 0 && (sa->n_snap != det->n_snap || sa->n_bins != det->n_bins || sa->win_len != det->win_len))
+        continue; // not the same window as rx0 (see the AoA's own check): rx0 alone then
+      const nr_tdd_obs_t obs = {
+          .n_snap = sa->n_snap,
+          .t_s = sa->t_s,
+          .h_re = sa->h_re,
+          .h_im = sa->h_im,
+          .n_bins = sa->n_bins,
+          .idft_size = sa->idft_size,
+          .win_len = sa->win_len,
+          .win_start = sa->win_start,
+          .win = hann,
+          .m_per_bin = sa->m_per_bin,
+          .n_freq = n_freq_det,
+          .f_max_hz = f_max_det,
+          .lambda_m = lambda_m,
+          .t_tdd_s = t_tdd_s,
+          .trend_q = trend_q,
+          .trend_n_q = trend_n_q,
+      };
+      if (a == 0) {
+        n_tgt = nr_tdd_detect(&obs, &cfg, tgt, NR_TDD_MAX_TARGETS, rej, &n_rej);
+        continue;
+      }
+      nr_tdd_target_t tga[NR_TDD_MAX_TARGETS];
+      nr_tdd_target_t rja[NR_TDD_MAX_REJECTED];
+      int n_rja = 0;
+      const int n_tga = nr_tdd_detect(&obs, &cfg, tga, NR_TDD_MAX_TARGETS, rja, &n_rja);
+      for (int i = 0; i < n_tga; i++) {
+        int same = -1;
+        for (int j = 0; j < n_tgt && same < 0; j++)
+          if (fabs(tga[i].bin - tgt[j].bin) <= 1.0 && fabs(tga[i].f_hz - tgt[j].f_hz) <= merge_hz)
+            same = j;
+        if (same >= 0) {
+          if (tga[i].snr_dB > tgt[same].snr_dB)
+            tgt[same] = tga[i];
+        } else if (n_tgt < NR_TDD_MAX_TARGETS) {
+          tgt[n_tgt++] = tga[i];
+        }
+      }
+    }
 
     /* Set aside the targets whose mirror at -f is about as strong, see
     NR_TDD_VERDICT_UNCERTAIN. Read on the averaged map, the same grid the detector ran
@@ -1774,8 +1811,14 @@ int nrscope_sensing_process_grant(nrscope_sensing_t*          s,
       nr_ue_dmrs_estimate_symbol(&lay, layer, cinit, &cfg->grant, place, &grid[(size_t)l * n_sc_grid], (int)n_sc_grid,
                                  &sc->H[(size_t)l * n_sc_grid], &sc->valid[(size_t)l * n_sc_grid]);
     }
+    /* Recording only records: the maps, the detector and the AoA are left to the replay
+    (sensing_offline), which runs the same code on the same estimates. Building them live as
+    well cost the CPU the decoding needs: with detect_all_chains, 30% of the slots were dropped
+    (outside_2901_2), and those are missing from the recording too. */
     if (s->args.record_estimates[0] != 0) {
       rec_grant(s, aarx, ports, layer, lay.n_ports, sfn, slot_idx, slot_abs, dmrs_mask, sc->H, sc->valid, n_sc_grid);
+      n_pushed += n_dmrs;
+      continue;
     }
     n_pushed += nrscope_sensing_push_estimates(s, aarx, ports, layer, lay.n_ports, sfn, slot_idx, slot_abs, dmrs_mask,
                                                sc->H, sc->valid, n_sc_grid);

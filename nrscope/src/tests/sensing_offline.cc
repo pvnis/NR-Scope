@@ -245,7 +245,13 @@ int main(int argc, char** argv)
     }
   }
 
-  load_sensing_config(YAML::LoadFile(cfg_path));
+  const YAML::Node cfg_yaml = YAML::LoadFile(cfg_path);
+  load_sensing_config(cfg_yaml);
+  /* The live receiver takes the chains' phase offsets from calibration/calibration.yaml;
+  a replay reads only this yaml, so without sensing.aoa_cal_deg every angle comes out
+  uncalibrated (outside_2901: 42 deg median error instead of 7). run_real.sh writes the
+  offsets a capture ran with into its nrscope_config.yaml. */
+  const bool have_cal = cfg_yaml["sensing"] && cfg_yaml["sensing"]["aoa_cal_deg"];
   nrscope_sensing_args.enable              = true;
   nrscope_sensing_args.record_estimates[0] = 0; // never record the replay into itself
   if (!dump.empty()) {
@@ -270,6 +276,9 @@ int main(int argc, char** argv)
   printf("%s: %u chain(s), carrier %.3f MHz, %.2f Msps, FFT %u, %u kHz SCS, %u subcarriers\n", rec_path.c_str(),
          fh.nof_antennas, fh.carrier_hz / 1e6, fh.srate_hz / 1e6, fh.ofdm_size, fh.scs_hz / 1000, fh.n_sc_grid);
   printf("dump: %s\n", nrscope_sensing_args.dump);
+  if (fh.nof_antennas > 1 && !have_cal)
+    fprintf(stderr, "WARNING: %s has no sensing.aoa_cal_deg: the angles of this replay are UNCALIBRATED "
+                    "(give it the offsets the capture ran with)\n", cfg_path.c_str());
 
   nrscope_sensing_t* s =
       nrscope_sensing_get(fh.carrier_hz, fh.srate_hz, fh.ofdm_size, fh.scs_hz, fh.nof_antennas);

@@ -68,16 +68,20 @@ void nr_tdd_cfg_default(nr_tdd_cfg_t *cfg)
   memset(cfg, 0, sizeof(*cfg));
 
   /* Per cell false alarm rate. The paper uses 1e-6; with a 62 x 384 map that is
-  about 0.02 false cells expected per map before any peak checking. */
-  cfg->pfa = 1e-6;
+  about 0.02 false cells expected per map before any peak checking. 1e-4 outdoors: a
+  runner 20-60 m of excess path out is only 11-15 dB over the floor, and gamma below
+  removes the extra residue it lets through (outside_2810_5 replays). */
+  cfg->pfa = 1e-4;
 
   /* Guard cells have to cover the mainlobe or the target leaks into its own noise
   estimate and censors itself. Two bins covers a Hann tapered mainlobe on a full
   band grant; the Doppler mainlobe is narrower relative to the grid, hence one. */
   cfg->cfar_guard_bin = 2;
   cfg->cfar_guard_freq = 1;
-  cfg->cfar_train_bin = 4;
-  cfg->cfar_train_freq = 8;
+  /* Twice the training cells of the paper (4 and 8): a steadier noise estimate around
+  the outdoor clutter residue, runner tracked 25% -> 38% at the same pfa. */
+  cfg->cfar_train_bin = 8;
+  cfg->cfar_train_freq = 16;
   /* 0.75: cell averaging missed 74% of the people walking near others on a busy walkway
   (their neighbours in its ring), the 75th percentile 11% (maps of a recorded run). */
   cfg->cfar_os = 0.75;
@@ -85,8 +89,10 @@ void nr_tdd_cfg_default(nr_tdd_cfg_t *cfg)
   /* Eq. (23). The paper uses 0 in simulation, where removal is near perfect, and
   0.5 on measurements to survive residual clutter. This pipeline refines delay only
   by interpolation, so removal is imperfect by construction and a demanding gamma
-  would reject real targets: start permissive. */
-  cfg->gamma = 0.2;
+  would reject real targets: start permissive. Outdoors 0.35: 0.5 (the paper's value
+  for measurements) also rejected a weak runner as a replica of himself once the maps had
+  fewer snapshots (outside_2901: tracked 11% at 0.5, 24% at 0.35, no false tracks either way). */
+  cfg->gamma = 0.35;
   cfg->n_sidelobes = 1;
   cfg->ell_bin = 2.0;
   cfg->ell_freq = 3.0;

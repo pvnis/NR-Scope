@@ -106,8 +106,10 @@
 /// 1: build each map from the snapshots of its most common grant only (see above)
 #define NR_SENSING_GROUP_BY_GRANT 0
 
-/// how far around the previous shift the delay is searched, in bins (a timing correction is 1 sample)
-#define NR_SENSING_ALIGN_SEARCH_BINS 3.0
+/* How far around the previous shift the delay is searched, in bins (a timing correction is 1
+sample). On the X410 the receiver's FFT window jumps to a new offset every 10 ms frame, typically
++-3 and up to +-10 samples (outside_2810_5): 3 lost 183 references in 205 maps, 10 none. */
+#define NR_SENSING_ALIGN_SEARCH_BINS 10.0
 /// coarse search step, in bins; the peak is then refined below this
 #define NR_SENSING_ALIGN_STEP_BINS 0.25
 /// weight of a new aligned symbol in the reference; 1/64 follows the scene over ~20 slots

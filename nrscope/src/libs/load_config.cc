@@ -72,6 +72,7 @@ void load_sensing_config(const YAML::Node& config_yaml)
     flag("layer_avg", &nrscope_sensing_args.layer_avg);
     flag("random_drop", &nrscope_sensing_args.random_drop);
     flag("tdd_detect", &nrscope_sensing_args.tdd_detect);
+    flag("detect_all_chains", &nrscope_sensing_args.detect_all_chains);
     flag("doppler_clean", &nrscope_sensing_args.doppler_clean);
     flag("clutter_los_norm", &nrscope_sensing_args.los_norm);
     if (sn["clutter_eca_batch_ms"]) {

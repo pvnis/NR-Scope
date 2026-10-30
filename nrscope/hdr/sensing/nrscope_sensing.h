@@ -66,6 +66,10 @@ typedef struct {
   bool random_drop;
   /// --sensing-tdd-detect: run the TDD detector on each map
   bool tdd_detect;
+  /* sensing.detect_all_chains: with antenna_avg, run the detector on every chain and keep
+  each target once, instead of on rx0 alone (non-coherent, no calibration needed). Off by
+  default. */
+  bool detect_all_chains;
   /* sensing.doppler_clean: deconvolve each range bin's Doppler spectrum from the slow-time
   sampling's spectral window (see NR_SENSING_DOPPLER_CLEAN in nr_ue_map.h). Off by default. */
   bool doppler_clean;
@@ -116,8 +120,9 @@ typedef struct {
   double map_overlap;
   /* record_estimates: file to write every grant's DM-RS channel estimates to, at the
   input of nrscope_sensing_push_estimates(), for sensing_offline to replay through the
-  rest of the pipeline (see nrscope_sensing_record.h). Empty for none. The live maps
-  are built as usual. About 50-60 MB/s per chain and layer at full band. */
+  rest of the pipeline (see nrscope_sensing_record.h). Empty for none. When set, the
+  receiver only records: no live maps, detector or AoA (the replay makes them), so the
+  decoding keeps the CPU. About 50-60 MB/s per chain and layer at full band. */
   char   record_estimates[256];
   /* geometry: where the gNB and the receiver are, for the bistatic localisation and
   velocity (nr_ue_localize.h). Positions in metres in any planar frame, x east and y
