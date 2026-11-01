@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "nrscope/hdr/sensing/nrscope_sensing.h"
+#include "nrscope/hdr/ul_dmrs.h"
 #include "srsran/common/band_helper.h"
 #include "srsran/common/crash_handler.h"
 #include "srsran/common/string_helpers.h"
@@ -72,6 +73,10 @@ void load_sensing_config(const YAML::Node& config_yaml)
     flag("layer_avg", &nrscope_sensing_args.layer_avg);
     flag("random_drop", &nrscope_sensing_args.random_drop);
     flag("tdd_detect", &nrscope_sensing_args.tdd_detect);
+    flag("ul_dmrs", &nrscope_ul_dmrs);   // uplink DM-RS per RNTI (ul_dmrs.h); searches the uplink DCIs too
+    if (nrscope_ul_dmrs) {
+      std::cout << "    sensing.ul_dmrs: true (uplink DCIs searched as well)" << std::endl;
+    }
     flag("doppler_clean", &nrscope_sensing_args.doppler_clean);
     flag("clutter_los_norm", &nrscope_sensing_args.los_norm);
     if (sn["clutter_eca_batch_ms"]) {
@@ -400,6 +405,9 @@ int load_config(std::vector<Radio>& radios, std::string file_name)
                                        config_yaml[setting_name]["record_pdcch_candidates"].as<bool>());
 
   load_sensing_config(config_yaml);
+  if (nrscope_ul_dmrs) {
+    ul_dmrs_open(nrscope_sensing_args.dump);
+  }
   load_calibration_config(config_yaml);
 
   if (config_yaml[setting_name]["push_to_google"]) {

@@ -2,6 +2,7 @@
 #include "nrscope/hdr/dmrs_check.h"
 #include "nrscope/hdr/sensing/nrscope_sensing.h"
 #include "nrscope/hdr/run_recorder.h"
+#include "nrscope/hdr/ul_dmrs.h"
 
 DCIDecoder::DCIDecoder(uint32_t max_nof_rntis)
 {
@@ -1528,6 +1529,10 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
           printf("DCIDecoder -- PUSCH_cfg:\n%s", str);
         }
 
+        if (nrscope_ul_dmrs) {   // its PUSCH DM-RS, K2 slots on (ul_dmrs.h)
+          ul_dmrs_add(state->sfn, slot->idx, SRSRAN_NSLOTS_PER_FRAME_NR(state->args_t.ssb_scs), u.ctx.rnti, pusch_cfg,
+                      u.ports);
+        }
         sharded_results[dci_decoder_id].ul_grants[dci_idx_ul] = pusch_cfg;
         sharded_results[dci_decoder_id].nof_ul_used_prbs += pusch_cfg.grant.nof_prb * pusch_cfg.grant.L;
 

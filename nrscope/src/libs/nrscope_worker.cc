@@ -1,3 +1,4 @@
+#include "nrscope/hdr/ul_dmrs.h"
 #include "nrscope/hdr/nrscope_worker.h"
 #include <chrono>
 #include <cmath>
@@ -364,8 +365,8 @@ void NRScopeWorker::Run()
       this subframe by cfo_applied_norm cycles per sample from its first sample. This slot is
       the k-th of the subframe, so rotate it the same way and carry the phase the subframe had
       reached at its start, exp(j 2 pi f k slot_sz), to match chain 0 sample for sample.
-      Nothing reads these chains in an uplink-only slot. */
-    if (worker_state.nof_antennas > 1 && !uplink_only && outcome.cfo_applied_norm != 0.0f) {
+      Nothing reads these chains in an uplink-only slot, but the uplink DM-RS (sensing.ul_dmrs). */
+    if (worker_state.nof_antennas > 1 && (!uplink_only || nrscope_ul_dmrs) && outcome.cfo_applied_norm != 0.0f) {
       const float    f = outcome.cfo_applied_norm;
       const uint32_t k = slot.idx % SRSRAN_NOF_SLOTS_PER_SF_NR(worker_state.args_t.ssb_scs);
       const double   turns = (double)f * (double)k * (double)worker_state.slot_sz;
@@ -380,6 +381,11 @@ void NRScopeWorker::Run()
         if (k > 0)
           srsran_vec_sc_prod_ccc(rx_buffer[a], c, rx_buffer[a], worker_state.slot_sz);
       }
+    }
+
+    // an uplink slot: the UEs' PUSCH DM-RS whose grants came K2 slots ago (ul_dmrs.h)
+    if (nrscope_ul_dmrs && uplink_only && worker_state.dci_inited && !dci_decoders.empty()) {
+      ul_dmrs_process(*dci_decoders[0], outcome.sfn, &slot, SRSRAN_NSLOTS_PER_FRAME_NR(worker_state.args_t.ssb_scs));
     }
 
     std::thread sibs_thread;
