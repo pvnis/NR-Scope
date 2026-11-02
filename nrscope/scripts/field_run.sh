@@ -9,12 +9,13 @@
 #             rx_center_freq the "GoldenSniffer: carrier ..." line suggests.
 #   --gain    rx gain (default 35); keep the "RX peak" of the [status] lines below ~-10 dBFS
 #   --secs    run length (default 300)
+#   --sensing sensing on: the tracked UEs' grants (FDRA found on air) feed it; maps in the run dir
 # Output: <out>/<UTC date-time>_<tag>/{config.yaml, nrscope.log, golden_sniffer.csv,
 #         msg4_bytes.log, summary.txt}
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
-ssb="" pci="" center="" gain=35 secs=300 tag=cell out=$HOME/field sets=()
+ssb="" pci="" center="" gain=35 secs=300 tag=cell out=$HOME/field sets=() sensing=0
 while [ $# -gt 0 ]; do
   case $1 in
     --ssb) ssb=$2; shift 2 ;;
@@ -25,6 +26,7 @@ while [ $# -gt 0 ]; do
     --tag) tag=$2; shift 2 ;;
     --out) out=$2; shift 2 ;;
     --set) sets+=("$2"); shift 2 ;;
+    --sensing) sensing=1; shift ;;
     *) echo "unknown option $1"; exit 1 ;;
   esac
 done
@@ -34,16 +36,22 @@ dir=$out/$(date -u +%Y%m%d_%H%M%S)_$tag
 mkdir -p "$dir"
 bin=$root/build/nrscope/src
 cfg=$dir/config.yaml
-python3 - "$root/nrscope/config/config_gs_field_x410.yaml" "$cfg" "$ssb" "$center" "$pci" "$gain" "$dir" "${sets[@]+"${sets[@]}"}" <<'EOF'
+python3 - "$root/nrscope/config/config_gs_field_x410.yaml" "$cfg" "$ssb" "$center" "$pci" "$gain" "$dir" "$sensing" "${sets[@]+"${sets[@]}"}" <<'EOF'
 import re, sys
-src, dst, ssb, center, pci, gain, d = sys.argv[1:8]
-extra = sys.argv[8:]
+src, dst, ssb, center, pci, gain, d, sensing = sys.argv[1:9]
+extra = sys.argv[9:]
 s = open(src).read()
 s = re.sub(r"(?m)^  ssb_freq: .*$", "  ssb_freq: %s" % ssb, s)
 s = re.sub(r"(?m)^  rx_center_freq: .*$", "  rx_center_freq: %s" % center, s)
 s = re.sub(r"(?m)^  rx_gain: .*$", "  rx_gain: %s" % gain, s)
 s = re.sub(r"(?m)^  pci: .*\n", ("  pci: %s\n" % pci) if pci else "", s)
 s = re.sub(r'(?m)^  csv: .*$', '  csv: "%s/golden_sniffer.csv"' % d, s)
+if sensing == "1":
+    j = s.index("sensing:\n")
+    blk = s[j:]
+    blk = re.sub(r"(?m)^  enable: .*$", "  enable: true", blk, count=1)
+    blk = re.sub(r'(?m)^  dump: .*$', '  dump: "%s/map2d.csv"' % d, blk, count=1)
+    s = s[:j] + blk
 i = s.index("golden_sniffer:\n")
 for kv in extra:
     k = kv.split(":", 1)[0].strip()

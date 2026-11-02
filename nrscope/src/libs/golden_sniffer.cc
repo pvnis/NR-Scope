@@ -2,6 +2,8 @@
  * GoldenSniffer in NR-Scope; see nrscope/hdr/golden_sniffer.h.
  */
 #include "nrscope/hdr/golden_sniffer.h"
+#include "nrscope/hdr/gs_fdra.h"
+#include "nrscope/hdr/sensing/nrscope_sensing.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -185,6 +187,11 @@ std::atomic<bool>     gs_pool_active{true}; // whole-slot search wanted (windows
 std::atomic<bool>     gs_any_converged{false};
 std::atomic<double>   gs_ready_time{0};     // when the first worker's GoldenSniffer was ready
 std::atomic<uint32_t> gs_spf{0};            // slots per frame
+/* the cell's FDRA hypotheses (gs_fdra.h), set once by the first worker */
+static GsFdraHyp      gs_fdra_h[GS_FDRA_MAX_HYP];
+static std::atomic<uint32_t> gs_fdra_nh{0};
+static std::once_flag gs_fdra_once;
+static FILE*          gs_grants_csv = nullptr;
 /* Replay (lossless file input) runs at any speed: GoldenSniffer's timers (startup, sweeps,
   arming, quiet, keep, convergence) then run on air time, from the SFN and slot */
 static double  gs_air_ready = -1;
@@ -393,6 +400,12 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
   if (g["soft"]) {
     a.soft = g["soft"].as<bool>();
   }
+  if (g["fdra"]) {
+    a.fdra = g["fdra"].as<bool>();
+  }
+  if (g["grants_csv"]) {
+    a.grants_csv = g["grants_csv"].as<std::string>();
+  }
   if (g["quiet_s"]) {
     a.quiet_s = g["quiet_s"].as<double>();
   }
@@ -405,6 +418,18 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
       gs_gf2_prebuild_start(a.size_min, a.size_max, first.data(), (uint32_t)first.size());
     }
     gs_csv = fopen(a.csv.c_str(), "w");
+    if (a.fdra) {
+      std::string gp = a.grants_csv;
+      if (gp.empty()) {
+        gp            = a.csv;
+        const size_t dot = gp.rfind(".csv");
+        gp            = (dot == std::string::npos ? gp : gp.substr(0, dot)) + "_grants.csv";
+      }
+      gs_grants_csv = fopen(gp.c_str(), "w");
+      if (gs_grants_csv != nullptr) {
+        fprintf(gs_grants_csv, "timestamp,sfn,slot,rnti,bwp_start_crb,rb_start,nof_rb,dmrs_coherence,hyp,sensed\n");
+      }
+    }
     if (gs_csv == nullptr) {
       std::cerr << "golden_sniffer: cannot write " << a.csv << std::endl;
     } else {
@@ -824,6 +849,52 @@ void golden_sniffer_update(WorkState&                   state,
   for (const gs_dci_t& d : result.region_dcis) {
     gs_log_one_locked(now, result.outcome.sfn, d.slot_idx, first_crb, d, "region");
   }
+  /* FDRA learning: a hypothesis is kept once its mean stands out over enough DL DCIs */
+  for (const GsFdraObs& o : result.gs_fdra_obs) {
+    auto it = ues.find(o.rnti);
+    if (it == ues.end() || it->second.fdra_lock >= 0) {
+      continue;
+    }
+    BlindUe& e = it->second;
+    for (uint32_t k = 0; k < o.nof && k < 64; k++) {
+      e.fdra_sum[k] += o.score[k] > 0 ? o.score[k] : 0.0f;
+    }
+    e.fdra_n++;
+    if (e.fdra_n >= 20 && e.fdra_n % 5 == 0) {
+      int   best = -1;
+      float b1 = -1, b2 = -1;
+      for (uint32_t k = 0; k < o.nof && k < 64; k++) {
+        const float m = e.fdra_sum[k] / (float)e.fdra_n;
+        if (m > b1) {
+          b2   = b1;
+          b1   = m;
+          best = (int)k;
+        } else if (m > b2) {
+          b2 = m;
+        }
+      }
+      if (best >= 0 && b1 >= 0.85f && b1 - b2 >= 0.1f) {
+        e.fdra_lock         = (int16_t)best;
+        const GsFdraHyp& hy = gs_fdra_h[best];
+        printf("GoldenSniffer: UE 0x%04x FDRA: %s%s, BWP %u PRBs at CRB %u, field at bit %u (%u bits); "
+               "%.2f of its PRBs carry DM-RS over %u DL DCIs, next hypothesis %.2f\n",
+               o.rnti, hy.type == 1 ? "type 1" : hy.type == 0 ? "type 0" : "dynamic",
+               hy.type == 1 ? "" : (hy.rbg_cfg == 1 ? " rbg config 1" : " rbg config 2"), hy.nbwp, hy.bwp_start,
+               hy.off, hy.width, b1, e.fdra_n, b2);
+      } else if (e.fdra_n >= 400) {
+        e.fdra_gave_up = true;
+        printf("GoldenSniffer: UE 0x%04x FDRA not found over %u DL DCIs (best %.2f, next %.2f): a loaded cell, or "
+               "PDSCH not in the DCI's slot\n",
+               o.rnti, e.fdra_n, b1, b2);
+      }
+    }
+  }
+  for (const GsGrant& g : result.gs_grants) {
+    if (gs_grants_csv != nullptr) {
+      fprintf(gs_grants_csv, "%.6f,%u,%u,0x%04x,%u,%u,%u,%.3f,%d,%d\n", now_wall, g.sfn, g.slot, g.rnti, g.bwp_start,
+              g.rb_start, g.nof_rb, g.coherence, g.hyp, g.sensed ? 1 : 0);
+    }
+  }
   for (const gs_dci_t& d : result.tracked_dcis) {
     gs_log_one_locked(now, result.outcome.sfn, d.slot_idx, first_crb, d, "tracked");
     auto it = ues.find(d.rnti);
@@ -1142,6 +1213,28 @@ int GoldenSnifferDecoder::Init(WorkState* state, cf_t* input0)
     return SRSRAN_ERROR;
   }
 
+  dmrs_l0 = cell.mib.dmrs_typeA_pos == srsran_dmrs_sch_typeA_pos_3 ? 3 : 2;
+  if (nrscope_gs_args.fdra) {
+    std::call_once(gs_fdra_once, [&]() {
+      const uint32_t riv = sib1.serving_cell_cfg_common.dl_cfg_common.init_dl_bwp.generic_params.location_and_bw;
+      const uint32_t N = 275, ra = riv / N, rb = riv % N;
+      const uint32_t bw_start = (ra + rb < N) ? rb : N - 1 - rb, bw_size = (ra + rb < N) ? ra + 1 : N - ra + 1;
+      const uint32_t nh = gs_fdra_hypotheses(carrier.offset_to_carrier, carrier.carrier_bw,
+                                             carrier.offset_to_carrier + bw_start, bw_size, gs_fdra_h, GS_FDRA_MAX_HYP);
+      gs_fdra_nh.store(nh);
+      printf("GoldenSniffer: FDRA of DCI 1_1 learned on air: %u hypotheses (carrier %u PRBs at CRB %u, initial BWP %u "
+             "at CRB %u), PDSCH DM-RS symbol %u\n",
+             nh, (unsigned)carrier.carrier_bw, (unsigned)carrier.offset_to_carrier, bw_size,
+             (unsigned)(carrier.offset_to_carrier + bw_start), dmrs_l0);
+    });
+  }
+  if (nrscope_gs_args.fdra && nrscope_sensing_args.enable) {
+    const double grid_center = f_lo + (first + grid_carrier.nof_prb / 2.0) * rb_hz;
+    sensing = nrscope_sensing_get((uint64_t)grid_center, srate, (uint32_t)std::lround(srate / scs), (uint32_t)scs, 1);
+    if (sensing != nullptr) {
+      sensing_scratch = nrscope_sensing_scratch_alloc(grid_carrier.nof_prb * NRSCOPE_NSC_PER_RB_NR);
+    }
+  }
   ref_crb0 = -(int32_t)(first_crb * NRSCOPE_NSC_PER_RB_NR);
   ref_cs0  = (int32_t)std::lround((state->coreset0_args_t.coreset0_lower_freq_hz - grid_lo) / scs);
   cs0_nof_sc = srsran_coreset_get_bw(&state->coreset0_t) * NRSCOPE_NSC_PER_RB_NR;
@@ -1290,6 +1383,94 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
         (trk[i] ? result->tracked_dcis : result->region_dcis).push_back(out[i]);
       }
       gs_t_track.add(1e3 * (gs_steady_s() - t_tr0));
+      /* FDRA and grants of the tracked UEs' DL DCIs (format identifier 1) */
+      const uint32_t nh = gs_fdra_nh.load(std::memory_order_relaxed);
+      if (nrscope_gs_args.fdra && nh > 0) {
+        bool                            have_map = false;
+        static thread_local cf_t        rb_s[SRSRAN_MAX_PRB_NR];
+        static thread_local float       rb_d[SRSRAN_MAX_PRB_NR];
+        const uint32_t                  nprb = grid_carrier.nof_prb;
+        for (int i = 0; i < n; i++) {
+          const gs_dci_t& dd = out[i];
+          if (!trk[i] || dd.nof_bits < 2 || dd.payload[0] != 1) {
+            continue;
+          }
+          auto ue = state->blind_ues.find(dd.rnti);
+          if (ue == state->blind_ues.end()) {
+            continue;
+          }
+          const BlindUe& b = ue->second;
+          if (b.fdra_lock < 0 && (b.fdra_gave_up || b.fdra_n >= 400)) {
+            continue;
+          }
+          if (!have_map) {
+            /* the first PDSCH DM-RS symbol of the slot, demodulated if it was not */
+            uint32_t mask2[SRSRAN_MAX_PORTS] = {1u << dmrs_l0};
+            srsran_ue_dl_nr_estimate_fft_nrscope_symbols(&ue_dl, slot, arg_scs_grid, mask2, done);
+            gs_fdra_rb_coherence(ue_dl.sf_symbols[0] + dmrs_l0 * nof_sc, first_crb, nprb,
+                                 slot->idx % slots_per_frame, dmrs_l0, pci, rb_s, rb_d);
+            have_map = true;
+          }
+          if (b.fdra_lock < 0) {
+            GsFdraObs o;
+            o.rnti = dd.rnti;
+            o.nof  = (uint8_t)nh;
+            for (uint32_t k = 0; k < nh; k++) {
+              o.score[k] = gs_fdra_score(gs_fdra_h[k], dd.payload, dd.nof_bits, first_crb, nprb, rb_s, rb_d, nullptr);
+            }
+            result->gs_fdra_obs.push_back(o);
+            continue;
+          }
+          const GsFdraHyp& hy = gs_fdra_h[b.fdra_lock];
+          bool             prb[SRSRAN_MAX_PRB_NR];
+          uint32_t         nof = 0;
+          if (!gs_fdra_parse(hy, dd.payload, dd.nof_bits, prb, &nof) || nof == 0) {
+            continue;
+          }
+          float coh = 0;
+          gs_fdra_score(hy, dd.payload, dd.nof_bits, first_crb, nprb, rb_s, rb_d, &coh);
+          GsGrant g = {};
+          g.rnti      = dd.rnti;
+          g.sfn       = state->sfn;
+          g.slot      = slot->idx % slots_per_frame;
+          g.bwp_start = hy.bwp_start;
+          g.hyp       = b.fdra_lock;
+          g.coherence = coh;
+          uint32_t first_rb = 0;
+          while (first_rb < hy.nbwp && !prb[first_rb]) {
+            first_rb++;
+          }
+          g.rb_start = (uint16_t)first_rb;
+          g.nof_rb   = (uint16_t)nof;
+          /* sensing: the grant as a single-layer PDSCH on port 1000 (its antenna-ports field
+            is not known), the DM-RS symbol from the MIB, scrambled with the PCI */
+          if (sensing != nullptr && sensing_scratch != nullptr && coh > 0.5f) {
+            srsran_sch_cfg_nr_t cfg = {};
+            for (uint32_t k = 0; k < hy.nbwp && k < SRSRAN_MAX_PRB_NR; k++) {
+              cfg.grant.prb_idx[k] = prb[k];
+            }
+            cfg.grant.nof_prb                          = nof;
+            cfg.grant.S                                = std::max(dd.duration, 1u);
+            cfg.grant.L                                = 14 - cfg.grant.S;
+            cfg.grant.mapping                          = srsran_sch_mapping_type_A;
+            cfg.grant.k                                = 0;
+            cfg.grant.rnti                             = dd.rnti;
+            cfg.grant.rnti_type                        = srsran_rnti_type_c;
+            cfg.grant.dci_format                       = srsran_dci_format_nr_1_1;
+            cfg.grant.nof_layers                       = 1;
+            cfg.grant.nof_dmrs_cdm_groups_without_data = 1;
+            cfg.dmrs.type                              = srsran_dmrs_sch_type_1;
+            cfg.dmrs.typeA_pos      = dmrs_l0 == 3 ? srsran_dmrs_sch_typeA_pos_3 : srsran_dmrs_sch_typeA_pos_2;
+            cfg.dmrs.additional_pos = srsran_dmrs_sch_add_pos_0;
+            cfg.dmrs.length         = srsran_dmrs_sch_len_1;
+            const nr_dmrs_placement_t place = {first_crb, hy.bwp_start, 0};
+            g.sensed = nrscope_sensing_process_grant(sensing, sensing_scratch, 0, ue_dl.sf_symbols[0],
+                                                     nprb * NRSCOPE_NSC_PER_RB_NR, &place, &cfg, -1, pci, state->sfn,
+                                                     g.slot) > 0;
+          }
+          result->gs_grants.push_back(g);
+        }
+      }
     }
   }
 

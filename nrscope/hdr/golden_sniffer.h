@@ -99,6 +99,8 @@ struct GoldenSnifferArgs {
   bool     discover_in_track = true; // other C-RNTIs it finds are sightings (discovery)
   bool     searcher_idle     = true; // searcher threads at SCHED_IDLE: only spare CPU time
   bool     soft              = true; // soft-decision error correction in the tracked decode
+  bool     fdra              = true; // find the FDRA of tracked UEs on air; their grants (and sensing)
+  std::string grants_csv;            // default: csv with _grants
   double   quiet_s        = 1.0;   // a blind-tracked UE silent this long starts a sweep (gone or new RNTI?)
 };
 
@@ -143,6 +145,9 @@ private:
   uint32_t                      pci      = 0;
   uint32_t                      slots_per_frame = 20;
   uint32_t                      first_crb = 0; /* CRB of grid subcarrier 0 */
+  uint32_t                      dmrs_l0   = 2; /* first PDSCH DM-RS symbol (MIB, type A) */
+  struct nrscope_sensing_s*     sensing   = nullptr; /* grants of tracked UEs into sensing */
+  struct nrscope_sensing_scratch_s* sensing_scratch = nullptr;
 };
 
 #endif

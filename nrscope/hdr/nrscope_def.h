@@ -325,6 +325,30 @@ struct BlindUe {
     RRC PDU on SRB1): learned afresh here while the track keeps decoding, then replaces it */
   std::shared_ptr<BlindUe>     shadow;
   double                       shadow_since     = 0;
+  /* FDRA of its DCI 1_1, found on air (gs_fdra.h): per hypothesis, the sum of the scores
+    over its DL DCIs; the hypothesis kept, once it stands out */
+  float                        fdra_sum[64]     = {};
+  uint32_t                     fdra_n           = 0;
+  int16_t                      fdra_lock        = -1;
+  bool                         fdra_gave_up     = false;
+};
+
+/* GoldenSniffer FDRA learning, from the workers: one DL DCI of a tracked UE, scored under
+  every hypothesis (gs_fdra.h) */
+struct GsFdraObs {
+  uint16_t rnti;
+  uint8_t  nof;
+  float    score[64];
+};
+
+/* A DL grant of a tracked UE, from its DCI 1_1 under the FDRA hypothesis kept */
+struct GsGrant {
+  uint16_t rnti;
+  uint32_t sfn, slot;
+  uint16_t bwp_start, rb_start, nof_rb;
+  float    coherence; // PDSCH DM-RS on those PRBs
+  int16_t  hyp;
+  bool     sensed;
 };
 
 /* An RRC PDU on an SRB, seen by the RACH decoder (headers only: the body is ciphered) */
@@ -450,6 +474,8 @@ struct SlotResult_ {
   std::vector<SrbEvent> srb_events;
   std::vector<gs_dci_t> tracked_dcis;
   std::vector<gs_dci_t> region_dcis;  // other C-RNTIs found by the tracked decode (sightings)
+  std::vector<GsFdraObs> gs_fdra_obs; // FDRA learning
+  std::vector<GsGrant>  gs_grants;    // DL grants of tracked UEs
   double                gs_t_submit = 0; // GoldenSniffer took the slot (steady clock, s)
 
   /* Define the compare operator between structure by sf_round,
