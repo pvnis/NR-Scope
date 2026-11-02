@@ -407,9 +407,9 @@ void NRScopeWorker::Run()
           std::thread{&RachDecoder::DecodeandParseMS4fromSlot, &rach_decoder, &slot, &worker_state, &slot_result};
     }
 
-    std::thread gs_thread;
+    /* GoldenSniffer: demodulate and queue for its own searcher threads, never waited for */
     if (gs_decoder.ready && !uplink_only) {
-      gs_thread = std::thread{&GoldenSnifferDecoder::DecodeSlot, &gs_decoder, &slot, &worker_state, &slot_result};
+      gs_decoder.Submit(&slot, &worker_state);
     }
 
     std::vector<std::thread> dci_threads;
@@ -450,10 +450,6 @@ void NRScopeWorker::Run()
 
     if (rach_thread.joinable()) {
       rach_thread.join();
-    }
-
-    if (gs_thread.joinable()) {
-      gs_thread.join();
     }
 
     if (worker_state.dci_inited && !uplink_only) {

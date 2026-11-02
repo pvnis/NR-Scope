@@ -366,8 +366,8 @@ int TaskSchedulerNRScope::UpdatewithResult(SlotResult now_result)
       task_scheduler_state.dci_inited = true;
     }
   }
-  /* GoldenSniffer's DCIs: CSV, per-RNTI counts, and with feed_rntis new C-RNTIs */
-  golden_sniffer_update(task_scheduler_state, now_result, now);
+  /* GoldenSniffer: with feed_rntis, the C-RNTIs it found; its periodic report */
+  golden_sniffer_update(task_scheduler_state, now);
   task_scheduler_lock.unlock();
 
   /* This slot contains the DCI decoder's result, put all the results to log */

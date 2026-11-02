@@ -3,9 +3,11 @@
  *
  * The C core (golden_sniffer/gs_core.h) finds DCIs in a slot's first PDCCH symbols
  * and reads their RNTI, PDCCH DM-RS scrambling ID, size and payload. This file runs
- * it in every worker from the moment SIB1 is known, on its own full-carrier grid
- * (the part of the carrier inside the capture), without waiting for a RACH, and
- * reports what it finds:
+ * from the moment SIB1 is known, on its own full-carrier grid (the part of the carrier
+ * inside the capture), without waiting for a RACH. The workers only demodulate the PDCCH
+ * symbols and queue a copy; a pool of searcher threads does the rest, so GoldenSniffer is
+ * never on the workers' critical path (if it falls behind it drops its own slots,
+ * counted in the report). It reports what it finds:
  *   - every DCI to a CSV (golden_sniffer.csv);
  *   - a per-RNTI count, on stdout every report_s seconds and at exit;
  *   - with feed_rntis, the C-RNTIs it finds (seen min_hits times) to the regular
@@ -26,6 +28,8 @@
  *     min_hits: 3
  *     csv: <path>            # default <root>/golden_sniffer.csv
  *     report_s: 10
+ *     threads: 2             # searcher threads; the workers only demodulate and queue
+ *     queue: 256             # slots waiting for a searcher; beyond, GoldenSniffer drops its own
  */
 #ifndef NRSCOPE_GOLDEN_SNIFFER_H
 #define NRSCOPE_GOLDEN_SNIFFER_H
@@ -48,6 +52,8 @@ struct GoldenSnifferArgs {
   uint32_t              min_hits   = 3;
   std::string           csv;
   double                report_s = 10.0;
+  uint32_t              threads  = 2;   // searcher threads, off the workers' path
+  uint32_t              queue    = 256; // slots waiting for a searcher; beyond, GoldenSniffer drops
 };
 
 extern GoldenSnifferArgs nrscope_gs_args;
@@ -57,8 +63,8 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml);
 /* Per-RNTI summary on stdout and CSV flush; called by the exit path */
 void golden_sniffer_report();
 
-/* Under the scheduler lock: logs the slot's DCIs, and with feed_rntis adds C-RNTIs */
-void golden_sniffer_update(WorkState& state, const SlotResult& result, double now);
+/* Under the scheduler lock: with feed_rntis, adds the C-RNTIs found; periodic report */
+void golden_sniffer_update(WorkState& state, double now);
 
 class GoldenSnifferDecoder
 {
@@ -69,8 +75,9 @@ public:
   /* After SIB1: places the grid, builds the searcher */
   int Init(WorkState* state, cf_t* input0);
 
-  /* One slot (a worker thread entry) */
-  void DecodeSlot(srsran_slot_cfg_t* slot, WorkState* state, SlotResult* result);
+  /* One slot, from the worker: demodulates the PDCCH symbols and queues them for the
+    searcher threads. Never waits for the search. */
+  void Submit(srsran_slot_cfg_t* slot, WorkState* state);
 
   bool ready = false;
 
@@ -78,7 +85,6 @@ private:
   srsran_ue_dl_nr_t             ue_dl = {};
   srsran_carrier_nr_t           grid_carrier = {};
   srsran_ue_dl_nr_sratescs_info arg_scs_grid = {};
-  gs_t*                         gs       = nullptr;
   int32_t                       ref_crb0 = GS_NO_REF;
   int32_t                       ref_cs0  = GS_NO_REF;
   uint32_t                      pci      = 0;

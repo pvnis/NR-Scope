@@ -2,10 +2,14 @@
  * GoldenSniffer in NR-Scope; see nrscope/hdr/golden_sniffer.h.
  */
 #include "nrscope/hdr/golden_sniffer.h"
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
+#include <deque>
 #include <map>
 #include <mutex>
+#include <thread>
 
 GoldenSnifferArgs nrscope_gs_args;
 
@@ -27,6 +31,42 @@ std::map<uint16_t, RntiStats> gs_stats;
 double                        gs_last_report = 0;
 uint64_t                      gs_total       = 0;
 
+/* What the workers hand over: the searched symbols of one slot, copied out of the
+  worker's grid so the worker can go on with the next slot at once. */
+struct GsJob {
+  uint32_t          sfn = 0, slot_idx = 0, nof_sc = 0, nof_symb = 0, first_crb = 0, pci = 0;
+  int32_t           ref_crb0 = GS_NO_REF, ref_cs0 = GS_NO_REF;
+  std::vector<cf_t> grid;
+};
+
+/* The searcher pool: its own threads and its own bounded queue. GoldenSniffer is never
+  on the worker's critical path; when the pool falls behind, it drops its own slots. */
+struct GsPool {
+  std::once_flag          started;
+  std::mutex              m;
+  std::condition_variable cv;
+  std::deque<GsJob>       q;
+  gs_args_t               args = {};
+  std::vector<uint32_t>   sizes, css;
+  /* statistics, under m */
+  uint64_t submitted = 0, searched = 0, dropped = 0;
+  double   t_sum_ms = 0, t_max_ms = 0;
+};
+GsPool gs_pool;
+
+/* C-RNTIs ready to go to the DCI decoders (feed_rntis), under gs_log_mutex */
+struct GsFeed {
+  uint16_t rnti;
+  uint32_t n_id;
+  bool     n_rnti;
+};
+std::vector<GsFeed> gs_feeds;
+
+double wall_now()
+{
+  return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
 const char* rnti_kind(uint16_t rnti, bool coreset0, bool n_rnti)
 {
   if (rnti == 0xffff) {
@@ -44,7 +84,21 @@ const char* rnti_kind(uint16_t rnti, bool coreset0, bool n_rnti)
 
 void print_report_locked()
 {
-  printf("GoldenSniffer: %llu DCIs, %zu RNTIs\n", (unsigned long long)gs_total, gs_stats.size());
+  uint64_t searched, dropped, submitted;
+  double   t_sum, t_max;
+  {
+    std::lock_guard<std::mutex> lock(gs_pool.m);
+    searched  = gs_pool.searched;
+    dropped   = gs_pool.dropped;
+    submitted = gs_pool.submitted;
+    t_sum     = gs_pool.t_sum_ms;
+    t_max     = gs_pool.t_max_ms;
+  }
+  printf("GoldenSniffer: %llu DCIs, %zu RNTIs; %llu slots searched (%.3f ms mean, %.3f ms max), %llu of %llu dropped "
+         "(searchers behind)\n",
+         (unsigned long long)gs_total, gs_stats.size(), (unsigned long long)searched,
+         searched ? t_sum / (double)searched : 0.0, t_max, (unsigned long long)dropped,
+         (unsigned long long)submitted);
   for (const auto& e : gs_stats) {
     const RntiStats& s = e.second;
     printf("  RNTI 0x%04x %-5s N_ID %5u %s%s DCIs %8llu  sizes", e.first, rnti_kind(e.first, s.coreset0, s.n_rnti),
@@ -109,6 +163,12 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
   if (g["csv"]) {
     a.csv = g["csv"].as<std::string>();
   }
+  if (g["threads"]) {
+    a.threads = g["threads"].as<uint32_t>();
+  }
+  if (g["queue"]) {
+    a.queue = g["queue"].as<uint32_t>();
+  }
   if (g["report_s"]) {
     a.report_s = g["report_s"].as<double>();
   }
@@ -136,13 +196,16 @@ void golden_sniffer_report()
   }
 }
 
-void golden_sniffer_update(WorkState& state, const SlotResult& result, double now)
+/* Logs one searched slot's DCIs; called by the searcher threads */
+static void gs_log_dcis(const GsJob& job, const gs_dci_t* out, int n)
 {
-  if (!nrscope_gs_args.enable) {
+  if (n <= 0) {
     return;
   }
+  const double                now = wall_now();
   std::lock_guard<std::mutex> lock(gs_log_mutex);
-  for (const GsDciResult& d : result.gs_dcis) {
+  for (int i = 0; i < n; i++) {
+    const gs_dci_t& d = out[i];
     gs_total++;
     RntiStats& s = gs_stats[d.rnti];
     s.dcis++;
@@ -161,41 +224,95 @@ void golden_sniffer_update(WorkState& state, const SlotResult& result, double no
       for (uint32_t h = 0; h < nh; h++) {
         uint32_t v = 0;
         for (uint32_t b = 0; b < 4; b++) {
-          uint32_t i = 4 * h + b;
-          v          = (v << 1) | (i < d.nof_bits ? d.payload[i] : 0);
+          uint32_t k = 4 * h + b;
+          v          = (v << 1) | (k < d.nof_bits ? d.payload[k] : 0);
         }
         hex[h] = "0123456789abcdef"[v];
       }
-      fprintf(gs_csv, "%.6f,%u,%u,0x%04x,%s,%u,%d,%d,%u,%u,%u,%d,%u,%s,%.3f,%.1f\n", now, result.outcome.sfn,
-              d.slot_idx, d.rnti, rnti_kind(d.rnti, d.coreset0, d.n_rnti), d.n_id, d.n_rnti, d.coreset0, d.L,
-              d.duration, d.first_crb, d.nof_iv > 1, d.nof_bits, hex, d.evm,
-              d.epre > 0 ? 10.0 * std::log10(d.epre) : -999.0);
+      fprintf(gs_csv, "%.6f,%u,%u,0x%04x,%s,%u,%d,%d,%u,%u,%u,%d,%u,%s,%.3f,%.1f\n", now, job.sfn, job.slot_idx, d.rnti,
+              rnti_kind(d.rnti, d.coreset0, d.n_rnti), d.n_id, d.n_rnti, d.coreset0, d.L, d.duration,
+              job.first_crb + (uint32_t)d.cand.iv[0].first / NRSCOPE_NSC_PER_RB_NR, d.cand.nof_iv > 1, d.nof_bits, hex,
+              d.evm, d.epre > 0 ? 10.0 * std::log10(d.epre) : -999.0);
     }
-
-    /* C-RNTIs to the regular DCI decoders, with the scrambling ID read off the DM-RS */
-    if (nrscope_gs_args.feed_rntis && !s.fed && s.dcis >= nrscope_gs_args.min_hits && state.rach_found &&
+    if (nrscope_gs_args.feed_rntis && !s.fed && s.dcis >= nrscope_gs_args.min_hits &&
         std::string(rnti_kind(d.rnti, d.coreset0, d.n_rnti)) == "C") {
-      bool known = false;
-      for (uint16_t r : state.known_rntis) {
-        known |= r == d.rnti;
-      }
-      if (!known) {
-        state.known_rntis.push_back(d.rnti);
-        state.last_seen.push_back(now);
-        state.nof_known_rntis++;
-        const auto& sp_ded = state.master_cell_group.sp_cell_cfg.sp_cell_cfg_ded;
-        if (d.n_rnti && sp_ded.init_dl_bwp_present && sp_ded.init_dl_bwp.pdcch_cfg_present &&
-            sp_ded.init_dl_bwp.pdcch_cfg.type().value == asn1::setup_release_opts::setup) {
-          for (const auto& cs : sp_ded.init_dl_bwp.pdcch_cfg.setup().ctrl_res_set_to_add_mod_list) {
-            if (cs.pdcch_dmrs_scrambling_id_present) {
-              state.pdcch_dmrs_ids_by_rnti[d.rnti][cs.ctrl_res_set_id] = d.n_id;
-            }
-          }
-        }
-        printf("GoldenSniffer: RNTI 0x%04x (N_ID %u) added to the DCI decoders\n", d.rnti, d.n_id);
-      }
+      gs_feeds.push_back({d.rnti, d.n_id, d.n_rnti});
       s.fed = true;
     }
+  }
+}
+
+static void gs_searcher_thread(uint32_t id)
+{
+  char name[16];
+  snprintf(name, sizeof(name), "nrs-gs%u", id);
+  pthread_setname_np(pthread_self(), name);
+  gs_t* gs = gs_create(&gs_pool.args);
+  if (gs == nullptr) {
+    ERROR("GoldenSniffer: could not create a searcher");
+    return;
+  }
+  gs_dci_t out[GS_MAX_DCI_PER_SLOT];
+  while (true) {
+    GsJob job;
+    {
+      std::unique_lock<std::mutex> lock(gs_pool.m);
+      gs_pool.cv.wait(lock, [] { return !gs_pool.q.empty(); });
+      job = std::move(gs_pool.q.front());
+      gs_pool.q.pop_front();
+    }
+    gs_slot_t sl = {};
+    sl.grid      = job.grid.data();
+    sl.nof_sc    = job.nof_sc;
+    sl.slot_idx  = job.slot_idx;
+    sl.ref_crb0  = job.ref_crb0;
+    sl.ref_cs0   = job.ref_cs0;
+    sl.pci       = job.pci;
+    auto t0      = std::chrono::steady_clock::now();
+    int  n       = gs_search_slot(gs, &sl, out, GS_MAX_DCI_PER_SLOT);
+    double ms    = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    {
+      std::lock_guard<std::mutex> lock(gs_pool.m);
+      gs_pool.searched++;
+      gs_pool.t_sum_ms += ms;
+      gs_pool.t_max_ms = std::max(gs_pool.t_max_ms, ms);
+    }
+    gs_log_dcis(job, out, n);
+  }
+}
+
+void golden_sniffer_update(WorkState& state, double now)
+{
+  if (!nrscope_gs_args.enable) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(gs_log_mutex);
+  /* C-RNTIs to the regular DCI decoders, with the scrambling ID read off the DM-RS. They
+    need the CORESET from an RRCSetup; until one was seen the RNTIs wait. */
+  if (state.rach_found && !gs_feeds.empty()) {
+    for (const GsFeed& f : gs_feeds) {
+      bool known = false;
+      for (uint16_t r : state.known_rntis) {
+        known |= r == f.rnti;
+      }
+      if (known) {
+        continue;
+      }
+      state.known_rntis.push_back(f.rnti);
+      state.last_seen.push_back(now);
+      state.nof_known_rntis++;
+      const auto& sp_ded = state.master_cell_group.sp_cell_cfg.sp_cell_cfg_ded;
+      if (f.n_rnti && sp_ded.init_dl_bwp_present && sp_ded.init_dl_bwp.pdcch_cfg_present &&
+          sp_ded.init_dl_bwp.pdcch_cfg.type().value == asn1::setup_release_opts::setup) {
+        for (const auto& cs : sp_ded.init_dl_bwp.pdcch_cfg.setup().ctrl_res_set_to_add_mod_list) {
+          if (cs.pdcch_dmrs_scrambling_id_present) {
+            state.pdcch_dmrs_ids_by_rnti[f.rnti][cs.ctrl_res_set_id] = f.n_id;
+          }
+        }
+      }
+      printf("GoldenSniffer: RNTI 0x%04x (N_ID %u) added to the DCI decoders\n", f.rnti, f.n_id);
+    }
+    gs_feeds.clear();
   }
   if (nrscope_gs_args.report_s > 0 && now - gs_last_report >= nrscope_gs_args.report_s) {
     if (gs_last_report > 0) {
@@ -210,9 +327,6 @@ void golden_sniffer_update(WorkState& state, const SlotResult& result, double no
 
 GoldenSnifferDecoder::~GoldenSnifferDecoder()
 {
-  if (gs != nullptr) {
-    gs_destroy(gs);
-  }
   if (ready) {
     srsran_ue_dl_nr_free(&ue_dl);
   }
@@ -307,18 +421,26 @@ int GoldenSnifferDecoder::Init(WorkState* state, cf_t* input0)
       css.push_back(fallback(bwp));
     }
   }
-  ga.css_sizes     = css.data();
-  ga.nof_css_sizes = (uint32_t)css.size();
-  gs               = gs_create(&ga);
-  if (gs == nullptr) {
-    ERROR("GoldenSniffer: could not create the searcher");
-    srsran_ue_dl_nr_free(&ue_dl);
-    return SRSRAN_ERROR;
-  }
+  /* The searcher pool, once for all workers (they all see the same cell) */
+  std::call_once(gs_pool.started, [&]() {
+    gs_pool.sizes          = nrscope_gs_args.dci_sizes;
+    gs_pool.css            = css;
+    gs_pool.args           = ga;
+    gs_pool.args.sizes     = gs_pool.sizes.data();
+    gs_pool.args.nof_sizes = (uint32_t)gs_pool.sizes.size();
+    gs_pool.args.css_sizes = gs_pool.css.data();
+    gs_pool.args.nof_css_sizes = (uint32_t)gs_pool.css.size();
+    gs_t* warm = gs_create(&gs_pool.args); // builds the shared GF(2) tables before the threads start
+    gs_destroy(warm);
+    for (uint32_t i = 0; i < std::max(1u, nrscope_gs_args.threads); i++) {
+      std::thread(gs_searcher_thread, i).detach();
+    }
+  });
   ready = true;
   printf("GoldenSniffer ready: grid of %u PRBs from CRB %u, point A at grid subcarrier %d, CORESET#0 at %d, PCI %u, "
          "CSS sizes",
          grid_carrier.nof_prb, first_crb, ref_crb0, ref_cs0, pci);
+  printf(" (%u searcher threads, queue %u slots)", nrscope_gs_args.threads, nrscope_gs_args.queue);
   for (uint32_t c : css) {
     printf(" %u", c);
   }
@@ -326,23 +448,29 @@ int GoldenSnifferDecoder::Init(WorkState* state, cf_t* input0)
   return SRSRAN_SUCCESS;
 }
 
-void GoldenSnifferDecoder::DecodeSlot(srsran_slot_cfg_t* slot, WorkState* state, SlotResult* result)
+void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state)
 {
   if (!ready) {
     return;
   }
-  /* one symbol more than searched: the duration detector compares it */
-  uint32_t mask[SRSRAN_MAX_PORTS] = {(1u << (nrscope_gs_args.max_duration + 1)) - 1u};
-  uint32_t done[SRSRAN_MAX_PORTS] = {};
+  /* Demodulate the PDCCH symbols here (cheap: a few FFTs) since the worker's buffer is
+    only valid during its slot, then hand a copy to the searchers. One symbol more than
+    searched: the duration detector compares it. */
+  const uint32_t nsym                    = nrscope_gs_args.max_duration + 1;
+  uint32_t       mask[SRSRAN_MAX_PORTS] = {(1u << nsym) - 1u};
+  uint32_t       done[SRSRAN_MAX_PORTS] = {};
   srsran_ue_dl_nr_estimate_fft_nrscope_symbols(&ue_dl, slot, arg_scs_grid, mask, done);
 
-  gs_slot_t s = {};
-  s.grid      = ue_dl.sf_symbols[0];
-  s.nof_sc    = grid_carrier.nof_prb * NRSCOPE_NSC_PER_RB_NR;
-  s.slot_idx  = slot->idx % slots_per_frame;
-  s.ref_crb0  = ref_crb0;
-  s.ref_cs0   = ref_cs0;
-  s.pci       = pci;
+  const uint32_t nof_sc = grid_carrier.nof_prb * NRSCOPE_NSC_PER_RB_NR;
+  GsJob          job;
+  job.sfn       = state->sfn;
+  job.slot_idx  = slot->idx % slots_per_frame;
+  job.nof_sc    = nof_sc;
+  job.nof_symb  = nsym;
+  job.first_crb = first_crb;
+  job.pci       = pci;
+  job.ref_crb0  = ref_crb0;
+  job.ref_cs0   = ref_cs0;
 
   /* Debug: GS_DUMP=<file> appends the searched symbols of every slot, as
     [sfn u32, slot u32, nof_sc u32, nof_symb u32, cf32 grid], for offline analysis */
@@ -354,29 +482,34 @@ void GoldenSnifferDecoder::DecodeSlot(srsran_slot_cfg_t* slot, WorkState* state,
       dump = fopen(getenv("GS_DUMP"), "wb");
     }
     if (dump != nullptr) {
-      uint32_t hdr[4] = {state->sfn, s.slot_idx, s.nof_sc, nrscope_gs_args.max_duration + 1};
+      uint32_t hdr[4] = {job.sfn, job.slot_idx, nof_sc, nsym};
       fwrite(hdr, sizeof(hdr), 1, dump);
-      fwrite(s.grid, sizeof(cf_t), (size_t)s.nof_sc * hdr[3], dump);
+      fwrite(ue_dl.sf_symbols[0], sizeof(cf_t), (size_t)nof_sc * nsym, dump);
     }
   }
 
-  gs_dci_t out[GS_MAX_DCI_PER_SLOT];
-  int      n = gs_search_slot(gs, &s, out, GS_MAX_DCI_PER_SLOT);
-  for (int i = 0; i < n; i++) {
-    GsDciResult r;
-    r.slot_idx  = s.slot_idx;
-    r.rnti      = out[i].rnti;
-    r.n_id      = out[i].n_id;
-    r.n_rnti    = out[i].n_rnti;
-    r.coreset0  = out[i].coreset0;
-    r.L         = out[i].L;
-    r.duration  = out[i].duration;
-    r.first_crb = first_crb + (uint32_t)out[i].cand.iv[0].first / NRSCOPE_NSC_PER_RB_NR;
-    r.nof_iv    = out[i].cand.nof_iv;
-    r.nof_bits  = out[i].nof_bits;
-    r.payload.assign(out[i].payload, out[i].payload + out[i].nof_bits);
-    r.evm  = out[i].evm;
-    r.epre = out[i].epre;
-    result->gs_dcis.push_back(std::move(r));
+  /* Replaying a file nothing is dropped: wait for room. Live, never wait: drop. */
+  while (nrscope_lossless.load(std::memory_order_relaxed) && !nrscope_stop.load(std::memory_order_relaxed)) {
+    {
+      std::lock_guard<std::mutex> lock(gs_pool.m);
+      if (gs_pool.q.size() < std::max(1u, nrscope_gs_args.queue)) {
+        break;
+      }
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(100));
   }
+  {
+    std::lock_guard<std::mutex> lock(gs_pool.m);
+    gs_pool.submitted++;
+    if (gs_pool.q.size() >= std::max(1u, nrscope_gs_args.queue)) {
+      gs_pool.dropped++;
+      return;
+    }
+  }
+  job.grid.assign(ue_dl.sf_symbols[0], ue_dl.sf_symbols[0] + (size_t)nof_sc * nsym);
+  {
+    std::lock_guard<std::mutex> lock(gs_pool.m);
+    gs_pool.q.push_back(std::move(job));
+  }
+  gs_pool.cv.notify_one();
 }
