@@ -90,7 +90,10 @@ cp -f msg4_bytes.log "$dir/" 2>/dev/null
   grep -E "GoldenSniffer: [0-9]+ DCIs" "$dir/nrscope.log" | tail -1
   sed -n "/execution time/,/latency: slot -> tracked/p" "$dir/nrscope.log"
   echo "UEs (RNTI, DCIs, sizes) seen at least 10 times:"
-  grep -E "^  RNTI 0x" "$dir/nrscope.log" | awk '$7+0 >= 10' | tail -40
+  # the last report only (one is printed every report_s): the RNTI lines after the last
+  # "GoldenSniffer: N DCIs" line
+  last=$(grep -nE "GoldenSniffer: [0-9]+ DCIs" "$dir/nrscope.log" | tail -1 | cut -d: -f1)
+  tail -n +"${last:-1}" "$dir/nrscope.log" | grep -E "^  RNTI 0x" | awk '$7+0 >= 10' | head -60
   echo "fallback states:"
   grep -cE "GoldenSniffer: UE .*-> CONVERGED" "$dir/nrscope.log" | sed "s/^/  converged: /"
   grep -cE "GoldenSniffer: UE .* discovered blind" "$dir/nrscope.log" | sed "s/^/  discovered: /"
