@@ -31,6 +31,7 @@
  *  - a decode needs min_parity (16) observed bits beyond the unknowns, not 8.
  */
 #include "gs_internal.h"
+#include "gs_ec.h"
 #include "srsran/phy/common/sequence.h"
 #include <math.h>
 #include <stdio.h>
@@ -55,6 +56,7 @@ void gs_args_default(gs_args_t* a)
   memset(a, 0, sizeof(*a));
   a->max_duration = 2;
   a->size_min     = 20;
+  a->soft         = 1;
   a->size_max     = 84;
   a->max_L_log2   = GS_MAX_L_LOG2;
   a->min_parity   = 16;
@@ -540,7 +542,8 @@ static void gs_equalize(const gs_slot_t* s, int32_t first, uint32_t len, uint32_
  * interpolated to the data REs; zero forcing. Unlike gs_equalize it does not ring at the
  * edges of wide candidates (AL8/16) and costs a few operations per RE. yeq: 3 len / 4. */
 #define GS_EQ_HALF 3
-static void gs_equalize_fast(const gs_slot_t* s, int32_t first, uint32_t len, uint32_t l, const cf_t* dm, cf_t* yeq)
+static void gs_equalize_fast(const gs_slot_t* s, int32_t first, uint32_t len, uint32_t l, const cf_t* dm, cf_t* yeq,
+                             float* w)
 {
   const uint32_t Nd = len / 4;
   const cf_t*    Y  = s->grid + l * s->nof_sc + first;
@@ -586,6 +589,9 @@ static void gs_equalize_fast(const gs_slot_t* s, int32_t first, uint32_t len, ui
     const float f = Nd >= 2 ? x - (float)i0 : 0.0f;
     cf_t        h = Nd >= 2 ? hs[i0] * (1.0f - f) + hs[i0 + 1] * f : hs[0];
     h *= cexpf(I * slope * (float)k);
+    if (w != NULL) {
+      w[m] = crealf(h * conjf(h)); /* the equalized RE's noise is 1/|h|^2 of the received one */
+    }
     yeq[m++] = cabsf(h) > 0 ? Y[k] / h : 0;
   }
 }
@@ -782,11 +788,15 @@ static bool gs_try_candidate(gs_t* q, const gs_slot_t* s, const gs_cand_t* c, ui
 
   /* n_RNTI = RNTI decodes are strong (the CRC must match the RNTI the scrambling
     used): the first one wins. n_RNTI = 0 decodes are weak across sizes (nested polar
-    codes): every size that solves is kept, and the one seen most often wins, the
-    smallest on a tie. */
+    codes): a DCI also solves each larger size with probability 2^-8, a smaller one with
+    2^-(8 + difference). The smallest size that solves wins, unless a larger one gives an
+    RNTI already known (gs_set_known_rnti) and the smallest does not. (The most frequent
+    size used to win: with many UEs of different sizes the histogram is flat and a wrong
+    larger size won, 1.9% of the DCIs of a 100-UE synthetic cell had a false RNTI.) */
   bool     have_weak = false;
   uint32_t weak_nb = 0, weak_count = 0;
   uint16_t weak_rnti = 0;
+  bool     weak_known = false;
   uint8_t  weak_payload[GS_MAX_DCI_BITS];
   uint8_t  payload[GS_MAX_DCI_BITS];
   bool     strong   = false;
@@ -818,12 +828,17 @@ static bool gs_try_candidate(gs_t* q, const gs_slot_t* s, const gs_cand_t* c, ui
         memcpy(out->payload, payload, nb);
         break;
       }
-      if (!have_weak || q->size_count[nb] > weak_count) {
-        have_weak  = true;
-        weak_nb    = nb;
-        weak_count = q->size_count[nb];
-        weak_rnti  = rnti;
-        memcpy(weak_payload, payload, nb);
+      {
+        const bool known = gs_known_rnti(rnti);
+        /* sizes are tried in ascending order (gs_create): the first is the smallest */
+        if (!have_weak || (known && !weak_known)) {
+          have_weak  = true;
+          weak_nb    = nb;
+          weak_count = q->size_count[nb];
+          weak_rnti  = rnti;
+          weak_known = known;
+          memcpy(weak_payload, payload, nb);
+        }
       }
       break; /* both hypotheses cannot hold */
     }
@@ -855,6 +870,26 @@ static bool gs_try_candidate(gs_t* q, const gs_slot_t* s, const gs_cand_t* c, ui
   q->size_count[final_nb]++;
   gs_learn_spacing(q, c);
   return true;
+}
+
+/* RNTIs GoldenSniffer knows (learned, converged or from the RACH): a bitset written by
+ * the scheduler, read by the searchers without a lock (a stale bit only changes which of
+ * two weak decodes is kept) */
+static uint64_t gs_known_bits[65536 / 64];
+
+void gs_set_known_rnti(uint16_t rnti, bool known)
+{
+  const uint64_t m = 1ULL << (rnti & 63);
+  if (known) {
+    __atomic_fetch_or(&gs_known_bits[rnti >> 6], m, __ATOMIC_RELAXED);
+  } else {
+    __atomic_fetch_and(&gs_known_bits[rnti >> 6], ~m, __ATOMIC_RELAXED);
+  }
+}
+
+bool gs_known_rnti(uint16_t rnti)
+{
+  return (__atomic_load_n(&gs_known_bits[rnti >> 6], __ATOMIC_RELAXED) >> (rnti & 63)) & 1;
 }
 
 static uint32_t gs_max_L_log2(const gs_t* q, uint32_t dur)
@@ -942,7 +977,8 @@ int gs_search_slot(gs_t* q, const gs_slot_t* s, gs_dci_t* out, uint32_t max_out)
 
 /* --------------------------------------------------------- tracked UE, no search */
 
-#define GS_TRACK_GATE 0.6f /* DM-RS correlation a candidate needs before it is decoded */
+#define GS_TRACK_GATE 0.6f
+#define GS_SOFT_MAX 8 /* soft decisions per group and slot, at most */ /* DM-RS correlation a candidate needs before it is decoded */
 
 int gs_decode_tracked(gs_t* q, const gs_slot_t* s, const gs_track_t* t, gs_dci_t* out, uint32_t max_out)
 {
@@ -1015,7 +1051,7 @@ int gs_decode_tracked(gs_t* q, const gs_slot_t* s, const gs_track_t* t, gs_dci_t
       cf_t*          yeq = q->yeq_iv[0];
       const uint32_t nre = 3 * (uint32_t)span / 4;
       for (uint32_t l = 0; l < dur; l++) {
-        gs_equalize_fast(s, first, (uint32_t)span, l, dm[l], yeq + l * nre);
+        gs_equalize_fast(s, first, (uint32_t)span, l, dm[l], yeq + l * nre, NULL);
       }
       uint32_t       E   = 0;
       double         err = 0, epre = 0;
@@ -1087,6 +1123,75 @@ static bool gs_track_has_size(const gs_track_t* t, uint32_t nb)
     }
   }
   return false;
+}
+
+/* Soft decision for one candidate of a tracked group that passed the DM-RS gate but whose
+ * hard decision solved no size: LLRs from the equalized REs weighted by |h|^2, the group's
+ * sizes smallest first, and only an RNTI of a tracked UE at one of its sizes is accepted
+ * (the soft decoder bounds false decodes at 2^-min_parity, the RNTI check adds 2^-16). */
+static int gs_tracked_soft(gs_t*             q,
+                           const gs_slot_t*  s,
+                           const gs_track_t* tracks,
+                           uint32_t          nt,
+                           const gs_track_t* t0,
+                           int32_t           ref,
+                           int32_t           cce,
+                           int32_t           first,
+                           int               Ll,
+                           const uint32_t*   sizes,
+                           uint32_t          nsz,
+                           gs_dci_t*         o)
+{
+  const uint32_t dur = t0->duration, span = (uint32_t)((1 << Ll) * cce), nre = 3 * span / 4;
+  const int32_t  k0  = first - ref;
+  static __thread float llr[108 << GS_MAX_L_LOG2];
+  static __thread float w[GS_MAX_DURATION * GS_MAX_SC * 3 / 4];
+  cf_t*                 yeq = q->yeq_iv[0];
+  for (uint32_t l = 0; l < dur; l++) {
+    gs_equalize_fast(s, first, span, l, q->cdm[l] + k0 / 4, yeq + l * nre, w + l * nre);
+  }
+  uint32_t E = 0;
+  for (uint32_t m = 0; m < dur * nre; m++) {
+    llr[E++] = crealf(yeq[m]) * w[m];
+    llr[E++] = cimagf(yeq[m]) * w[m];
+  }
+  if (E != (108U << Ll)) {
+    return 0;
+  }
+  for (uint32_t z = 0; z < nsz; z++) {
+    const uint32_t nb = sizes[z];
+    uint16_t       rnti;
+    float          metric;
+    if (!gs_gf2_size_valid(nb, (uint32_t)Ll) || nb + 16 + q->args.min_parity > E) {
+      continue;
+    }
+    if (!gs_dci_try_soft(q, llr, E, nb, t0->n_id, t0->n_rnti, t0->n_rnti ? GS_EC_EFFORT_MAX : GS_EC_EFFORT_AUTO,
+                         o->payload, &rnti, &metric)) {
+      continue;
+    }
+    for (uint32_t i = 0; i < nt; i++) {
+      const gs_track_t* t = &tracks[i];
+      if (t->rnti == rnti && gs_track_same_group(t0, t, ref, cce) && gs_track_has_size(t, nb)) {
+        o->slot_idx         = s->slot_idx;
+        o->duration         = dur;
+        o->L                = 1U << Ll;
+        o->cand.nof_iv      = 1;
+        o->cand.iv[0].first = first;
+        o->cand.iv[0].last  = first + (int32_t)span - 1;
+        o->coreset0         = t0->coreset0;
+        o->ref_ambiguous    = s->ref_cs0 != GS_NO_REF && s->ref_cs0 == s->ref_crb0;
+        o->n_id             = t0->n_id;
+        o->rnti             = rnti;
+        o->n_rnti           = t0->n_rnti;
+        o->nof_bits         = nb;
+        o->evm              = -1.0f; /* found by the soft decision */
+        o->epre             = 0;
+        return 1;
+      }
+    }
+    return 0; /* the smallest size that solves is the DCI: another RNTI, not ours */
+  }
+  return 0;
 }
 
 int gs_decode_tracked_multi(gs_t*             q,
@@ -1190,6 +1295,12 @@ int gs_decode_tracked_multi(gs_t*             q,
 
     int32_t used_lo[GS_MAX_DCI_PER_SLOT], used_hi[GS_MAX_DCI_PER_SLOT];
     uint32_t nused = 0;
+    struct {
+      int32_t first;
+      int     Ll;
+      float   gate;
+    } soft_cand[64];
+    uint32_t nsoft = 0;
     for (int Ll = GS_MAX_L_LOG2; Ll >= 0 && nof < max_out; Ll--) {
       if (!((al_mask >> Ll) & 1U)) {
         continue;
@@ -1234,7 +1345,7 @@ int gs_decode_tracked_multi(gs_t*             q,
         cf_t*          yeq = q->yeq_iv[0];
         const uint32_t nre = 3 * (uint32_t)span / 4;
         for (uint32_t l = 0; l < dur; l++) {
-          gs_equalize_fast(s, first, (uint32_t)span, l, q->cdm[l] + k0 / 4, yeq + l * nre);
+          gs_equalize_fast(s, first, (uint32_t)span, l, q->cdm[l] + k0 / 4, yeq + l * nre, NULL);
         }
         uint32_t E   = 0;
         double   err = 0, epre = 0;
@@ -1281,7 +1392,16 @@ int gs_decode_tracked_multi(gs_t*             q,
             memcpy(out[nof].payload, pay, nb);
           }
         }
-        if (best < 0 || (best == 0 && !want_untracked)) {
+        if (best < 0) {
+          if (q->args.soft && nsoft < 64) {
+            soft_cand[nsoft].first = first;
+            soft_cand[nsoft].Ll    = Ll;
+            soft_cand[nsoft].gate  = (float)(num / den);
+            nsoft++;
+          }
+          continue;
+        }
+        if (best == 0 && !want_untracked) {
           continue;
         }
         gs_dci_t* o         = &out[nof];
@@ -1300,6 +1420,37 @@ int gs_decode_tracked_multi(gs_t*             q,
         o->evm              = (float)sqrt(err / (double)(nre * dur));
         o->epre             = (float)(epre / ((double)span * dur));
         tracked[nof]        = (uint8_t)best;
+        if (nused < GS_MAX_DCI_PER_SLOT) {
+          used_lo[nused]   = first;
+          used_hi[nused++] = first + span - 1;
+        }
+        nof++;
+      }
+    }
+    /* soft pass: the candidates with the best DM-RS gate first, at most GS_SOFT_MAX, none
+      overlapping a DCI already found */
+    for (uint32_t done_soft = 0; done_soft < GS_SOFT_MAX && nof < max_out;) {
+      int bi = -1;
+      for (uint32_t i = 0; i < nsoft; i++) {
+        if (soft_cand[i].gate > 0 && (bi < 0 || soft_cand[i].gate > soft_cand[bi].gate)) {
+          bi = (int)i;
+        }
+      }
+      if (bi < 0) {
+        break;
+      }
+      const int32_t first = soft_cand[bi].first, span = (1 << soft_cand[bi].Ll) * cce;
+      soft_cand[bi].gate  = 0;
+      bool overlap        = false;
+      for (uint32_t i = 0; i < nused && !overlap; i++) {
+        overlap = first <= used_hi[i] && first + span - 1 >= used_lo[i];
+      }
+      if (overlap) {
+        continue;
+      }
+      done_soft++;
+      if (gs_tracked_soft(q, s, tracks, nt, t0, ref, cce, first, soft_cand[bi].Ll, sizes, nsz, &out[nof])) {
+        tracked[nof] = 1;
         if (nused < GS_MAX_DCI_PER_SLOT) {
           used_lo[nused]   = first;
           used_hi[nused++] = first + span - 1;

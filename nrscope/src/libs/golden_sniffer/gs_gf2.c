@@ -21,6 +21,8 @@
  * pivot form here stores K x E bits instead.
  */
 #include "gs_internal.h"
+#include "gs_ec.h"
+extern int gs_ec_no_lazy;
 #include "srsran/phy/common/phy_common.h"
 #include "srsran/phy/common/sequence.h"
 #include "srsran/phy/fec/crc.h"
@@ -460,6 +462,25 @@ static void* gs_prebuild_thread(void* arg)
   }
   __atomic_store_n(&gs_gf2_background, 0, __ATOMIC_RELEASE);
   clock_gettime(CLOCK_MONOTONIC, &t1);
+  /* then the soft-decision tables (gs_ec.c), in the same order */
+  for (uint32_t i = 0; i < a->nof_first; i++) {
+    if (a->first[i] <= GS_MAX_DCI_BITS) {
+      gs_ec_prepare(a->first[i]);
+    }
+  }
+  for (int d = 0; d <= GS_MAX_DCI_BITS; d++) {
+    for (int sgn = 0; sgn < 2; sgn++) {
+      const int N = sgn ? c - d : c + d;
+      if ((sgn && d == 0) || N < (int)a->size_min || N > (int)a->size_max) {
+        continue;
+      }
+      gs_ec_prepare((uint32_t)N);
+    }
+  }
+  struct timespec t2;
+  clock_gettime(CLOCK_MONOTONIC, &t2);
+  printf("GoldenSniffer: soft-decision tables built in %.1f s more (background)\n",
+         (double)(t2.tv_sec - t1.tv_sec) + 1e-9 * (double)(t2.tv_nsec - t1.tv_nsec));
   printf("GoldenSniffer: GF(2) tables for DCI sizes %u..%u built in %.1f s (background)\n", a->size_min, a->size_max,
          (double)(t1.tv_sec - t0.tv_sec) + 1e-9 * (double)(t1.tv_nsec - t0.tv_nsec));
   return NULL;
@@ -474,6 +495,7 @@ int gs_gf2_prebuild_start(uint32_t size_min, uint32_t size_max, const uint32_t* 
     gs_prebuild_a.first[gs_prebuild_a.nof_first++] = first[i];
   }
   __atomic_store_n(&gs_gf2_background, 1, __ATOMIC_RELEASE);
+  __atomic_store_n(&gs_ec_no_lazy, 1, __ATOMIC_RELEASE);
   pthread_t th;
   if (pthread_create(&th, NULL, gs_prebuild_thread, NULL) != 0) {
     __atomic_store_n(&gs_gf2_background, 0, __ATOMIC_RELEASE);

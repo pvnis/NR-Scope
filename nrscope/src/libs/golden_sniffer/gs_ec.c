@@ -297,12 +297,27 @@ static ec_entry_t* ec_entry_build(uint32_t N, uint32_t Ll)
   return e;
 }
 
+/* Once a background build has started (gs_gf2_prebuild_start), tables are built there
+   only: a caller never builds nor waits, a table not ready means no correction. */
+int gs_ec_no_lazy = 0;
+
+static const ec_entry_t* ec_entry_build_locked(uint32_t N, uint32_t Ll);
+
 static const ec_entry_t* ec_entry_get(uint32_t N, uint32_t Ll)
 {
   ec_entry_t* e = __atomic_load_n(&ec_tab[N][Ll], __ATOMIC_ACQUIRE);
   if (e != NULL) {
     return e;
   }
+  if (__atomic_load_n(&gs_ec_no_lazy, __ATOMIC_ACQUIRE)) {
+    return NULL;
+  }
+  return ec_entry_build_locked(N, Ll);
+}
+
+static const ec_entry_t* ec_entry_build_locked(uint32_t N, uint32_t Ll)
+{
+  ec_entry_t* e;
   pthread_mutex_lock(&ec_mutex);
   e = ec_tab[N][Ll];
   if (e == NULL) {
@@ -320,7 +335,7 @@ void gs_ec_prepare(uint32_t N)
   }
   for (uint32_t Ll = 0; Ll <= GS_MAX_L_LOG2; Ll++) {
     if (gs_gf2_size_valid(N, Ll)) {
-      ec_entry_get(N, Ll);
+      ec_entry_build_locked(N, Ll);
     }
   }
 }

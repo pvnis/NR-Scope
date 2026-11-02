@@ -95,6 +95,7 @@ typedef struct {
    * decode to count: a wrong candidate solves with probability 2^-(parity bits). The
    * MATLAB allows 8, which at AL1 and large sizes gave false DCIs; default 16. */
   uint32_t min_parity;
+  uint32_t soft;           /* soft-decision error correction in the tracked decode (gs_ec.c) */
 } gs_args_t;
 
 typedef struct {
@@ -193,6 +194,11 @@ void gs_unwrap_qpsk(const cf_t* y, uint32_t n, cf_t* y_corr);
 /* Builds every GF(2) table (sizes size_min..size_max, every AL; `first` sizes first) in a
  * background thread at idle priority. Until it is done gs_dci_try never builds or waits:
  * a table not ready yet fails that (size, AL), so real-time threads never stall on it. */
+/* RNTIs known to the caller (tracked, learned, from the RACH): among weak (n_RNTI = 0)
+ * decodes of one candidate at several sizes, a known RNTI wins over the smallest size */
+void gs_set_known_rnti(uint16_t rnti, bool known);
+bool gs_known_rnti(uint16_t rnti);
+
 int  gs_gf2_prebuild_start(uint32_t size_min, uint32_t size_max, const uint32_t* first, uint32_t nof_first);
 bool gs_gf2_prebuild_done(void);
 

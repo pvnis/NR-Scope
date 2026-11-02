@@ -389,6 +389,9 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
   if (g["searcher_idle"]) {
     a.searcher_idle = g["searcher_idle"].as<bool>();
   }
+  if (g["soft"]) {
+    a.soft = g["soft"].as<bool>();
+  }
   if (g["quiet_s"]) {
     a.quiet_s = g["quiet_s"].as<double>();
   }
@@ -995,9 +998,12 @@ void golden_sniffer_update(WorkState&                   state,
       if (e.state != BlindUe::RRC) {
         printf("GoldenSniffer: UE 0x%04x %s dropped (not seen for %.1f s)\n", rnti, state_name(e.state), now - last);
       }
+      gs_set_known_rnti(rnti, false);
       it = ues.erase(it);
       continue;
     }
+    /* known to the searchers once seen a few times (one-off false RNTIs are not) */
+    gs_set_known_rnti(rnti, known || e.state == BlindUe::CONVERGED || e.hits >= 3);
     any_learning  = any_learning || e.state == BlindUe::STALE || e.state == BlindUe::DISCOVERED || e.shadow ||
                    (e.state != BlindUe::RRC && now - e.armed_at < a.arm_s);
     any_converged = any_converged || e.state == BlindUe::CONVERGED;
@@ -1145,6 +1151,7 @@ int GoldenSnifferDecoder::Init(WorkState* state, cf_t* input0)
   gs_args_t ga;
   gs_args_default(&ga);
   ga.size_min = nrscope_gs_args.size_min;
+  ga.soft     = nrscope_gs_args.soft ? 1 : 0;
   ga.size_max = nrscope_gs_args.size_max;
   ga.max_duration = nrscope_gs_args.max_duration;
   ga.min_parity   = nrscope_gs_args.min_parity;

@@ -1040,6 +1040,163 @@ static void test_soft(void)
   tx_free(&tx);
 }
 
+
+/* 8. Tracked decode vs SNR, hard decision only and with the soft-decision pass (gs_ec.c):
+ * 10 tracked UEs in a 102-RB CORESET, 1-4 DCIs per slot at AL1-8, PCI or
+ * pdcch-DMRS-ScramblingID scrambling, zero-mean AWGN at Es/N0 per RE, a phase slope.
+ * Noise-only slots too, with 200 tracks: nothing may come out of them. */
+static void test_tracked_snr(void)
+{
+  tx_t           tx;
+  const uint32_t nprb = 106, NT = 10;
+  tx_init(&tx, nprb, 0);
+  uint16_t rnti[10];
+  uint32_t dl[10], ul[10];
+  for (uint32_t u = 0; u < NT; u++) {
+    rnti[u] = (uint16_t)(0x5101 + 13 * u);
+    dl[u]   = u % 2 ? 47 : 55;
+    ul[u]   = u % 2 ? 43 : 51;
+  }
+  static const float snrs[] = {2, 4, 6, 8, 10, 12};
+  printf("8. Tracked decode vs SNR (Es/N0 per RE), %u tracked UEs, AL1-8, 300 slots per point:\n", NT);
+  printf("     SNR   hard: found / placed (wrong)   soft: found / placed (wrong)   ms/slot hard soft\n");
+  int false_total = 0, wrong_total = 0, gain_ok = 1;
+  for (uint32_t si = 0; si < sizeof(snrs) / sizeof(snrs[0]); si++) {
+    int    placed = 0, found[2] = {0, 0}, wrong[2] = {0, 0};
+    double tm[2] = {0, 0};
+    for (int t = 0; t < 300; t++) {
+      const bool     scr = t & 1;
+      const uint32_t dur = 1 + ((t >> 1) & 1), slot = rint_(0, 19), pci = rint_(0, 1007);
+      const uint32_t n_id = scr ? (uint32_t)rint_(0, 65535) : pci;
+      tx.carrier.pci      = pci;
+      memset(&tx.coreset, 0, sizeof(tx.coreset));
+      tx.coreset.id                         = 1;
+      tx.coreset.duration                   = dur;
+      tx.coreset.dmrs_scrambling_id_present = scr;
+      tx.coreset.dmrs_scrambling_id         = n_id;
+      for (uint32_t r = 0; r < 17; r++) {
+        tx.coreset.freq_resources[r] = true;
+      }
+      srsran_vec_cf_zero(tx.grid, nprb * 12 * 14);
+      const uint32_t n_cce    = 17 * dur;
+      bool           busy[64] = {false};
+      struct {
+        uint32_t u, L, ncce, nb;
+        uint8_t  pay[128];
+        bool     hit[2];
+      } ex[4];
+      uint32_t nex = 0;
+      bool     used_u[10] = {false};
+      for (uint32_t k = 0, want = (uint32_t)rint_(1, 4); k < want; k++) {
+        uint32_t u = (uint32_t)rint_(0, NT - 1);
+        if (used_u[u]) {
+          continue;
+        }
+        uint32_t Ll = (uint32_t)rint_(0, 3), L = 1U << Ll;
+        if (L > n_cce) {
+          continue;
+        }
+        uint32_t ncce  = L * (uint32_t)rint_(0, n_cce / L - 1);
+        bool     free_ = true;
+        for (uint32_t c = ncce; c < ncce + L; c++) {
+          free_ = free_ && !busy[c];
+        }
+        if (!free_) {
+          continue;
+        }
+        uint32_t nb = rint_(0, 1) ? dl[u] : ul[u];
+        if (tx_put(&tx, slot, Ll, ncce, srsran_search_space_type_ue, rnti[u], nb, ex[nex].pay) < 0) {
+          continue;
+        }
+        for (uint32_t c = ncce; c < ncce + L; c++) {
+          busy[c] = true;
+        }
+        used_u[u]     = true;
+        ex[nex].u     = u;
+        ex[nex].L     = L;
+        ex[nex].ncce  = ncce;
+        ex[nex].nb    = nb;
+        ex[nex].hit[0] = ex[nex].hit[1] = false;
+        nex++;
+        placed++;
+      }
+      const float sigma = powf(10.0f, -snrs[si] / 20.0f) * (float)M_SQRT1_2;
+      const float ph = srsran_random_uniform_real_dist(rnd, -M_PI, M_PI), tau = srsran_random_uniform_real_dist(rnd, -2, 2) / 1024.0f;
+      for (uint32_t l = 0; l < 3; l++) {
+        for (uint32_t k = 0; k < nprb * 12; k++) {
+          cf_t h = cexpf(I * (ph + 0.2f * l + 2.0f * (float)M_PI * tau * k));
+          cf_t n = sigma * (ec_gauss() + I * ec_gauss());
+          tx.grid[l * nprb * 12 + k] = tx.grid[l * nprb * 12 + k] * h + n;
+        }
+      }
+      gs_slot_t  sl = {.grid = tx.grid, .nof_sc = nprb * 12, .slot_idx = slot, .ref_crb0 = 0, .ref_cs0 = GS_NO_REF, .pci = pci};
+      gs_track_t tr[10];
+      for (uint32_t i = 0; i < NT; i++) {
+        tr[i] = (gs_track_t){.rnti = rnti[i], .n_id = n_id, .n_rnti = scr, .coreset0 = false, .sc_lo = 0,
+                             .sc_hi = (int32_t)(72 / dur) - 1, .duration = dur, .al_mask = 1, .sizes = {dl[i], ul[i]},
+                             .nof_sizes = 2};
+      }
+      for (int soft = 0; soft < 2; soft++) {
+        gs_args_t args;
+        gs_args_default(&args);
+        args.soft = (uint32_t)soft;
+        gs_t*    gs = gs_create(&args);
+        gs_dci_t out[16];
+        uint8_t  trk[16];
+        double   t0 = now_s();
+        int      n  = gs_decode_tracked_multi(gs, &sl, tr, NT, true, false, out, trk, 16);
+        tm[soft] += now_s() - t0;
+        for (int i = 0; i < n; i++) {
+          bool ok = false;
+          for (uint32_t k = 0; k < nex && !ok; k++) {
+            if (!ex[k].hit[soft] && out[i].rnti == rnti[ex[k].u] && out[i].nof_bits == ex[k].nb && out[i].L == ex[k].L &&
+                out[i].cand.iv[0].first == (int32_t)(ex[k].ncce * 72 / dur) &&
+                memcmp(out[i].payload, ex[k].pay, ex[k].nb) == 0) {
+              ex[k].hit[soft] = ok = true;
+              found[soft]++;
+            }
+          }
+          wrong[soft] += !ok;
+        }
+        gs_destroy(gs);
+      }
+    }
+    printf("   %4.0f dB   %5d / %5d (%d)  %5.1f%%        %5d / %5d (%d)  %5.1f%%      %.3f %.3f\n", snrs[si], found[0],
+           placed, wrong[0], 100.0 * found[0] / placed, found[1], placed, wrong[1], 100.0 * found[1] / placed,
+           1e3 * tm[0] / 300, 1e3 * tm[1] / 300);
+    wrong_total += wrong[0] + wrong[1];
+    gain_ok = gain_ok && found[1] >= found[0];
+  }
+  /* noise only, 200 tracks of random RNTIs and every size pair */
+  {
+    gs_args_t args;
+    gs_args_default(&args);
+    gs_t*      gs = gs_create(&args);
+    gs_track_t tr[200];
+    for (uint32_t i = 0; i < 200; i++) {
+      tr[i] = (gs_track_t){.rnti = (uint16_t)(0x4601 + 97 * i), .n_id = 500, .n_rnti = i & 1, .coreset0 = false,
+                           .sc_lo = 0, .sc_hi = 71, .duration = 1, .al_mask = 1, .sizes = {41 + (i % 8) * 4, 39 + (i % 7) * 5},
+                           .nof_sizes = 2};
+    }
+    for (int t = 0; t < 400; t++) {
+      for (uint32_t k = 0; k < nprb * 12 * 3; k++) {
+        tx.grid[k] = (float)M_SQRT1_2 * (ec_gauss() + I * ec_gauss());
+      }
+      gs_slot_t sl = {.grid = tx.grid, .nof_sc = nprb * 12, .slot_idx = (uint32_t)(t % 20), .ref_crb0 = 0,
+                      .ref_cs0 = GS_NO_REF, .pci = 500};
+      gs_dci_t  out[16];
+      uint8_t   trk[16];
+      false_total += gs_decode_tracked_multi(gs, &sl, tr, 200, true, false, out, trk, 16);
+    }
+    gs_destroy(gs);
+    printf("   noise only: %d DCI(s) out of 400 slots x 200 tracks (soft on)\n", false_total);
+  }
+  CHECK(wrong_total == 0, "tracked vs SNR: %d wrong", wrong_total);
+  CHECK(false_total == 0, "tracked vs SNR: %d on noise", false_total);
+  CHECK(gain_ok, "tracked vs SNR: soft found fewer than hard");
+  tx_free(&tx);
+}
+
 int main(int argc, char** argv)
 {
   uint32_t seed = argc > 1 ? (uint32_t)atoi(argv[1]) : 1234;
@@ -1070,6 +1227,9 @@ int main(int argc, char** argv)
   }
   if (only == 0 || only == 7) {
     test_tracked_multi();
+  }
+  if (only == 0 || only == 8) {
+    test_tracked_snr();
   }
 
   srsran_random_free(rnd);
