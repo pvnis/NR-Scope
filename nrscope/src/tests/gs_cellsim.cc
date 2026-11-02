@@ -75,6 +75,7 @@ static const KeyDoc keys_doc[] = {
     {"gs_csv", "golden_sniffer.csv", "golden_sniffer.csv path written into the YAML"},
     {"gs_mode", "always", "golden_sniffer mode written into the YAML (always|fallback)"},
     {"nof_workers", "2", "NR-Scope workers written into the YAML"},
+    {"gs_yaml_extra", "", "more golden_sniffer keys for the YAML, ';' separated (e.g. startup_s: 2; scan_period_s: 5)"},
     {"scs_khz", "15", "subcarrier spacing of SSB, CORESET#0 and the carrier (15|30)"},
     {"nof_prb", "106", "carrier bandwidth in PRB (106 = 20 MHz @15 kHz, 51 = 20 MHz @30 kHz, 106 = 40 MHz @30, 273 = 100 MHz @30)"},
     {"srate_hz", "0", "sampling rate (0: smallest standard FFT size that holds the carrier)"},
@@ -96,6 +97,7 @@ static const KeyDoc keys_doc[] = {
     {"dmrs_typeA_pos", "0", "MIB dmrs-TypeA-Position (2|3; 0: 3 if CORESET#0 has 3 symbols, else 2)"},
     {"sib1_period_frames", "2", "SIB1 sent every this many frames (in the Type0 occasions)"},
     {"sib1_al", "4", "aggregation level of the SIB1 DCI"},
+    {"sib1_ncce", "0", "first CCE of the SIB1 DCI (a Type0 CSS candidate: a multiple of N_CCE / candidates)"},
     {"sib1_mcs", "2", "SIB1 PDSCH MCS (raised if the SIB1 does not fit)"},
     {"cs1_rb_start", "0", "CORESET 1 first CRB (multiple of 6)"},
     {"cs1_nof_rb", "0", "CORESET 1 width in RB (multiple of 6; 0: the whole carrier)"},
@@ -939,7 +941,7 @@ static bool sib1_grant(Sim& s, uint32_t slot, uint32_t rb_start, uint32_t nof_rb
 {
   srsran_dci_dl_nr_t dci        = {};
   dci.ctx.location.L            = (uint32_t)std::log2((double)iget("sib1_al"));
-  dci.ctx.location.ncce         = 0;
+  dci.ctx.location.ncce         = (uint32_t)iget("sib1_ncce");
   dci.ctx.ss_type               = srsran_search_space_type_common_0;
   dci.ctx.coreset_id            = 0;
   dci.ctx.coreset_start_rb      = 0;
@@ -1355,6 +1357,9 @@ int main(int argc, char** argv)
             out_path.c_str(), out_abs.c_str(), c.srate, c.ssb_freq, c.fc_rx, c.band, c.srate, c.srate, c.mu,
             iget("nof_workers"), out_path.c_str(), std::max(2u, std::max(c.cs0_dur, c.cs1.duration)), mode.c_str(),
             sget("gs_csv").c_str());
+    for (auto& e : split(sget("gs_yaml_extra"), ';')) {
+      fprintf(y, "  %s\n", e.c_str());
+    }
     fclose(y);
   }
 
