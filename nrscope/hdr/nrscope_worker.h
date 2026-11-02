@@ -25,6 +25,7 @@ public:
   SIBsDecoder sibs_decoder;
   GoldenSnifferDecoder gs_decoder;
   bool                 gs_inited = false;
+  bool                 dci_init_failed = false; // InitDCIDecoders failed: do not retry every slot
   std::vector<std::unique_ptr <DCIDecoder> > dci_decoders;
   bool initializing;
 

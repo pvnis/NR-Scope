@@ -37,6 +37,13 @@ static struct {
 } sib_search_stats = {{}, 0, 0, 0, -INFINITY, -INFINITY, 0, 0, 0};
 
 SIBsDecoder::SIBsDecoder(){
+  /* The srsRAN UE DL arguments are only partly set below; the rest (pdsch.max_layers and
+    pdsch.max_prb among them) held whatever was on the heap. srsran_pdsch_nr_init_ue then
+    allocated per-layer buffers for a garbage layer count, past the end of its 4-entry
+    array: "pdsch_nr.c: Malloc", "Error UE DL", heap corruption. Zero means "size them
+    from the carrier", which set_carrier then does. */
+  ue_dl_args = {};
+
   /* NR-Scope fills only some fields of the higher-layer PDSCH config and
     leaves the rest (the NZP/ZP CSI-RS sets among them) as "not configured".
     Without this they held whatever was on the heap, and the grant conversion

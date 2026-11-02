@@ -71,7 +71,7 @@ public:
 
   int UpdateStateandLog();
 
-  int UpdatewithResult(SlotResult now_result);
+  int UpdatewithResult(const SlotResult& now_result);
 
   void UpdateNextResult();
 

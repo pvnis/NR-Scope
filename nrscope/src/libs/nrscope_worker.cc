@@ -351,9 +351,18 @@ void NRScopeWorker::Run()
       worker_state.rach_inited = true;
     }
 
-    if (!worker_state.dci_inited && worker_state.rach_found) {
-      InitDCIDecoders();
-      worker_state.dci_inited = true;
+    /* A failed init must not leave the DCI path running on decoders that were never
+      built: the threads below index dci_decoders, and on a failure it is short or empty.
+      That stalled the whole pipeline (1-30 slots/s) whenever a UE attached. Report it
+      once and leave the per-UE path off in this worker; SIB, RACH, GoldenSniffer go on. */
+    if (!worker_state.dci_inited && !dci_init_failed && worker_state.rach_found) {
+      if (InitDCIDecoders() == SRSRAN_SUCCESS && dci_decoders.size() >= worker_state.nof_threads) {
+        worker_state.dci_inited = true;
+      } else {
+        dci_init_failed = true;
+        ERROR("Worker %u: DCI decoders failed to initialise; per-UE DCI decoding off in this worker",
+              (unsigned)worker_id);
+      }
     }
 
     /* GoldenSniffer needs only SIB1 (the carrier and the TDD pattern), no RACH */
@@ -465,7 +474,7 @@ void NRScopeWorker::Run()
 
     /* Post the result into the result queue*/
     queue_lock.lock();
-    global_slot_results.push_back(slot_result);
+    global_slot_results.push_back(std::move(slot_result)); // no copy of its ASN.1 members
     queue_lock.unlock();
     queue_cv.notify_one();
     // worker_locks[worker_id].lock();

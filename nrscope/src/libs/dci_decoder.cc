@@ -13,6 +13,12 @@ DCIDecoder::DCIDecoder(uint32_t max_nof_rntis)
     then "Error in resource mapping" and a grant cut short. */
   pdsch_hl_cfg = {};
   pusch_hl_cfg = {};
+  /* The srsRAN UE DL arguments are only partly set below; the rest (pdsch.max_layers and
+    pdsch.max_prb among them) held whatever was on the heap. srsran_pdsch_nr_init_ue then
+    allocated per-layer buffers for a garbage layer count, past the end of its 4-entry
+    array: "pdsch_nr.c: Malloc", "Error UE DL", heap corruption. Zero means "size them
+    from the carrier", which set_carrier then does. */
+  ue_dl_args = {};
 
   ue_dl_tmp = (srsran_ue_dl_nr_t*)malloc(sizeof(srsran_ue_dl_nr_t));
   slot_tmp  = (srsran_slot_cfg_t*)malloc(sizeof(srsran_slot_cfg_t));

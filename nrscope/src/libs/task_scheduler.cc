@@ -206,7 +206,7 @@ int TaskSchedulerNRScope::DecodeMIB(cell_searcher_args_t*          args_t_,
   return SRSRAN_SUCCESS;
 }
 
-int TaskSchedulerNRScope::UpdatewithResult(SlotResult now_result)
+int TaskSchedulerNRScope::UpdatewithResult(const SlotResult& now_result)
 {
   task_scheduler_lock.lock();
   double now = get_now_timestamp_in_double();
@@ -530,29 +530,23 @@ int TaskSchedulerNRScope::UpdateStateandLog()
 {
   /* Right now there is no re-order function,
     just update the state and log*/
-  std::sort(slot_results.begin(), slot_results.end());
-  // std::cout << "expected sf_round: " << next_result.sf_round << std::endl;
-  // std::cout << "expected sfn: " << next_result.outcome.sfn << std::endl;
-  // std::cout << "expected slot: " << next_result.slot.idx << std::endl;
-  // for (unsigned long int i = 0; i < slot_results.size(); i++) {
-  //   std::cout << i << ", sfn: " << slot_results[i].outcome.sfn << std::endl;
-  //   std::cout << i << ", sf_round: " << slot_results[i].sf_round << std::endl;
-  //   std::cout << i << ", slot: " << slot_results[i].slot.idx << std::endl;
-  // }
-  while ( //(slot_results[0] < next_result || slot_results[0] == next_result) &&
-      slot_results.size() > 0) {
-    // if (slot_results[0] < next_result){
-    //   slot_results.erase(slot_results.begin());
-    //   continue;
-    // } else if (slot_results[0] == next_result){
-    SlotResult now_result = slot_results[0];
-    UpdatewithResult(now_result);
-    slot_results.erase(slot_results.begin());
-    UpdateNextResult();
-    // } else {
-    //   break;
-    // }
+  /* In slot order, without moving or copying the results: a SlotResult holds SIB1,
+    an RRCSetup and a CellGroupConfig by value, and srsRAN's ASN.1 types copy their
+    dynamic arrays even when moved. Sorting the results, copying each one out and
+    erasing it from the front of the vector made this quadratic in the backlog with a
+    heavy constant: once behind, the results thread fell further behind, and the
+    whole pipeline ran at 1-30 slots/s (seen when a UE attached). */
+  std::vector<uint32_t> order(slot_results.size());
+  for (uint32_t i = 0; i < order.size(); i++) {
+    order[i] = i;
   }
+  std::sort(order.begin(), order.end(),
+            [this](uint32_t a, uint32_t b) { return slot_results[a] < slot_results[b]; });
+  for (uint32_t i : order) {
+    UpdatewithResult(slot_results[i]);
+    UpdateNextResult();
+  }
+  slot_results.clear();
   return SRSRAN_SUCCESS;
 }
 
@@ -587,7 +581,8 @@ void TaskSchedulerNRScope::Run()
       queue_cv.wait(lock, [] { return !global_slot_results.empty(); });
       incoming.swap(global_slot_results);
     }
-    slot_results.insert(slot_results.end(), incoming.begin(), incoming.end());
+    slot_results.insert(
+        slot_results.end(), std::make_move_iterator(incoming.begin()), std::make_move_iterator(incoming.end()));
     incoming.clear();
 
     /* reorder the local slot_results and
