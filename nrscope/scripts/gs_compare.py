@@ -19,6 +19,17 @@ everything after a gap or a resync longer than 5.12 s in the wrong wrap.
 --wrap-by-sfn falls back to continuity.
 
 usage: gs_compare.py gnb.log golden_sniffer.csv [--scs-khz 15] [--rnti 0x4601,0x4602]
+
+Ground truth instead of a gNB log (the CSV that nrscope/src/tests/gs_cellsim writes, one
+row per DCI placed: abs_slot, sfn, slot, rnti, dir, format, size, al, ...):
+       gs_compare.py --truth truth.csv golden_sniffer.csv [--summary]
+The same matching and report, plus per format whether the DCI size agrees, and a TOTAL
+line over all the RNTIs. The RNTIs scored are the truth's C-RNTIs and every C-RNTI in the
+CSV (so a UE never found shows up as 0 %, and a C-RNTI never sent as a false one).
+"found" is the gNB-log matching (a DCI of that RNTI reported in that slot); "exact" also
+requires the same direction (first bit) and size, i.e. this very DCI. SFN
+wraps are resolved by continuity (the truth has no wall clock); the SCS is taken from the
+truth's slot numbers unless --scs-khz is given. --summary prints only the TOTAL lines.
 """
 import argparse
 import csv
@@ -27,12 +38,24 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
 ap = argparse.ArgumentParser()
-ap.add_argument("log")
-ap.add_argument("csv")
-ap.add_argument("--scs-khz", type=int, default=15)
+ap.add_argument("log", help="gNB log (or, with --truth, the golden_sniffer.csv)")
+ap.add_argument("csv", nargs="?")
+ap.add_argument("--truth", default="", help="gs_cellsim ground-truth CSV, instead of a gNB log")
+ap.add_argument("--summary", action="store_true", help="with --truth: only the TOTAL lines")
+ap.add_argument("--scs-khz", type=int, default=0, help="default 15, or from the truth's slots")
 ap.add_argument("--rnti", default="", help="comma separated; default: every C-RNTI in the CSV")
 ap.add_argument("--wrap-by-sfn", action="store_true", help="resolve SFN wraps by continuity, not by the clocks")
 a = ap.parse_args()
+if a.truth:
+    if a.csv is None:
+        a.csv, a.log = a.log, None
+    elif a.log is not None:
+        ap.error("--truth takes the golden_sniffer.csv only")
+elif a.csv is None:
+    ap.error("gnb.log and golden_sniffer.csv are both needed")
+truth_rows = list(csv.DictReader(open(a.truth))) if a.truth else []
+if not a.scs_khz:
+    a.scs_khz = 30 if any(int(r["slot"]) >= 10 for r in truth_rows) else 15
 spf = 10 * a.scs_khz // 15
 
 line_re = re.compile(r"\[\s*(\d+)\.(\d+)\]\s+PDCCH:\s+rnti=(0x[0-9a-fA-F]+).*?format=(\S+).*?al=(\d+)")
@@ -72,13 +95,13 @@ sent, sent_tf = [], []
 sched, sched_tf = [], []
 uw = unwrapper()
 uw2 = unwrapper()
-for line in open(a.log, errors="replace"):
+for line in (open(a.log, errors="replace") if not a.truth else []):
     if "PDCCH:" in line:
         m = line_re.search(line)
         if not m:
             continue
         sfn, slot = int(m.group(1)), int(m.group(2))
-        sent.append((uw(sfn) * spf + slot, m.group(3).lower(), m.group(4), int(m.group(5))))
+        sent.append((uw(sfn) * spf + slot, m.group(3).lower(), m.group(4), int(m.group(5)), -1))
         sent_tf.append((log_time(line), sfn, None))  # continuity frame filled in below
     elif "Slot decisions" in line:
         m = sched_re.search(line)
@@ -96,9 +119,16 @@ for line in open(a.log, errors="replace"):
             d, r = m2.group(1), m2.group(2)
             k2 = re.search(r"\bk2=(\d+)", seg)
             at = base - (int(k2.group(1)) if d == "UL" and k2 else 0)
-            sched.append((at, r.lower(), "1_x" if d == "DL" else "0_x", -1))
+            sched.append((at, r.lower(), "1_x" if d == "DL" else "0_x", -1, -1))
             sched_tf.append((t, sfn, fr))
-if not sent:
+if a.truth:
+    # (frame*spf + slot, rnti, format, al, size): frames by continuity, as the CSV's
+    uw = unwrapper()
+    for r in truth_rows:
+        sfn, slot = int(r["sfn"]), int(r["slot"])
+        sent.append((uw(sfn) * spf + slot, r["rnti"].lower(), r["format"], int(r["al"]), int(r["size"])))
+        sent_tf.append((None, sfn, None))
+elif not sent:
     print("no PDCCH lines in the log: using the MAC slot decisions (AL not logged)")
     sent, sent_tf = sched, sched_tf
 else:
@@ -113,7 +143,7 @@ for r in rows:
     sfn, slot = int(r["sfn"]), int(r["slot"])
     bit0 = int(r["payload_hex"][0], 16) >> 3 if r["payload_hex"] else -1
     fr = uw(sfn)
-    got.append((fr * spf + slot, r["rnti"].lower(), int(r["al"]), bit0, r["kind"]))
+    got.append((fr * spf + slot, r["rnti"].lower(), int(r["al"]), bit0, r["kind"], int(r["size"]) if r.get("size") else -1))
     got_tf.append((float(r["timestamp"]) if r.get("timestamp") else None, sfn, fr))
 
 
@@ -126,7 +156,7 @@ def clock_frames(entries, tf, c):
     return out
 
 
-by_clock = (not a.wrap_by_sfn and sent and got and all(x[0] is not None for x in sent_tf) and
+by_clock = (not a.wrap_by_sfn and not a.truth and sent and got and all(x[0] is not None for x in sent_tf) and
             all(x[0] is not None for x in got_tf))
 if by_clock:
     # SFN phase against the clock, from the log: circular median of (100 t - sfn) mod 1024,
@@ -139,6 +169,8 @@ if by_clock:
     print("SFN wraps from the clocks")
 
 rntis = set(x.lower() for x in a.rnti.split(",") if x) or {g[1] for g in got if g[4] == "C"}
+if a.truth and not a.rnti:
+    rntis |= {s[1] for s in sent if s[1] != "0xffff"}
 sent_set = defaultdict(list)
 for s in sent:
     sent_set[(s[0], s[1])].append(s)
@@ -157,12 +189,17 @@ shift = best[1]
 got = [(g[0] + shift,) + g[1:] for g in got]
 lo, hi = min(g[0] for g in got), max(g[0] for g in got)
 print("aligned with a shift of %d wraps; CSV covers %.2f s" % (shift // (1024 * spf), (hi - lo + 1) / (spf * 100.0)))
+if a.truth:
+    tlo, thi = min(s[0] for s in sent), max(s[0] for s in sent)
+    print("truth covers %.2f s; the CSV starts %.3f s after it and ends %.3f s before its end"
+          % ((thi - tlo + 1) / (spf * 100.0), (lo - tlo) / (spf * 100.0), (thi - hi) / (spf * 100.0)))
+all_tot, all_fnd, all_extra, all_dup, all_size, nof_zero, all_exact = 0, 0, 0, 0, 0, 0, 0
 
 got_set = defaultdict(list)
 for g in got:
     got_set[(g[0], g[1])].append(g)
 for rnti in sorted(rntis):
-    tot, fnd, al_ok, dir_ok = Counter(), Counter(), Counter(), Counter()
+    tot, fnd, al_ok, dir_ok, size_ok = Counter(), Counter(), Counter(), Counter(), Counter()
     for s in sent:
         if s[1] != rnti or not lo <= s[0] <= hi:
             continue
@@ -175,15 +212,40 @@ for rnti in sorted(rntis):
             fnd[s[2]] += 1
             al_ok[s[2]] += s[3] < 0 or g[2] == s[3]
             dir_ok[s[2]] += g[3] == want
+            size_ok[s[2]] += s[4] >= 0 and g[5] == s[4]
+            # this very DCI, not just a DCI of the UE in that slot (it may have sent DL and UL)
+            all_exact += any(c[3] == want and c[5] == s[4] for c in cands)
     extra = sum(1 for g in got if g[1] == rnti and (g[0], rnti) not in sent_set)
     dup = sum(n - 1 for n in Counter((g[0], g[1], g[3]) for g in got if g[1] == rnti).values() if n > 1)
+    T, F = sum(tot.values()), sum(fnd.values())
+    all_tot, all_fnd, all_extra, all_dup, all_size = (all_tot + T, all_fnd + F, all_extra + extra, all_dup + dup,
+                                                      all_size + sum(size_ok.values()))
+    nof_zero += T > 0 and F == 0
+    if a.summary:
+        continue
     print("RNTI %s" % rnti)
     for f in sorted(tot):
         print("  format %-4s sent %6d  found %6d (%5.1f%%)  AL agrees %d  direction agrees %d" %
-              (f, tot[f], fnd[f], 100.0 * fnd[f] / max(tot[f], 1), al_ok[f], dir_ok[f]))
-    T, F = sum(tot.values()), sum(fnd.values())
+              (f, tot[f], fnd[f], 100.0 * fnd[f] / max(tot[f], 1), al_ok[f], dir_ok[f]) +
+              ("  size agrees %d" % size_ok[f] if a.truth else ""))
     print("  all         sent %6d  found %6d (%5.1f%%)  extra (never sent) %d  duplicates %d" %
           (T, F, 100.0 * F / max(T, 1), extra, dup))
 other = Counter(g[1] for g in got if g[1] not in rntis and g[4] == "C")
 if other:
     print("C-RNTIs reported that the log never scheduled:", dict(other))
+if a.truth:
+    sent_rntis = {s[1] for s in sent}
+    false_rntis = {r for r in rntis if r not in sent_rntis}
+    fr_dcis = sum(1 for g in got if g[1] in false_rntis)
+    print("TOTAL %d RNTIs (%d sent, %d never found)  sent %d  found %d (%.1f%%)  exact %d (%.1f%%)  size agrees %d  "
+          "extra %d  duplicates %d"
+          % (len(rntis), len(sent_rntis & rntis), nof_zero, all_tot, all_fnd, 100.0 * all_fnd / max(all_tot, 1),
+             all_exact, 100.0 * all_exact / max(all_tot, 1), all_size, all_extra, all_dup))
+    print("TOTAL false C-RNTIs (reported, never sent): %d RNTIs, %d DCIs" % (len(false_rntis), fr_dcis))
+    by_fmt, by_fmt_f = Counter(), Counter()
+    for s in sent:
+        if s[1] in rntis and lo <= s[0] <= hi:
+            by_fmt[s[2]] += 1
+            by_fmt_f[s[2]] += bool(got_set.get((s[0], s[1])))
+    print("TOTAL by format: " + ", ".join("%s %d/%d (%.1f%%)" % (f, by_fmt_f[f], by_fmt[f], 100.0 * by_fmt_f[f] / by_fmt[f])
+                                          for f in sorted(by_fmt)))

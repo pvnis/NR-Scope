@@ -140,3 +140,13 @@ target_link_libraries(gs_grid_replay nrscope_libs
 # messages: readable when the network does not cipher RRC (NEA0). Not a ctest.
 add_executable(srb_rrc_parse srb_rrc_parse.cc)
 target_link_libraries(srb_rrc_parse rrc_nr_asn1 srsran_mac srsran_common srsran_phy ${CMAKE_THREAD_LIBS_INIT})
+
+# Synthetic NR downlink with ground truth (gs_cellsim.cc): an fc32 file NR-Scope acquires in
+# file mode (SSB, MIB, SIB1) with UE DCIs in a configurable CORESET 1, and a CSV of every DCI
+# placed, for scoring GoldenSniffer with scripts/gs_compare.py --truth. Not a ctest.
+add_executable(gs_cellsim gs_cellsim.cc)
+target_link_libraries(gs_cellsim srsran_phy
+                                 srsran_common
+                                 rrc_nr_asn1
+                                 ${CMAKE_THREAD_LIBS_INIT}
+                                 m)
