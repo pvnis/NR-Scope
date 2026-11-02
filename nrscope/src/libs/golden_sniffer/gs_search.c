@@ -534,6 +534,62 @@ static void gs_equalize(const gs_slot_t* s, int32_t first, uint32_t len, uint32_
   }
 }
 
+/* Channel of one symbol from its own DM-RS, in O(len): the delay slope from the pilot
+ * autocorrelation (noise-robust, no unwrapping), the mean phase, then each pilot's
+ * derotated channel averaged over +-GS_EQ_HALF pilots (about 2 RBs), linearly
+ * interpolated to the data REs; zero forcing. Unlike gs_equalize it does not ring at the
+ * edges of wide candidates (AL8/16) and costs a few operations per RE. yeq: 3 len / 4. */
+#define GS_EQ_HALF 3
+static void gs_equalize_fast(const gs_slot_t* s, int32_t first, uint32_t len, uint32_t l, const cf_t* dm, cf_t* yeq)
+{
+  const uint32_t Nd = len / 4;
+  const cf_t*    Y  = s->grid + l * s->nof_sc + first;
+  cf_t           hd[GS_MAX_SC / 4], hs[GS_MAX_SC / 4];
+  cf_t           ac = 0;
+  for (uint32_t i = 0; i < Nd; i++) {
+    hd[i] = Y[1 + 4 * i] * conjf(dm[i]) * 2.0f; /* |dm|^2 = 1/2 */
+    if (i > 0) {
+      ac += hd[i] * conjf(hd[i - 1]);
+    }
+  }
+  const float slope = Nd > 1 ? cargf(ac) / 4.0f : 0.0f; /* per subcarrier */
+  for (uint32_t i = 0; i < Nd; i++) {
+    hd[i] *= cexpf(-I * slope * (float)(1 + 4 * i));
+  }
+  /* sliding window over the derotated pilots */
+  cf_t     run = 0;
+  uint32_t lo = 0, hi = 0; /* window [lo, hi) */
+  for (uint32_t i = 0; i < Nd; i++) {
+    const uint32_t a = i > GS_EQ_HALF ? i - GS_EQ_HALF : 0, b = i + GS_EQ_HALF + 1 < Nd ? i + GS_EQ_HALF + 1 : Nd;
+    while (hi < b) {
+      run += hd[hi++];
+    }
+    while (lo < a) {
+      run -= hd[lo++];
+    }
+    hs[i] = run / (float)(hi - lo);
+  }
+  uint32_t m = 0;
+  for (uint32_t k = 0; k < len; k++) {
+    if (k % 4 == 1) {
+      continue;
+    }
+    /* pilot positions 1 + 4 i: interpolate between the two around k */
+    float    x  = ((float)k - 1.0f) / 4.0f;
+    int32_t  i0 = (int32_t)floorf(x);
+    if (i0 < 0) {
+      i0 = 0;
+    }
+    if (i0 > (int32_t)Nd - 2) {
+      i0 = Nd >= 2 ? (int32_t)Nd - 2 : 0;
+    }
+    const float f = Nd >= 2 ? x - (float)i0 : 0.0f;
+    cf_t        h = Nd >= 2 ? hs[i0] * (1.0f - f) + hs[i0 + 1] * f : hs[0];
+    h *= cexpf(I * slope * (float)k);
+    yeq[m++] = cabsf(h) > 0 ? Y[k] / h : 0;
+  }
+}
+
 /* ------------------------------------------------------- blind_search_for_DCIs.m */
 
 typedef struct {
@@ -959,9 +1015,7 @@ int gs_decode_tracked(gs_t* q, const gs_slot_t* s, const gs_track_t* t, gs_dci_t
       cf_t*          yeq = q->yeq_iv[0];
       const uint32_t nre = 3 * (uint32_t)span / 4;
       for (uint32_t l = 0; l < dur; l++) {
-        gs_slot_t one = *s;
-        one.grid      = s->grid + l * N;
-        gs_equalize(&one, first, (uint32_t)span, 1, dm[l], 0, yeq + l * nre);
+        gs_equalize_fast(s, first, (uint32_t)span, l, dm[l], yeq + l * nre);
       }
       uint32_t       E   = 0;
       double         err = 0, epre = 0;
@@ -1010,6 +1064,236 @@ int gs_decode_tracked(gs_t* q, const gs_slot_t* s, const gs_track_t* t, gs_dci_t
         used_hi[nof]     = first + span - 1;
         nof++;
         break;
+      }
+    }
+  }
+  return (int)nof;
+}
+
+
+/* ------------------------------------------------------------------ many tracked UEs */
+
+static bool gs_track_same_group(const gs_track_t* a, const gs_track_t* b, int32_t ref, int32_t cce)
+{
+  return a->n_id == b->n_id && a->n_rnti == b->n_rnti && a->duration == b->duration &&
+         a->coreset0 == b->coreset0 && ((a->sc_lo - ref) % cce + cce) % cce == ((b->sc_lo - ref) % cce + cce) % cce;
+}
+
+static bool gs_track_has_size(const gs_track_t* t, uint32_t nb)
+{
+  for (uint32_t z = 0; z < t->nof_sizes; z++) {
+    if (t->sizes[z] == nb) {
+      return true;
+    }
+  }
+  return false;
+}
+
+int gs_decode_tracked_multi(gs_t*             q,
+                            const gs_slot_t*  s,
+                            const gs_track_t* tracks,
+                            uint32_t          nof_tracks,
+                            bool              full_band,
+                            bool              want_untracked,
+                            gs_dci_t*         out,
+                            uint8_t*          tracked,
+                            uint32_t          max_out)
+{
+  if (q == NULL || s == NULL || tracks == NULL || out == NULL || tracked == NULL || s->grid == NULL ||
+      s->nof_sc == 0 || s->nof_sc > GS_MAX_SC) {
+    return -1;
+  }
+  const uint32_t N   = s->nof_sc;
+  uint32_t       nof = 0;
+  static __thread bool done[GS_MAX_TRACKS];
+  const uint32_t nt = nof_tracks < GS_MAX_TRACKS ? nof_tracks : GS_MAX_TRACKS;
+  memset(done, 0, sizeof(bool) * nt);
+
+  for (uint32_t g = 0; g < nt && nof < max_out; g++) {
+    const gs_track_t* t0 = &tracks[g];
+    if (done[g] || t0->duration < 1 || t0->duration > GS_MAX_DURATION) {
+      continue;
+    }
+    const int32_t ref = t0->coreset0 ? s->ref_cs0 : s->ref_crb0;
+    const uint32_t dur = t0->duration;
+    const int32_t  cce = GS_NSC_CCE / (int32_t)dur;
+    if (ref == GS_NO_REF || ref < 0 || t0->sc_lo < ref) {
+      done[g] = true;
+      continue;
+    }
+
+    /* the group: its tracks, the union of their sizes, ALs and extents */
+    uint32_t sizes[16], nsz = 0, al_mask = 0;
+    int32_t  lo = t0->sc_lo, hi = t0->sc_hi;
+    for (uint32_t i = g; i < nt; i++) {
+      const gs_track_t* t = &tracks[i];
+      if (done[i] || !gs_track_same_group(t0, t, ref, cce)) {
+        continue;
+      }
+      done[i] = true;
+      al_mask |= t->al_mask;
+      lo = t->sc_lo < lo ? t->sc_lo : lo;
+      hi = t->sc_hi > hi ? t->sc_hi : hi;
+      for (uint32_t z = 0; z < t->nof_sizes; z++) {
+        bool have = false;
+        for (uint32_t k = 0; k < nsz; k++) {
+          have = have || sizes[k] == t->sizes[z];
+        }
+        if (!have && nsz < 16) {
+          sizes[nsz++] = t->sizes[z];
+        }
+      }
+    }
+    if (full_band) {
+      lo      = ref + ((t0->sc_lo - ref) % cce);
+      hi      = (int32_t)N - 1;
+      al_mask = (1U << (GS_MAX_L_LOG2 + 1)) - 1;
+    }
+
+    /* DM-RS of the whole band from the reference, and per RB: the coherent sum of its 3
+      pilots against it and their power. A candidate's gate is then a sum over its RBs. */
+    const uint32_t nrb_tot = ((uint32_t)N - (uint32_t)ref) / 12;
+    const uint32_t npil    = nrb_tot * 3;
+    if (nrb_tot == 0 || npil > GS_MAX_SC / 4) {
+      continue;
+    }
+    cf_t  acc[GS_MAX_DURATION][GS_MAX_SC / 12];
+    float pw[GS_MAX_DURATION][GS_MAX_SC / 12];
+    for (uint32_t l = 0; l < dur; l++) {
+      srsran_sequence_state_t seq;
+      srsran_sequence_state_init(&seq, gs_pdcch_dmrs_cinit(s->slot_idx, l, t0->n_id));
+      srsran_sequence_state_gen_f(&seq, (float)M_SQRT1_2, (float*)q->cdm[l], 2 * npil);
+      const cf_t* Y = s->grid + l * N + ref;
+      for (uint32_t r = 0; r < nrb_tot; r++) {
+        cf_t  a = 0;
+        float p = 0;
+        for (uint32_t j = 0; j < 3; j++) {
+          const cf_t y = Y[12 * r + 1 + 4 * j];
+          a += y * conjf(q->cdm[l][3 * r + j]);
+          p += crealf(y * conjf(y));
+        }
+        acc[l][r] = a;
+        pw[l][r]  = p;
+      }
+    }
+
+    int32_t used_lo[GS_MAX_DCI_PER_SLOT], used_hi[GS_MAX_DCI_PER_SLOT];
+    uint32_t nused = 0;
+    for (int Ll = GS_MAX_L_LOG2; Ll >= 0 && nof < max_out; Ll--) {
+      if (!((al_mask >> Ll) & 1U)) {
+        continue;
+      }
+      const int32_t span = (1 << Ll) * cce;
+      for (int32_t first = lo; first + span - 1 <= hi && first + span <= (int32_t)N && nof < max_out; first += cce) {
+        const int32_t k0 = first - ref;
+        if (k0 < 0 || k0 % 12 != 0 || span % GS_NSC_REG != 0) {
+          continue;
+        }
+        bool overlap = false;
+        for (uint32_t i = 0; i < nused && !overlap; i++) {
+          overlap = first <= used_hi[i] && first + span - 1 >= used_lo[i];
+        }
+        if (overlap) {
+          continue;
+        }
+        const uint32_t r0 = (uint32_t)k0 / 12, nrb = (uint32_t)span / 12;
+        if (r0 + nrb > nrb_tot) {
+          continue;
+        }
+        /* coherent over 2 RBs (6 pilots) at a time, as gs_decode_tracked */
+        double num = 0, den = 0;
+        for (uint32_t l = 0; l < dur; l++) {
+          for (uint32_t r = 0; r < nrb; r += 2) {
+            cf_t     a = acc[l][r0 + r];
+            double   p = pw[l][r0 + r];
+            uint32_t n = 3;
+            if (r + 1 < nrb) {
+              a += acc[l][r0 + r + 1];
+              p += pw[l][r0 + r + 1];
+              n = 6;
+            }
+            num += cabsf(a);
+            den += sqrt(p * n);
+          }
+        }
+        if (den <= 0 || num / den < GS_TRACK_GATE) {
+          continue;
+        }
+
+        cf_t*          yeq = q->yeq_iv[0];
+        const uint32_t nre = 3 * (uint32_t)span / 4;
+        for (uint32_t l = 0; l < dur; l++) {
+          gs_equalize_fast(s, first, (uint32_t)span, l, q->cdm[l] + k0 / 4, yeq + l * nre);
+        }
+        uint32_t E   = 0;
+        double   err = 0, epre = 0;
+        for (uint32_t l = 0; l < dur; l++) {
+          for (uint32_t m = 0; m < nre; m++) {
+            cf_t v       = yeq[l * nre + m];
+            q->bits[E++] = crealf(v) < 0.0f;
+            q->bits[E++] = cimagf(v) < 0.0f;
+            cf_t  d      = ((crealf(v) < 0 ? -1.0f : 1.0f) + I * (cimagf(v) < 0 ? -1.0f : 1.0f)) * (float)M_SQRT1_2;
+            float e      = cabsf(v - d);
+            err += e * e;
+          }
+          for (int32_t k = first; k < first + span; k++) {
+            float a = cabsf(s->grid[l * N + k]);
+            epre += a * a;
+          }
+        }
+        if (E != (108U << Ll)) {
+          continue;
+        }
+        /* every size of the group: a tracked RNTI at one of its sizes wins over another RNTI */
+        int      best = -1; /* 1: tracked, 0: untracked */
+        uint32_t best_nb = 0;
+        uint16_t best_rnti = 0;
+        uint8_t  pay[GS_MAX_DCI_BITS];
+        for (uint32_t z = 0; z < nsz && best < 1; z++) {
+          const uint32_t nb = sizes[z];
+          uint16_t       rnti;
+          if (!gs_gf2_size_valid(nb, (uint32_t)Ll) || nb + 16 + q->args.min_parity > E) {
+            continue;
+          }
+          if (!gs_dci_try(q->bits, E, nb, t0->n_id, t0->n_rnti, pay, &rnti)) {
+            continue;
+          }
+          int is_tracked = 0;
+          for (uint32_t i = 0; i < nt && !is_tracked; i++) {
+            const gs_track_t* t = &tracks[i];
+            is_tracked = t->rnti == rnti && gs_track_same_group(t0, t, ref, cce) && gs_track_has_size(t, nb);
+          }
+          if (is_tracked > best) {
+            best      = is_tracked;
+            best_nb   = nb;
+            best_rnti = rnti;
+            memcpy(out[nof].payload, pay, nb);
+          }
+        }
+        if (best < 0 || (best == 0 && !want_untracked)) {
+          continue;
+        }
+        gs_dci_t* o         = &out[nof];
+        o->slot_idx         = s->slot_idx;
+        o->duration         = dur;
+        o->L                = 1U << Ll;
+        o->cand.nof_iv      = 1;
+        o->cand.iv[0].first = first;
+        o->cand.iv[0].last  = first + span - 1;
+        o->coreset0         = t0->coreset0;
+        o->ref_ambiguous    = s->ref_cs0 != GS_NO_REF && s->ref_cs0 == s->ref_crb0;
+        o->n_id             = t0->n_id;
+        o->rnti             = best_rnti;
+        o->n_rnti           = t0->n_rnti;
+        o->nof_bits         = best_nb;
+        o->evm              = (float)sqrt(err / (double)(nre * dur));
+        o->epre             = (float)(epre / ((double)span * dur));
+        tracked[nof]        = (uint8_t)best;
+        if (nused < GS_MAX_DCI_PER_SLOT) {
+          used_lo[nused]   = first;
+          used_hi[nused++] = first + span - 1;
+        }
+        nof++;
       }
     }
   }

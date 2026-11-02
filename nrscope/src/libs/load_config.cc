@@ -267,6 +267,14 @@ int load_config(std::vector<Radio>& radios, std::string file_name)
       if (config_yaml[setting_name]["rx_center_freq"]) {
         radios[i].args_t.base_carrier.dl_center_frequency_hz = config_yaml[setting_name]["rx_center_freq"].as<double>();
       }
+      /* freq_offset_ppm: the radio's reference error, scaled to this frequency (the X410's
+        internal reference is ~-4 ppm: -13.7 kHz at 3.41 GHz, -15 kHz at 3.75 GHz); it
+        overrides freq_offset */
+      if (config_yaml[setting_name]["freq_offset_ppm"]) {
+        const double ppm              = config_yaml[setting_name]["freq_offset_ppm"].as<double>();
+        radios[i].rf_args.freq_offset = (float)(ppm * 1e-6 * radios[i].args_t.base_carrier.ssb_center_freq_hz);
+        std::cout << "    freq_offset: " << radios[i].rf_args.freq_offset << " (" << ppm << " ppm)" << std::endl;
+      }
       std::cout << "    ssb_freq: " << radios[i].args_t.base_carrier.ssb_center_freq_hz / 1e6
                 << " MHz, rx_center_freq: " << radios[i].args_t.base_carrier.dl_center_frequency_hz / 1e6 << " MHz"
                 << std::endl;

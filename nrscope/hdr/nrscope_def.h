@@ -43,6 +43,7 @@
 #include <boost/program_options.hpp>
 #include <boost/program_options/parsers.hpp>
 #include "nrscope/hdr/golden_sniffer/gs_core.h"
+#include <memory>
 
 #define MAX_NOF_DCI_DECODER 4
 #define MAX_NOF_RF_DEV 4
@@ -318,6 +319,12 @@ struct BlindUe {
   bool                         quiet            = false; // went quiet: a sweep was started for it
   std::map<uint32_t, uint32_t> size_count;
   gs_track_t                   track = {};
+  double                       last_dir[2]      = {0, 0}; // last DCI per direction: [0] UL, [1] DL
+  bool                         dir_quiet        = false;  // one direction stopped: a sweep was started
+  /* Converged UE whose config may have changed (a DCI that disagrees with its track, an
+    RRC PDU on SRB1): learned afresh here while the track keeps decoding, then replaces it */
+  std::shared_ptr<BlindUe>     shadow;
+  double                       shadow_since     = 0;
 };
 
 /* An RRC PDU on an SRB, seen by the RACH decoder (headers only: the body is ciphered) */
@@ -442,6 +449,8 @@ struct SlotResult_ {
   /* GoldenSniffer: RRC PDUs on SRBs (trigger), DCIs of tracked UEs decoded directly */
   std::vector<SrbEvent> srb_events;
   std::vector<gs_dci_t> tracked_dcis;
+  std::vector<gs_dci_t> region_dcis;  // other C-RNTIs found by the tracked decode (sightings)
+  double                gs_t_submit = 0; // GoldenSniffer took the slot (steady clock, s)
 
   /* Define the compare operator between structure by sf_round,
     sfn and slot idx */

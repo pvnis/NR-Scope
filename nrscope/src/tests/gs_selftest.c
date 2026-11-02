@@ -516,6 +516,153 @@ static void test_tracked(void)
   gs_destroy(gs);
 }
 
+
+/* 7. Many tracked UEs at once (gs_decode_tracked_multi): 40 UEs in one CORESET of 102 RBs,
+ * 30 of them tracked with a learned extent of one CCE and AL1 only (full_band must find
+ * them anywhere, at any AL), the other 10 must come out as untracked sightings; up to 6
+ * DCIs per slot, PCI or pdcch-DMRS-ScramblingID scrambling, duration 1-2, 15 dB. Every
+ * fourth slot is noise only: nothing may be reported there. Timed with 30 and with 200
+ * tracks (the cost must not grow with the number of tracked UEs). */
+static void test_tracked_multi(void)
+{
+  gs_args_t args;
+  gs_args_default(&args);
+  gs_t*          gs = gs_create(&args);
+  tx_t           tx;
+  const uint32_t nprb = 106, NU = 40, NT = 30, NX = 200;
+  tx_init(&tx, nprb, 0);
+  static const uint32_t szs[4] = {43, 47, 51, 55};
+  uint16_t              rnti[40];
+  uint32_t              dl[40], ul[40];
+  for (uint32_t u = 0; u < NU; u++) {
+    rnti[u] = (uint16_t)(0x4601 + 7 * u);
+    dl[u]   = szs[(u / 2) % 2 ? 1 : 3];
+    ul[u]   = szs[(u / 2) % 2 ? 0 : 2];
+  }
+  int    placed_t = 0, found_t = 0, placed_u = 0, found_u = 0, wrong = 0, false_noise = 0, nslots = 0;
+  double t30 = 0, t200 = 0;
+  for (int t = 0; t < 400; t++) {
+    const bool     scr = t & 1;
+    const uint32_t dur = 1 + ((t >> 1) & 1), slot = rint_(0, 19), pci = rint_(0, 1007);
+    const uint32_t n_id = scr ? (uint32_t)rint_(0, 65535) : pci;
+    tx.carrier.pci      = pci;
+    memset(&tx.coreset, 0, sizeof(tx.coreset));
+    tx.coreset.id                         = 1;
+    tx.coreset.duration                   = dur;
+    tx.coreset.dmrs_scrambling_id_present = scr;
+    tx.coreset.dmrs_scrambling_id         = n_id;
+    for (uint32_t r = 0; r < 17; r++) {
+      tx.coreset.freq_resources[r] = true; /* RBs 0..101 */
+    }
+    srsran_vec_cf_zero(tx.grid, nprb * 12 * 14);
+    const uint32_t n_cce = 17 * dur;
+    bool           busy[64] = {false};
+    struct {
+      uint32_t u, L, ncce, nb;
+      uint8_t  pay[128];
+      bool     hit;
+    } ex[6];
+    uint32_t   nex   = 0;
+    const bool noise = (t % 4) == 3;
+    bool       used_u[40] = {false};
+    for (uint32_t k = 0, want = noise ? 0 : (uint32_t)rint_(1, 6); k < want; k++) {
+      uint32_t u = (uint32_t)rint_(0, NU - 1);
+      if (used_u[u]) {
+        continue;
+      }
+      uint32_t Ll = (uint32_t)rint_(0, dur == 1 ? 3 : 4), L = 1U << Ll;
+      if (L > n_cce) {
+        continue;
+      }
+      uint32_t ncce = L * (uint32_t)rint_(0, n_cce / L - 1);
+      bool     free_ = true;
+      for (uint32_t c = ncce; c < ncce + L; c++) {
+        free_ = free_ && !busy[c];
+      }
+      if (!free_) {
+        continue;
+      }
+      uint32_t nb = rint_(0, 1) ? dl[u] : ul[u];
+      if (tx_put(&tx, slot, Ll, ncce, srsran_search_space_type_ue, rnti[u], nb, ex[nex].pay) < 0) {
+        continue;
+      }
+      for (uint32_t c = ncce; c < ncce + L; c++) {
+        busy[c] = true;
+      }
+      used_u[u]    = true;
+      ex[nex].u    = u;
+      ex[nex].L    = L;
+      ex[nex].ncce = ncce;
+      ex[nex].nb   = nb;
+      ex[nex].hit  = false;
+      nex++;
+      if (u < NT) {
+        placed_t++;
+      } else {
+        placed_u++;
+      }
+    }
+    float sigma = powf(10.0f, -15.0f / 20.0f) * (float)M_SQRT1_2;
+    float ph = srsran_random_uniform_real_dist(rnd, -M_PI, M_PI), tau = srsran_random_uniform_real_dist(rnd, -3, 3) / 1024.0f;
+    for (uint32_t l = 0; l < 3; l++) {
+      for (uint32_t k = 0; k < nprb * 12; k++) {
+        cf_t h = cexpf(I * (ph + 0.2f * l + 2.0f * (float)M_PI * tau * k));
+        cf_t n = sigma * (srsran_random_gauss_dist(rnd, 1.0f) + I * srsran_random_gauss_dist(rnd, 1.0f));
+        tx.grid[l * nprb * 12 + k] = tx.grid[l * nprb * 12 + k] * h + n;
+      }
+    }
+    gs_slot_t  sl = {.grid = tx.grid, .nof_sc = nprb * 12, .slot_idx = slot, .ref_crb0 = 0, .ref_cs0 = GS_NO_REF, .pci = pci};
+    gs_track_t tr[200];
+    for (uint32_t i = 0; i < NX; i++) {
+      const uint32_t u = i < NT ? i : 0;
+      tr[i]            = (gs_track_t){.rnti = i < NT ? rnti[u] : (uint16_t)(0x9000 + i), .n_id = n_id, .n_rnti = scr,
+                                      .coreset0 = false, .sc_lo = 0, .sc_hi = (int32_t)(72 / dur) - 1, .duration = dur,
+                                      .al_mask = 1, .sizes = {dl[u], ul[u]}, .nof_sizes = 2};
+    }
+    gs_dci_t out[16];
+    uint8_t  trk[16];
+    double   t0 = now_s();
+    int      n  = gs_decode_tracked_multi(gs, &sl, tr, NT, true, true, out, trk, 16);
+    t30 += now_s() - t0;
+    gs_dci_t out2[16];
+    uint8_t  trk2[16];
+    t0 = now_s();
+    gs_decode_tracked_multi(gs, &sl, tr, NX, true, true, out2, trk2, 16);
+    t200 += now_s() - t0;
+    nslots++;
+    for (int i = 0; i < n; i++) {
+      if (noise) {
+        false_noise++;
+        continue;
+      }
+      bool ok = false;
+      for (uint32_t k = 0; k < nex && !ok; k++) {
+        const uint32_t u = ex[k].u;
+        if (ex[k].hit || out[i].rnti != rnti[u] || out[i].nof_bits != ex[k].nb || out[i].L != ex[k].L ||
+            out[i].cand.iv[0].first != (int32_t)(ex[k].ncce * 72 / dur) ||
+            memcmp(out[i].payload, ex[k].pay, ex[k].nb) != 0 || trk[i] != (u < NT)) {
+          continue;
+        }
+        ex[k].hit = ok = true;
+        if (u < NT) {
+          found_t++;
+        } else {
+          found_u++;
+        }
+      }
+      wrong += !ok;
+    }
+  }
+  printf("7. Tracked multi-UE: tracked %d/%d, untracked sightings %d/%d, %d wrong, %d on noise-only slots; "
+         "%.3f ms/slot with 30 tracks, %.3f with 200\n",
+         found_t, placed_t, found_u, placed_u, wrong, false_noise, 1e3 * t30 / nslots, 1e3 * t200 / nslots);
+  CHECK(found_t >= placed_t * 98 / 100, "tracked multi: %d/%d", found_t, placed_t);
+  CHECK(found_u >= placed_u * 95 / 100, "tracked multi, untracked sightings: %d/%d", found_u, placed_u);
+  CHECK(wrong == 0 && false_noise == 0, "tracked multi: %d wrong, %d on noise", wrong, false_noise);
+  tx_free(&tx);
+  gs_destroy(gs);
+}
+
 int main(int argc, char** argv)
 {
   uint32_t seed = argc > 1 ? (uint32_t)atoi(argv[1]) : 1234;
@@ -530,6 +677,7 @@ int main(int argc, char** argv)
   test_gf2();
   test_search();
   test_tracked();
+  test_tracked_multi();
 
   srsran_random_free(rnd);
   printf("%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);

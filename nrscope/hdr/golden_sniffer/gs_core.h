@@ -141,6 +141,25 @@ typedef struct {
  * returns this UE's RNTI. Returns the number written to out (<= max_out). */
 int gs_decode_tracked(gs_t* q, const gs_slot_t* s, const gs_track_t* t, gs_dci_t* out, uint32_t max_out);
 
+/* Tracked decode of many UEs at once. Tracks sharing N_ID, scrambling, duration, DM-RS
+ * reference and CCE grid phase form a group, decoded together: the DM-RS correlation is
+ * computed once per RB per symbol, each candidate passing the gate is solved once per
+ * DCI size of the group, and the solve gives the RNTI. full_band: candidates over the
+ * whole grid (on the group's CCE grid) instead of the learned extent, all ALs. Each
+ * output has tracked[i] = 1 if its RNTI and size belong to one of the tracks; with
+ * want_untracked, DCIs of other RNTIs found in the same CORESETs are output too
+ * (tracked[i] = 0): sightings of UEs not tracked yet. */
+#define GS_MAX_TRACKS 512
+int gs_decode_tracked_multi(gs_t*             q,
+                            const gs_slot_t*  s,
+                            const gs_track_t* tracks,
+                            uint32_t          nof_tracks,
+                            bool              full_band,
+                            bool              want_untracked,
+                            gs_dci_t*         out,
+                            uint8_t*          tracked,
+                            uint32_t          max_out);
+
 /* ---- building blocks, exposed for the self-test ---- */
 
 /* Gold sequence c(n), n in [offset, offset + len), as one bit per byte. */

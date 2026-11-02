@@ -18,6 +18,8 @@
  *   golden_sniffer:
  *     enable: true
  *     max_duration: 2        # PDCCH symbols scanned
+ *     size_min: 20           # DCI sizes tried (without dci_sizes): size_min..size_max
+ *     size_max: 140
  *     dci_sizes: []          # sizes tried (empty: 20..84)
  *     css_sizes: auto        # sizes allowed for n_RNTI = 0 DCIs whose DM-RS may be CORESET#0's:
  *                            # auto (DCI 1_0 over CORESET#0 and over the initial BWP), a list,
@@ -47,6 +49,13 @@
  *     stale_hits: 3
  *     converge_hits: 10
  *     converge_s: 3          # converge on DL alone (or UL alone) after this
+ *     keep_s: 300            # a converged UE is tracked until silent this long (idle UEs)
+ *     track_full_band: true  # tracked decode: whole band on each UE's CCE grid, all ALs
+ *     discover_in_track: true # C-RNTIs found there that are not tracked yet: discovered
+ *   A converged UE re-learns (in a shadow, the track keeps decoding) when one of its DCIs
+ *   disagrees with the track or an RRC PDU goes to it on SRB1; a sweep starts when one
+ *   direction (UL/DL) stops while the other goes on. GS_TEST_DROP_SIZE=<n> removes size
+ *   n from a UE's track at its first convergence, to test that recovery.
  *     quiet_s: 1             # a blind-tracked UE silent this long starts a sweep at once
  */
 #ifndef NRSCOPE_GOLDEN_SNIFFER_H
@@ -61,6 +70,8 @@
 struct GoldenSnifferArgs {
   bool                  enable       = false;
   uint32_t              max_duration = 2;
+  uint32_t              size_min = 20;  // DCI sizes tried when dci_sizes is empty: up to
+  uint32_t              size_max = 140; // the 140-bit maximum (1_1 of commercial cells)
   std::vector<uint32_t> dci_sizes;
   bool                  css_auto = true;
   std::vector<uint32_t> css_sizes;
@@ -83,6 +94,9 @@ struct GoldenSnifferArgs {
   uint32_t stale_hits     = 3;     // blind sightings without a regular DCI that make a UE stale
   uint32_t converge_hits  = 10;    // DCIs learned before decoding a UE directly
   double   converge_s     = 3;     // ... and both DL and UL seen, or this long learning
+  double   keep_s         = 300;   // a converged UE is kept (tracked) until silent this long
+  bool     track_full_band   = true; // tracked decode over the whole band, all ALs
+  bool     discover_in_track = true; // other C-RNTIs it finds are sightings (discovery)
   double   quiet_s        = 1.0;   // a blind-tracked UE silent this long starts a sweep (gone or new RNTI?)
 };
 

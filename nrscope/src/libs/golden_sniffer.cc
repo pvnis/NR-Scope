@@ -35,11 +35,62 @@ uint64_t                      gs_total       = 0;
 
 /* What the workers hand over: the searched symbols of one slot, copied out of the
   worker's grid so the worker can go on with the next slot at once. */
+/* Execution time of one GoldenSniffer stage: count, mean, max, and a log histogram
+  (10 bins per decade from 1 us) for the median and the 99th percentile */
+struct GsTimer {
+  const char* name;
+  std::mutex  m;
+  uint64_t    n = 0;
+  double      sum = 0, max = 0;
+  uint32_t    hist[70] = {};
+  explicit GsTimer(const char* nm) : name(nm) {}
+  void add(double ms)
+  {
+    int b = ms > 0 ? (int)std::floor(10.0 * std::log10(ms * 1e3)) : 0;
+    b     = std::max(0, std::min(69, b));
+    std::lock_guard<std::mutex> lock(m);
+    n++;
+    sum += ms;
+    max = std::max(max, ms);
+    hist[b]++;
+  }
+  std::string str()
+  {
+    std::lock_guard<std::mutex> lock(m);
+    if (n == 0) {
+      return std::string("  ") + name + ": -\n";
+    }
+    auto q = [&](double p) {
+      uint64_t want = (uint64_t)std::ceil(p * (double)n), acc = 0;
+      for (int b = 0; b < 70; b++) {
+        acc += hist[b];
+        if (acc >= want) {
+          return std::pow(10.0, (b + 1) / 10.0) * 1e-3; /* bin upper edge, ms */
+        }
+      }
+      return max;
+    };
+    char buf[200];
+    snprintf(buf, sizeof(buf), "  %-26s n %9llu  mean %8.3f  p50 <%7.3f  p99 <%7.3f  max %8.3f ms\n", name,
+             (unsigned long long)n, sum / (double)n, q(0.5), q(0.99), max);
+    return buf;
+  }
+};
+static GsTimer gs_t_fft("worker: PDCCH FFT"), gs_t_track("worker: tracked decode"), gs_t_enq("worker: copy + queue"),
+    gs_t_wait("searcher: queue wait"), gs_t_search0("searcher: slot, no DCI"), gs_t_search1("searcher: slot with DCIs"),
+    gs_t_lat_search("latency: slot -> search DCI"), gs_t_lat_track("latency: slot -> tracked DCI");
+
+static double gs_steady_s()
+{
+  return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 struct GsJob {
   uint32_t          sfn = 0, slot_idx = 0, nof_sc = 0, nof_symb = 0, first_crb = 0, pci = 0;
   int32_t           ref_crb0 = GS_NO_REF, ref_cs0 = GS_NO_REF;
   uint32_t          cs0_nof_sc = 0;
   std::vector<cf_t> grid;
+  double            t_submit = 0, t_enq = 0; /* steady clock, s */
   /* converged UEs in this slot: their DCIs of a learned size come from the tracked decode */
   std::vector<gs_track_t> tracked;
 };
@@ -85,6 +136,33 @@ std::vector<GsFeed> gs_feeds;
 std::atomic<bool>     gs_pool_active{true}; // whole-slot search wanted (windows, armed/learning UEs)
 std::atomic<bool>     gs_any_converged{false};
 std::atomic<double>   gs_ready_time{0};     // when the first worker's GoldenSniffer was ready
+std::atomic<uint32_t> gs_spf{0};            // slots per frame
+/* Replay (lossless file input) runs at any speed: GoldenSniffer's timers (startup, sweeps,
+  arming, quiet, keep, convergence) then run on air time, from the SFN and slot */
+static double  gs_air_ready = -1;
+static int64_t gs_air_abs   = -1;
+static double gs_air_now(const SlotResult& r)
+{
+  const uint32_t spf = gs_spf.load();
+  if (spf == 0) {
+    return 0;
+  }
+  const int64_t wrap = 1024LL * spf, a = (int64_t)r.outcome.sfn * spf + r.slot.idx % spf;
+  if (gs_air_abs < 0) {
+    gs_air_abs = a;
+  } else {
+    int64_t base = gs_air_abs - gs_air_abs % wrap + a, best = base;
+    for (int64_t d : {-wrap, wrap}) {
+      if (std::llabs(base + d - gs_air_abs) < std::llabs(best - gs_air_abs)) {
+        best = base + d;
+      }
+    }
+    if (best > gs_air_abs) { /* results can come out of order: the clock only moves forward */
+      gs_air_abs = best;
+    }
+  }
+  return (double)gs_air_abs / (100.0 * spf);
+}
 std::atomic<uint32_t> gs_first_crb{0};
 std::vector<gs_dci_t> gs_sightings;         // searcher C-RNTI DCIs for the scheduler, under gs_log_mutex
 std::string           gs_track_summary;     // per-UE fallback states for the report, under gs_log_mutex
@@ -133,6 +211,9 @@ void print_report_locked()
          (unsigned long long)gs_total, gs_stats.size(), (unsigned long long)searched,
          searched ? t_sum / (double)searched : 0.0, t_max, (unsigned long long)dropped,
          (unsigned long long)submitted);
+  printf("GoldenSniffer execution time:\n%s%s%s%s%s%s%s%s", gs_t_fft.str().c_str(), gs_t_track.str().c_str(),
+         gs_t_enq.str().c_str(), gs_t_wait.str().c_str(), gs_t_search0.str().c_str(), gs_t_search1.str().c_str(),
+         gs_t_lat_search.str().c_str(), gs_t_lat_track.str().c_str());
   if (!gs_track_summary.empty()) {
     printf("%s", gs_track_summary.c_str());
   }
@@ -173,6 +254,12 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
       std::cerr << "golden_sniffer: max_duration must be 1.." << GS_MAX_DURATION << std::endl;
       exit(EXIT_FAILURE);
     }
+  }
+  if (g["size_min"]) {
+    a.size_min = g["size_min"].as<uint32_t>();
+  }
+  if (g["size_max"]) {
+    a.size_max = g["size_max"].as<uint32_t>();
   }
   if (g["dci_sizes"]) {
     a.dci_sizes = g["dci_sizes"].as<std::vector<uint32_t> >();
@@ -240,6 +327,15 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
   }
   if (g["converge_s"]) {
     a.converge_s = g["converge_s"].as<double>();
+  }
+  if (g["keep_s"]) {
+    a.keep_s = g["keep_s"].as<double>();
+  }
+  if (g["track_full_band"]) {
+    a.track_full_band = g["track_full_band"].as<bool>();
+  }
+  if (g["discover_in_track"]) {
+    a.discover_in_track = g["discover_in_track"].as<bool>();
   }
   if (g["quiet_s"]) {
     a.quiet_s = g["quiet_s"].as<double>();
@@ -357,8 +453,13 @@ static void gs_searcher_thread(uint32_t id)
     sl.cs0_nof_sc = job.cs0_nof_sc;
     sl.pci       = job.pci;
     auto t0      = std::chrono::steady_clock::now();
+    gs_t_wait.add(1e3 * (gs_steady_s() - job.t_enq));
     int  n       = gs_search_slot(gs, &sl, out, GS_MAX_DCI_PER_SLOT);
     double ms    = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    (n > 0 ? gs_t_search1 : gs_t_search0).add(ms);
+    if (n > 0) {
+      gs_t_lat_search.add(1e3 * (gs_steady_s() - job.t_submit));
+    }
     {
       std::lock_guard<std::mutex> lock(gs_pool.m);
       gs_pool.searched++;
@@ -371,7 +472,7 @@ static void gs_searcher_thread(uint32_t id)
 
 /* Learns one DCI of a UE: its PDCCH N_ID and scrambling, the CORESET extent its DCIs were
   seen in, its ALs and its DCI sizes (the most frequent four). */
-static void gs_learn(BlindUe& e, const gs_dci_t& d, double now)
+static void gs_learn_into(BlindUe& e, const gs_dci_t& d, double now)
 {
   /* The tracked decode targets the UE-specific CORESET. DCIs in CORESET#0 (Msg4, the
     RRCSetup, fallback DCIs while the UE is still on the common config) are interleaved
@@ -425,6 +526,69 @@ static void gs_learn(BlindUe& e, const gs_dci_t& d, double now)
   e.hits++;
 }
 
+/* Whether a DCI fits what was learned of the UE: the tracked decode would find it */
+static bool gs_agrees(const gs_track_t& t, const gs_dci_t& d)
+{
+  if (d.n_id != t.n_id || d.n_rnti != t.n_rnti || d.duration != t.duration) {
+    return false;
+  }
+  for (uint32_t z = 0; z < t.nof_sizes; z++) {
+    if (t.sizes[z] == d.nof_bits) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static std::string gs_sizes_str(const gs_track_t& t)
+{
+  std::string s;
+  for (uint32_t z = 0; z < t.nof_sizes; z++) {
+    s += (z ? "/" : "") + std::to_string(t.sizes[z]);
+  }
+  return s.empty() ? "-" : s;
+}
+
+static void gs_start_shadow(BlindUe& e, uint16_t rnti, double now, const char* why)
+{
+  if (e.shadow) {
+    return;
+  }
+  e.shadow       = std::make_shared<BlindUe>();
+  e.shadow_since = now;
+  printf("GoldenSniffer: UE 0x%04x CONVERGED, re-learning (%s)\n", rnti, why);
+}
+
+/* Learns one DCI of a UE. A converged UE learns only what agrees with its track; a DCI
+  that does not (a reconfiguration changed its sizes, its CORESET or its scrambling)
+  starts a fresh learning in its shadow, which replaces the track once it converges. */
+static void gs_learn(BlindUe& e, const gs_dci_t& d, double now)
+{
+  if (d.coreset0) {
+    return;
+  }
+  if (d.nof_bits > 0) {
+    e.last_dir[d.payload[0] ? 1 : 0] = now;
+  }
+  if (e.state != BlindUe::CONVERGED) {
+    gs_learn_into(e, d, now);
+    return;
+  }
+  const bool agrees = gs_agrees(e.track, d);
+  if (!agrees) {
+    char why[96];
+    snprintf(why, sizeof(why), "a DCI of size %u, N_ID %u, %u symbol(s), not in its track %s", d.nof_bits, d.n_id,
+             d.duration, gs_sizes_str(e.track).c_str());
+    gs_start_shadow(e, d.rnti, now, why);
+  }
+  if (e.shadow) {
+    gs_learn_into(*e.shadow, d, now);
+  }
+  if (agrees) {
+    gs_learn_into(e, d, now);
+  }
+}
+
 static bool gs_is_known(const WorkState& state, uint16_t rnti)
 {
   return std::find(state.known_rntis.begin(), state.known_rntis.end(), rnti) != state.known_rntis.end();
@@ -442,7 +606,7 @@ static void gs_set_state(BlindUe& e, uint16_t rnti, BlindUe::State to, const cha
 static bool gs_discovery_window(double now)
 {
   const GoldenSnifferArgs& a     = nrscope_gs_args;
-  const double             ready = gs_ready_time.load();
+  const double             ready = nrscope_lossless.load() ? gs_air_ready : gs_ready_time.load();
   if (a.always) {
     return true;
   }
@@ -466,6 +630,13 @@ void golden_sniffer_update(WorkState&                   state,
 {
   if (!nrscope_gs_args.enable) {
     return;
+  }
+  const double now_wall = now; /* the regular RNTI list keeps wall-clock times */
+  if (nrscope_lossless.load() && gs_spf.load() > 0) {
+    now = gs_air_now(result);
+    if (gs_air_ready < 0 && gs_ready_time.load() > 0) {
+      gs_air_ready = now;
+    }
   }
   const GoldenSnifferArgs&    a = nrscope_gs_args;
   std::lock_guard<std::mutex> lock(gs_log_mutex);
@@ -512,12 +683,22 @@ void golden_sniffer_update(WorkState&                   state,
         char why[96];
         snprintf(why, sizeof(why), "RRC PDU on SRB1, %u bytes, PDCP SN %d", ev.len, ev.pdcp_sn);
         gs_set_state(e, ev.rnti, BlindUe::ARMED, why);
+      } else if (e.state == BlindUe::CONVERGED) {
+        char why[96];
+        snprintf(why, sizeof(why), "RRC PDU on SRB1, %u bytes, PDCP SN %d", ev.len, ev.pdcp_sn);
+        gs_start_shadow(e, ev.rnti, now, why);
       }
     }
   }
 
   /* DCIs of converged UEs, decoded in the workers */
   const uint32_t first_crb = gs_first_crb.load();
+  if (!result.tracked_dcis.empty() && result.gs_t_submit > 0) {
+    gs_t_lat_track.add(1e3 * (gs_steady_s() - result.gs_t_submit));
+  }
+  for (const gs_dci_t& d : result.region_dcis) {
+    gs_log_one_locked(now, result.outcome.sfn, d.slot_idx, first_crb, d, "region");
+  }
   for (const gs_dci_t& d : result.tracked_dcis) {
     gs_log_one_locked(now, result.outcome.sfn, d.slot_idx, first_crb, d, "tracked");
     auto it = ues.find(d.rnti);
@@ -527,8 +708,20 @@ void golden_sniffer_update(WorkState&                   state,
     }
   }
 
-  /* Blind sightings from the searchers */
+  /* Blind sightings: from the searchers, and the tracked decode's other C-RNTIs, which
+    may discover a UE outside the discovery windows (discover_in_track) */
+  std::vector<std::pair<const gs_dci_t*, bool> > sightings;
   for (const gs_dci_t& d : gs_sightings) {
+    sightings.push_back({&d, false});
+  }
+  for (const gs_dci_t& d : result.region_dcis) {
+    if (std::string(rnti_kind(d.rnti, d.coreset0, d.n_rnti)) == "C") {
+      sightings.push_back({&d, true});
+    }
+  }
+  for (const auto& sp : sightings) {
+    const gs_dci_t& d           = *sp.first;
+    const bool      from_region = sp.second;
     auto it = ues.find(d.rnti);
     if (gs_is_known(state, d.rnti)) {
       BlindUe& e = ues[d.rnti];
@@ -547,7 +740,7 @@ void golden_sniffer_update(WorkState&                   state,
     } else if (it != ues.end()) {
       gs_learn(it->second, d, now);
       it->second.last_seen = now;
-    } else if (gs_discovery_window(now)) {
+    } else if (gs_discovery_window(now) || (from_region && a.discover_in_track)) {
       BlindUe e;
       e.state     = BlindUe::DISCOVERED;
       e.last_seen = now;
@@ -578,6 +771,57 @@ void golden_sniffer_update(WorkState&                   state,
                (int)first_crb + e.track.sc_lo / NRSCOPE_NSC_PER_RB_NR,
                (int)first_crb + e.track.sc_hi / NRSCOPE_NSC_PER_RB_NR, e.track.duration);
       gs_set_state(e, rnti, BlindUe::CONVERGED, why);
+      /* test: a reconfiguration that changed one DCI size, as the track would see it */
+      static bool test_dropped = false;
+      if (!test_dropped && getenv("GS_TEST_DROP_SIZE") != nullptr) {
+        const uint32_t drop = (uint32_t)atoi(getenv("GS_TEST_DROP_SIZE"));
+        uint32_t       k    = 0;
+        for (uint32_t z = 0; z < e.track.nof_sizes; z++) {
+          if (e.track.sizes[z] != drop) {
+            e.track.sizes[k++] = e.track.sizes[z];
+          }
+        }
+        if (k < e.track.nof_sizes) {
+          e.track.nof_sizes = k;
+          test_dropped      = true;
+          printf("GoldenSniffer: [test] size %u removed from the track of 0x%04x: %s\n", drop, rnti,
+                 gs_sizes_str(e.track).c_str());
+        }
+      }
+    }
+    /* Re-learning of a converged UE: the shadow replaces the track once it converged */
+    if (e.state == BlindUe::CONVERGED && e.shadow) {
+      const BlindUe& s = *e.shadow;
+      if (!s.interleaved && s.hits >= a.converge_hits && s.track.nof_sizes > 0 &&
+          (s.dirs == 3 || now - s.learn_since >= a.converge_s)) {
+        printf("GoldenSniffer: UE 0x%04x re-converged: sizes %s -> %s, N_ID %u -> %u, CRB %d-%d, %u symbol(s)\n", rnti,
+               gs_sizes_str(e.track).c_str(), gs_sizes_str(s.track).c_str(), e.track.n_id, s.track.n_id,
+               (int)first_crb + s.track.sc_lo / NRSCOPE_NSC_PER_RB_NR,
+               (int)first_crb + s.track.sc_hi / NRSCOPE_NSC_PER_RB_NR, s.track.duration);
+        e.track       = s.track;
+        e.size_count  = s.size_count;
+        e.dirs        = s.dirs;
+        e.hits        = s.hits;
+        e.learn_since = s.learn_since;
+        e.shadow.reset();
+      } else if (now - e.shadow_since > a.arm_s) {
+        printf("GoldenSniffer: UE 0x%04x re-learning ended, %u DCI(s) learned: track kept (%s)\n", rnti, s.hits,
+               gs_sizes_str(e.track).c_str());
+        e.shadow.reset();
+      }
+    }
+    /* One direction stopped while the other goes on: a reconfiguration may have changed
+      that format's size, which the tracked decode cannot see. A sweep finds it. */
+    if (e.state == BlindUe::CONVERGED && e.dirs == 3 && e.last_dir[0] > 0 && e.last_dir[1] > 0) {
+      const bool ul_q = now - e.last_dir[0] > a.quiet_s, dl_q = now - e.last_dir[1] > a.quiet_s;
+      if (ul_q != dl_q && !e.dir_quiet) {
+        e.dir_quiet    = true;
+        gs_sweep_until = std::max(gs_sweep_until, now + a.scan_window_s);
+        printf("GoldenSniffer: UE 0x%04x %s DCIs stopped %.1f s ago, %s go on: sweeping for %.0f s\n", rnti,
+               ul_q ? "UL" : "DL", now - e.last_dir[ul_q ? 0 : 1], ul_q ? "DL" : "UL", a.scan_window_s);
+      } else if (ul_q == dl_q) {
+        e.dir_quiet = false;
+      }
     }
     /* A blind-tracked UE that was active and went silent: idle, gone, or back under a
       new C-RNTI (re-attach or reconfiguration with sync) whose RACH was missed. A sweep
@@ -585,7 +829,7 @@ void golden_sniffer_update(WorkState&                   state,
     if (e.state != BlindUe::RRC && e.last_seen > 0) {
       if (!e.quiet && now - e.last_seen > a.quiet_s) {
         e.quiet        = true;
-        gs_sweep_until = now + a.scan_window_s;
+        gs_sweep_until = std::max(gs_sweep_until, now + a.scan_window_s);
         printf("GoldenSniffer: UE 0x%04x quiet for %.1f s, sweeping for %.0f s\n", rnti, now - e.last_seen,
                a.scan_window_s);
       } else if (e.quiet && now - e.last_seen <= a.quiet_s) {
@@ -595,23 +839,28 @@ void golden_sniffer_update(WorkState&                   state,
     if (e.state == BlindUe::ARMED && now - e.armed_at > a.arm_s) {
       gs_set_state(e, rnti, BlindUe::RRC, "no sign of a changed config");
     }
-    /* still seen blind: not expired from the regular list either */
+    /* still seen blind: not expired from the regular list either. A converged UE is kept
+      there until silent for keep_s: an idle UE sends nothing for a while, and if it was
+      dropped, its next DCIs would be lost until a sweep found it again. */
+    const bool keep = e.state == BlindUe::CONVERGED && e.last_seen > 0 && now - e.last_seen < a.keep_s;
     if (known && e.last_seen > 0) {
+      const double alive = (keep ? now : e.last_seen) + (now_wall - now);
       for (size_t i = 0; i < state.known_rntis.size(); i++) {
-        if (state.known_rntis[i] == rnti && state.last_seen[i] < e.last_seen) {
-          state.last_seen[i] = e.last_seen;
+        if (state.known_rntis[i] == rnti && state.last_seen[i] < alive) {
+          state.last_seen[i] = alive;
         }
       }
     }
-    const double last = std::max(e.last_seen, e.last_regular);
-    if ((!known && e.from_rach) || (!known && last > 0 && now - last > state.rnti_expiry_s)) {
+    const double last   = std::max(e.last_seen, e.last_regular);
+    const double expiry = e.state == BlindUe::CONVERGED ? std::max(a.keep_s, state.rnti_expiry_s) : state.rnti_expiry_s;
+    if ((!known && e.from_rach) || (!known && last > 0 && now - last > expiry)) {
       if (e.state != BlindUe::RRC) {
         printf("GoldenSniffer: UE 0x%04x %s dropped (not seen for %.1f s)\n", rnti, state_name(e.state), now - last);
       }
       it = ues.erase(it);
       continue;
     }
-    any_learning  = any_learning || e.state == BlindUe::STALE || e.state == BlindUe::DISCOVERED ||
+    any_learning  = any_learning || e.state == BlindUe::STALE || e.state == BlindUe::DISCOVERED || e.shadow ||
                    (e.state != BlindUe::RRC && now - e.armed_at < a.arm_s);
     any_converged = any_converged || e.state == BlindUe::CONVERGED;
     ++it;
@@ -626,7 +875,7 @@ void golden_sniffer_update(WorkState&                   state,
         continue;
       }
       state.known_rntis.push_back(f.rnti);
-      state.last_seen.push_back(now);
+      state.last_seen.push_back(now_wall);
       state.nof_known_rntis++;
       const auto& sp_ded = state.master_cell_group.sp_cell_cfg.sp_cell_cfg_ded;
       if (f.n_rnti && sp_ded.init_dl_bwp_present && sp_ded.init_dl_bwp.pdcch_cfg_present &&
@@ -711,6 +960,19 @@ int GoldenSnifferDecoder::Init(WorkState* state, cf_t* input0)
     printf("GoldenSniffer: the capture holds carrier PRBs %d..%d of %u; PDCCHs outside are not searched\n", first,
            end - 1, (unsigned)carrier.carrier_bw);
   }
+  {
+    /* where the carrier is (SIB1), for setting rx_center_freq on an unknown cell */
+    static std::atomic<bool> told{false};
+    if (!told.exchange(true)) {
+      const double c_lo = f_lo, c_hi = c_lo + carrier.carrier_bw * rb_hz; // f_lo: carrier PRB 0
+      printf("GoldenSniffer: carrier %u PRBs, %.3f..%.3f MHz (centre %.3f MHz); the capture passes %.3f..%.3f MHz%s",
+             (unsigned)carrier.carrier_bw, c_lo / 1e6, c_hi / 1e6, (c_lo + c_hi) / 2e6, (fc - half) / 1e6,
+             (fc + half) / 1e6, first > 0 || end < (int)carrier.carrier_bw ? "" : "\n");
+      if (first > 0 || end < (int)carrier.carrier_bw) {
+        printf(": set rx_center_freq: %.0f\n", std::round((c_lo + c_hi) / 2.0 / 1e3) * 1e3);
+      }
+    }
+  }
   first_crb            = carrier.offset_to_carrier + (uint32_t)first;
   grid_carrier         = state->args_t.base_carrier;
   grid_carrier.nof_prb = (uint32_t)(end - first);
@@ -740,9 +1002,12 @@ int GoldenSnifferDecoder::Init(WorkState* state, cf_t* input0)
   cs0_nof_sc = srsran_coreset_get_bw(&state->coreset0_t) * NRSCOPE_NSC_PER_RB_NR;
   pci      = state->cs_ret.ssb_res.N_id;
   slots_per_frame = SRSRAN_NSLOTS_PER_FRAME_NR(state->arg_scs.scs);
+  gs_spf.store(slots_per_frame);
 
   gs_args_t ga;
   gs_args_default(&ga);
+  ga.size_min = nrscope_gs_args.size_min;
+  ga.size_max = nrscope_gs_args.size_max;
   ga.max_duration = nrscope_gs_args.max_duration;
   ga.min_parity   = nrscope_gs_args.min_parity;
   ga.max_L_log2   = 0;
@@ -825,7 +1090,10 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
   const uint32_t nsym                    = nrscope_gs_args.max_duration + 1;
   uint32_t       mask[SRSRAN_MAX_PORTS] = {(1u << nsym) - 1u};
   uint32_t       done[SRSRAN_MAX_PORTS] = {};
+  const double t_fft0 = gs_steady_s();
+  result->gs_t_submit = t_fft0;
   srsran_ue_dl_nr_estimate_fft_nrscope_symbols(&ue_dl, slot, arg_scs_grid, mask, done);
+  gs_t_fft.add(1e3 * (gs_steady_s() - t_fft0));
 
   const uint32_t nof_sc = grid_carrier.nof_prb * NRSCOPE_NSC_PER_RB_NR;
 
@@ -841,15 +1109,23 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
     s.cs0_nof_sc = cs0_nof_sc;
     s.pci        = pci;
     for (const auto& u : state->blind_ues) {
-      if (u.second.state != BlindUe::CONVERGED) {
-        continue;
+      if (u.second.state == BlindUe::CONVERGED) {
+        tracked_now.push_back(u.second.track);
       }
-      tracked_now.push_back(u.second.track);
-      gs_dci_t out[4];
-      int      n = gs_decode_tracked(track_gs, &s, &u.second.track, out, 4);
+    }
+    if (!tracked_now.empty()) {
+      /* all converged UEs at once; while the search is off, the other C-RNTIs found in
+        their CORESETs are sightings (the search reports them while it is on) */
+      const double t_tr0 = gs_steady_s();
+      gs_dci_t     out[GS_MAX_DCI_PER_SLOT];
+      uint8_t      trk[GS_MAX_DCI_PER_SLOT];
+      const bool   want_other = nrscope_gs_args.discover_in_track && !search;
+      int          n = gs_decode_tracked_multi(track_gs, &s, tracked_now.data(), (uint32_t)tracked_now.size(),
+                                      nrscope_gs_args.track_full_band, want_other, out, trk, GS_MAX_DCI_PER_SLOT);
       for (int i = 0; i < n; i++) {
-        result->tracked_dcis.push_back(out[i]);
+        (trk[i] ? result->tracked_dcis : result->region_dcis).push_back(out[i]);
       }
+      gs_t_track.add(1e3 * (gs_steady_s() - t_tr0));
     }
   }
 
@@ -904,10 +1180,14 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
       return;
     }
   }
+  const double t_enq0 = gs_steady_s();
+  job.t_submit        = t_fft0;
   job.grid.assign(ue_dl.sf_symbols[0], ue_dl.sf_symbols[0] + (size_t)nof_sc * nsym);
+  job.t_enq = gs_steady_s();
   {
     std::lock_guard<std::mutex> lock(gs_pool.m);
     gs_pool.q.push_back(std::move(job));
   }
+  gs_t_enq.add(1e3 * (gs_steady_s() - t_enq0));
   gs_pool.cv.notify_one();
 }
