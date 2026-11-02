@@ -15,11 +15,16 @@
  *     reference, pdcch-DMRS-ScramblingID, n_RNTI = C-RNTI), CORESET#0 (own DM-RS
  *     reference, PCI), interleaved CORESETs; a timing slope, a symbol-to-symbol phase
  *     step and AWGN on every RE.
+ *  5. Tracked UE: direct decode of one UE's DCIs from what was learned of it.
+ *  6. Soft-information error correction (gs_ec.c): detection vs SNR, hard vs soft;
+ *     false alarms on noise and on other UEs' DCIs; time per call.
  *
  * Pass: 1-3 exact; 4 finds >= 95% of the DCIs with no wrong DCI reported, except
  * CORESET#0 with unrestricted sizes (n_RNTI = 0, nested polar codes): <= 1% wrong.
+ * 6: see test_soft(). "gs_selftest <seed> <n>" runs test n only.
  */
 #include "nrscope/hdr/golden_sniffer/gs_core.h"
+#include "nrscope/src/libs/golden_sniffer/gs_ec.h"
 #include "srsran/phy/ch_estimation/dmrs_pdcch.h"
 #include "srsran/phy/phch/pdcch_nr.h"
 #include "srsran/phy/utils/random.h"
@@ -663,6 +668,374 @@ static void test_tracked_multi(void)
   gs_destroy(gs);
 }
 
+/* 6. Soft-information error correction (gs_ec.c, 5GDescrambler's LGS correction).
+ * DCIs from srsran_pdcch_nr_encode, QPSK over AWGN, LLR = 2 sqrt(2) Re/Im(y) / sigma^2
+ * (SNR = Es/N0 per RE), decoded with the true size, N_ID and scrambling case, as
+ * gs_decode_tracked does:
+ *   6.0 the soft path alone (hard decision skipped) decodes noiseless DCIs: its own
+ *       tables agree with srsRAN's encoder;
+ *   6.1 detection vs SNR, hard decision (gs_dci_try) vs soft (gs_dci_try_soft), per AL;
+ *   6.2 false alarms on noise only: per candidate per size (both scrambling cases tried),
+ *       at the default acceptance (min_parity 16) and at 8 and 12 against the bound
+ *       2^-min_parity per call;
+ *   6.3 false alarms on another UE's DCI: every other size, AL, CCE window and
+ *       scrambling case over a DCI (and the empty CCEs next to it) at 4 and 12 dB;
+ *   6.4 time per soft call (error-correction path, and noise-only inputs).
+ * Three soft decoders: "auto" = 5GDescrambler's error budget (10% of E with n_RNTI =
+ * RNTI, 5% with n_RNTI = 0), "max" = GS_EC_EFFORT_MAX (t = Q - min_parity with n_RNTI =
+ * RNTI), "max+m" = max with metric >= EC_MIN_METRIC; all at min_parity 16 and the
+ * default neighbour check.
+ * Pass: 6.0 exact; soft never worse than hard and no wrong DCI in 6.1; 6.2 <= 1e-4 per
+ * candidate per size and 6.3 <= 1e-4 above the hard decision (see 6.3), for auto and
+ * max+m (max sits at its bound, 2 x 2^-16, and is reported only). GS_EC_TRIALS scales
+ * 6.2 and 6.3 (default 1e5 noise candidates per AL). */
+#define EC_NSIZES 8
+static const uint32_t ec_sizes[EC_NSIZES] = {39, 43, 47, 51, 55, 59, 63, 70};
+
+/* hard bits of one DCI at CCE 0, in mapping order */
+static uint32_t ec_encode_dci(tx_t* tx, uint32_t Ll, uint32_t nbits, bool ue, uint32_t n_id, uint16_t rnti,
+                              uint8_t* payload, uint8_t* bits)
+{
+  memset(&tx->coreset, 0, sizeof(tx->coreset));
+  tx->carrier.pci                        = ue ? 1 : n_id;
+  tx->coreset.id                         = 1;
+  tx->coreset.duration                   = 1;
+  tx->coreset.mapping_type               = srsran_coreset_mapping_type_non_interleaved;
+  tx->coreset.dmrs_scrambling_id_present = ue;
+  tx->coreset.dmrs_scrambling_id         = ue ? n_id : 0;
+  for (int r = 0; r < 16; r++) {
+    tx->coreset.freq_resources[r] = true;
+  }
+  srsran_vec_cf_zero(tx->grid, 106 * 12 * 14);
+  tx_put(tx, 0, Ll, 0, ue ? srsran_search_space_type_ue : srsran_search_space_type_common_3, rnti, nbits, payload);
+  uint32_t E = 0;
+  for (uint32_t k = 0; k < (72U << Ll); k++) {
+    if (k % 4 == 1) {
+      continue;
+    }
+    bits[E++] = crealf(tx->grid[k]) < 0;
+    bits[E++] = cimagf(tx->grid[k]) < 0;
+  }
+  return E;
+}
+
+/* N(0, 1). Not srsran_random_gauss_dist(): its std::normal_distribution(sigma) takes
+ * sigma as the mean, so it returns N(sigma, 1). */
+static float ec_gauss(void)
+{
+  float u1 = srsran_random_uniform_real_dist(rnd, 1e-12f, 1.0f), u2 = srsran_random_uniform_real_dist(rnd, 0.0f, 1.0f);
+  return sqrtf(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2);
+}
+
+/* LLRs of QPSK bits through AWGN (bits == NULL: noise only, nothing transmitted) */
+static void ec_channel(const uint8_t* bits, uint32_t E, float snr_db, float* llr)
+{
+  const float n0 = powf(10.0f, -snr_db / 10.0f), sd = sqrtf(n0 / 2.0f);
+  for (uint32_t i = 0; i < E; i++) {
+    float r = (bits ? (bits[i] ? -1.0f : 1.0f) * (float)M_SQRT1_2 : 0.0f) + sd * ec_gauss();
+    llr[i]  = 2.0f * (float)M_SQRT2 * r / n0;
+  }
+}
+
+static int ec_cmp_double(const void* a, const void* b)
+{
+  double x = *(const double*)a, y = *(const double*)b;
+  return x < y ? -1 : x > y;
+}
+
+static void ec_time_report(const char* what, double* t, uint32_t n)
+{
+  if (n == 0) {
+    printf("      %-34s -\n", what);
+    return;
+  }
+  double sum = 0;
+  for (uint32_t i = 0; i < n; i++) {
+    sum += t[i];
+  }
+  qsort(t, n, sizeof(double), ec_cmp_double);
+  printf("      %-34s mean %6.1f us, median %6.1f us, p99 %6.1f us, max %8.1f us (%u calls)\n", what, 1e6 * sum / n,
+         1e6 * t[n / 2], 1e6 * t[(uint32_t)(0.99 * (n - 1))], 1e6 * t[n - 1], n);
+}
+
+#define EC_MIN_METRIC 0.10f
+static void test_soft(void)
+{
+  tx_t tx;
+  tx_init(&tx, 106, 0);
+  gs_ec_args_t def;
+  gs_ec_args_default(&def);
+  for (uint32_t i = 0; i < EC_NSIZES; i++) {
+    gs_ec_prepare(ec_sizes[i]);
+  }
+  static uint8_t bits[108 << 4], payload[128], got[GS_MAX_DCI_BITS];
+  static float   llr[108 << 4];
+  uint16_t       r_got;
+  /* soft decoders compared: 5GDescrambler's error budget (10% / 5% of E), the largest
+   * budget min_parity allows (t = Q - min_parity), and that with a metric threshold */
+#define EC_NCFG 3
+  const uint32_t    effort[EC_NCFG] = {GS_EC_EFFORT_AUTO, GS_EC_EFFORT_MAX, GS_EC_EFFORT_MAX};
+  const char* const ename[EC_NCFG]  = {"auto", "max", "max+m"};
+  gs_ec_args_t      cfg[EC_NCFG]    = {def, def, def};
+  cfg[0].min_metric = cfg[1].min_metric = -INFINITY;
+  cfg[2].min_metric = EC_MIN_METRIC;
+
+  /* 6.0 */
+  {
+    gs_ec_args_t a = def;
+    a.hard_first   = false;
+    int ok = 0, n = 0;
+    for (int t = 0; t < 200; t++) {
+      uint32_t Ll = rint_(0, 4), nb = ec_sizes[rint_(0, EC_NSIZES - 1)];
+      bool     ue   = rint_(0, 1);
+      uint32_t n_id = ue ? rint_(0, 65535) : rint_(0, 1007);
+      uint16_t rnti = (uint16_t)rint_(1, 0xfff0);
+      uint32_t E    = ec_encode_dci(&tx, Ll, nb, ue, n_id, rnti, payload, bits);
+      ec_channel(bits, E, 40.0f, llr);
+      gs_ec_info_t info;
+      n++;
+      ok += gs_dci_try_soft_ex(&a, llr, E, nb, n_id, ue, GS_EC_EFFORT_AUTO, got, &r_got, &info) && r_got == rnti &&
+            memcmp(got, payload, nb) == 0 && !info.hard && info.flips == 0;
+    }
+    CHECK(ok == n, "soft path alone, noiseless: %d/%d", ok, n);
+    printf("6.0 Soft path alone (no hard decision), noiseless: %d/%d\n", ok, n);
+  }
+
+  /* 6.1 detection vs SNR, and the time of the correcting calls */
+  static const float snr[] = {-2, 0, 2, 4, 6, 8, 10, 12};
+  const uint32_t     NSNR  = sizeof(snr) / sizeof(snr[0]);
+  static double      t_ec[EC_NCFG][4][8000];
+  uint32_t           n_ec[EC_NCFG][4] = {{0}};
+  printf("6.1 Detection (%%) vs SNR (Es/N0 per RE), true size/N_ID/scrambling, sizes %u..%u, min_parity 16;\n"
+         "    auto = 5GDescrambler budget (10%%/5%% of E), max = t = Q - min_parity (<= %u; CSS: auto),\n"
+         "    +m = metric >= %.2f:\n",
+         ec_sizes[0], ec_sizes[EC_NSIZES - 1], GS_EC_T_MAX, EC_MIN_METRIC);
+  printf("      %-17s", "SNR dB");
+  for (uint32_t i = 0; i < NSNR; i++) {
+    printf("%6.0f", snr[i]);
+  }
+  printf("\n");
+  int wrong_hard = 0, wrong_soft[EC_NCFG] = {0}, worse = 0;
+  for (int ue = 1; ue >= 0; ue--) {
+    for (uint32_t Ll = 0; Ll <= 3; Ll++) {
+      const int trials = ue ? 400 : 200;
+      int       ok_h[8] = {0}, ok_s[EC_NCFG][8] = {{0}};
+      for (int t = 0; t < trials; t++) {
+        uint32_t nb   = ec_sizes[rint_(0, EC_NSIZES - 1)];
+        uint32_t n_id = ue ? rint_(0, 65535) : rint_(0, 1007);
+        uint16_t rnti = (uint16_t)rint_(0x4601, 0xfff0);
+        uint32_t E    = ec_encode_dci(&tx, Ll, nb, ue, n_id, rnti, payload, bits);
+        for (uint32_t si = 0; si < NSNR; si++) {
+          ec_channel(bits, E, snr[si], llr);
+          uint8_t hb[108 << 4];
+          for (uint32_t i = 0; i < E; i++) {
+            hb[i] = llr[i] < 0;
+          }
+          if (gs_dci_try(hb, E, nb, n_id, ue, got, &r_got)) {
+            bool good = r_got == rnti && memcmp(got, payload, nb) == 0;
+            ok_h[si] += good;
+            wrong_hard += !good;
+          }
+          for (int c = 0; c < EC_NCFG; c++) {
+            gs_ec_info_t info;
+            double       t0 = now_s();
+            bool         s  = gs_dci_try_soft_ex(&cfg[c], llr, E, nb, n_id, ue, effort[c], got, &r_got, &info);
+            double       dt = now_s() - t0;
+            if (!info.hard && info.t > 0 && n_ec[c][Ll] < 8000) {
+              t_ec[c][Ll][n_ec[c][Ll]++] = dt;
+            }
+            if (s) {
+              bool good = r_got == rnti && memcmp(got, payload, nb) == 0;
+              ok_s[c][si] += good;
+              wrong_soft[c] += !good;
+              if (!good) {
+                printf("   wrong %s: %s AL%u size %u %.0f dB: t %u rank %u Q %u flips %u eff %.1f metric %.3f rnti %04x/%04x\n",
+                       ename[c], ue ? "UE" : "CSS", 1U << Ll, nb, snr[si], info.t, info.rank, info.Q, info.flips,
+                       info.eff_parity, info.metric, r_got, rnti);
+              }
+            }
+          }
+        }
+      }
+      printf("      %s AL%u hard  ", ue ? "UE " : "CSS", 1U << Ll);
+      for (uint32_t i = 0; i < NSNR; i++) {
+        printf("%6.1f", 100.0 * ok_h[i] / trials);
+      }
+      for (int c = 0; c < EC_NCFG; c++) {
+        printf("\n      %s AL%u %-6s", ue ? "UE " : "CSS", 1U << Ll, ename[c]);
+        for (uint32_t i = 0; i < NSNR; i++) {
+          printf("%6.1f", 100.0 * ok_s[c][i] / trials);
+          worse += ok_s[c][i] < ok_h[i];
+        }
+      }
+      printf("\n");
+    }
+  }
+  printf("      wrong DCIs: hard %d, auto %d, max %d, max+m %d\n", wrong_hard, wrong_soft[0], wrong_soft[1],
+         wrong_soft[2]);
+  CHECK(worse == 0, "soft below hard at %d points", worse);
+  CHECK(wrong_soft[0] + wrong_soft[1] + wrong_soft[2] == 0, "soft decoder: %d / %d / %d wrong DCIs", wrong_soft[0],
+        wrong_soft[1], wrong_soft[2]);
+
+  /* 6.2 noise only */
+  const uint32_t ntr = getenv("GS_EC_TRIALS") ? (uint32_t)atoi(getenv("GS_EC_TRIALS")) : 100000;
+  const uint32_t nrl = ntr / 5; /* relaxed acceptances, to check the bound */
+  static double  t_noise[EC_NCFG][4][20000], t_hard[4][20000];
+  uint32_t       n_noise[EC_NCFG][4] = {{0}}, n_hard[4] = {0};
+  double         worst_fa[EC_NCFG]   = {0};
+  printf("6.2 Noise only, %u candidates per AL, each tried at every size and both scrambling cases (= 2 calls);\n"
+         "    false DCIs per candidate per size at min_parity 16; per call at 12 and 8 with the largest budget:\n",
+         ntr);
+  for (uint32_t Ll = 0; Ll <= 3; Ll++) {
+    const uint32_t E = 108U << Ll;
+    uint32_t       fa[EC_NCFG][EC_NSIZES] = {{0}}, fa_h = 0, fa8 = 0, fa12 = 0, calls = 0;
+    gs_ec_args_t   a8 = def, a12 = def;
+    a8.min_parity     = 8;
+    a12.min_parity    = 12;
+    a8.min_metric = a12.min_metric = -INFINITY;
+    for (uint32_t t = 0; t < ntr; t++) {
+      ec_channel(NULL, E, 0.0f, llr);
+      uint8_t hb[108 << 4];
+      for (uint32_t i = 0; i < E; i++) {
+        hb[i] = llr[i] < 0;
+      }
+      uint32_t n_id = rint_(0, 65535);
+      for (uint32_t z = 0; z < EC_NSIZES; z++) {
+        for (int h = 0; h < 2; h++) {
+          double t0h = now_s();
+          fa_h += gs_dci_try(hb, E, ec_sizes[z], n_id, h, got, &r_got);
+          if (n_hard[Ll] < 20000) {
+            t_hard[Ll][n_hard[Ll]++] = now_s() - t0h;
+          }
+          for (int c = 0; c < EC_NCFG; c++) {
+            double t0 = now_s();
+            fa[c][z] += gs_dci_try_soft_ex(&cfg[c], llr, E, ec_sizes[z], n_id, h, effort[c], got, &r_got, NULL);
+            double dt = now_s() - t0;
+            if (n_noise[c][Ll] < 20000) {
+              t_noise[c][Ll][n_noise[c][Ll]++] = dt;
+            }
+          }
+          if (t < nrl) {
+            fa8 += gs_dci_try_soft_ex(&a8, llr, E, ec_sizes[z], n_id, h, GS_EC_T_MAX, got, &r_got, NULL);
+            fa12 += gs_dci_try_soft_ex(&a12, llr, E, ec_sizes[z], n_id, h, GS_EC_T_MAX, got, &r_got, NULL);
+            calls++;
+          }
+        }
+      }
+    }
+    for (int c = 0; c < EC_NCFG; c++) {
+      uint32_t tot = 0, worst = 0;
+      printf("      AL%u %-6s per size:", 1U << Ll, ename[c]);
+      for (uint32_t z = 0; z < EC_NSIZES; z++) {
+        printf(" %u:%u", ec_sizes[z], fa[c][z]);
+        tot += fa[c][z];
+        worst = fa[c][z] > worst ? fa[c][z] : worst;
+      }
+      double rate = (double)worst / ntr;
+      worst_fa[c] = rate > worst_fa[c] ? rate : worst_fa[c];
+      printf("  -> %.1e (worst size %.1e)\n", (double)tot / ((double)ntr * EC_NSIZES), rate);
+    }
+    printf("      AL%u hard %u; max at min_parity 12: %.2e per call (bound %.2e), 8: %.2e (bound %.2e)\n",
+           1U << Ll, fa_h, (double)fa12 / calls, 1.0 / 4096, (double)fa8 / calls, 1.0 / 256);
+  }
+  CHECK(worst_fa[0] <= 1e-4 && worst_fa[2] <= 1e-4, "noise-only false alarms %.2e / %.2e per candidate per size",
+        worst_fa[0], worst_fa[2]);
+
+  /* 6.3 another UE's DCI. The hard decision is the baseline: with n_RNTI = 0 it already
+   * solves other sizes in the DCI's own window (nested polar codes, ~2^-8 per size),
+   * which gs_search handles with its CSS size list; the soft decoders must not add more
+   * than 1e-4 to it (that one scaled by the soft detection gain). */
+  const int nc = getenv("GS_EC_TRIALS") ? (int)(ntr / 30) : 3000;
+  printf("6.3 Another UE's DCI (CCE 0, empty CCEs after it), %d per AL and scrambling, half at 4 dB, half at 12;\n"
+         "    tried at every other size, AL, CCE window and scrambling; false DCIs per candidate per size\n"
+         "    (its own window at other sizes | other ALs and windows):\n",
+         nc);
+  double worst_col = 0;
+  for (int ue = 1; ue >= 0; ue--) {
+    for (uint32_t Lb = 0; Lb <= 3; Lb++) {
+      uint64_t events = 0, events_ss = 0, falses[EC_NCFG + 1] = {0}, falses_ss[EC_NCFG + 1] = {0},
+               hits[EC_NCFG + 1] = {0};
+      for (int t = 0; t < nc; t++) {
+        uint32_t nb   = ec_sizes[rint_(0, EC_NSIZES - 1)];
+        uint32_t n_id = ue ? rint_(0, 65535) : rint_(0, 1007);
+        uint16_t rnti = (uint16_t)rint_(0x4601, 0xfff0);
+        uint32_t Eb   = ec_encode_dci(&tx, Lb, nb, ue, n_id, rnti, payload, bits);
+        float    sn   = (t & 1) ? 12.0f : 4.0f;
+        ec_channel(bits, Eb, sn, llr);
+        ec_channel(NULL, 864 - Eb, sn, llr + Eb); /* empty CCEs: noise at the same level */
+        for (uint32_t Ld = 0; Ld <= 3; Ld++) {
+          const uint32_t Ld_n = 1U << Ld, Lb_n = 1U << Lb, Ed = 108U << Ld;
+          for (uint32_t o = 0; o < (Ld <= Lb ? Lb_n : 1); o += Ld_n) {
+            const bool same = Ld == Lb && o == 0;
+            uint8_t    hb[108 << 3];
+            for (uint32_t i = 0; i < Ed; i++) {
+              hb[i] = llr[108 * o + i] < 0;
+            }
+            for (uint32_t z = 0; z < EC_NSIZES; z++) {
+              const uint32_t nz = ec_sizes[z];
+              for (int h = 0; h < 2; h++) {
+                for (int c = 0; c <= EC_NCFG; c++) {
+                  bool ok = c == 0 ? nz + 16 + def.min_parity <= Ed && gs_dci_try(hb, Ed, nz, n_id, h, got, &r_got)
+                                   : gs_dci_try_soft_ex(&cfg[c - 1], llr + 108 * o, Ed, nz, n_id, h, effort[c - 1],
+                                                        got, &r_got, NULL);
+                  if (!ok) {
+                    continue;
+                  }
+                  if (same && nz == nb && h == ue && r_got == rnti && memcmp(got, payload, nb) == 0) {
+                    hits[c]++;
+                  } else if (same) {
+                    falses_ss[c]++;
+                  } else {
+                    falses[c]++;
+                  }
+                }
+              }
+              events_ss += same;
+              events += !same;
+            }
+          }
+        }
+      }
+      printf("      %s AL%u:", ue ? "UE " : "CSS", 1U << Lb);
+      for (int c = 0; c <= EC_NCFG; c++) {
+        double r1 = (double)falses[c] / events, r2 = (double)falses_ss[c] / events_ss;
+        double h1 = (double)falses[0] / events, h2 = (double)falses_ss[0] / events_ss;
+        /* n_RNTI = 0, own window: a size-N DCI is a size-N' DCI too (nested codes), so the
+         * soft decoder finds those wherever it finds more DCIs: held to the hard rate
+         * scaled by the detection gain */
+        if (!ue) {
+          h2 *= hits[0] > 0 ? (double)hits[c] / (double)hits[0] : 1.0;
+        }
+        if (c == 1 || c == 3) {
+          worst_col = r1 - h1 > worst_col ? r1 - h1 : worst_col;
+          worst_col = r2 - h2 > worst_col ? r2 - h2 : worst_col;
+        }
+        printf("%s %s %lu/%d %.1e|%.1e", c ? "," : "", c ? ename[c - 1] : "hard", (unsigned long)hits[c], nc, r2, r1);
+      }
+      printf("\n");
+    }
+  }
+  CHECK(worst_col <= 1e-4, "collision false alarms %.2e per candidate per size above the hard decision", worst_col);
+
+  /* 6.4 */
+  printf("6.4 Time per call (one size, one scrambling case), hard decision for reference:\n");
+  for (uint32_t Ll = 0; Ll <= 3; Ll++) {
+    char what[64];
+    snprintf(what, sizeof(what), "gs_dci_try AL%u noise only (6.2)", 1U << Ll);
+    ec_time_report(what, t_hard[Ll], n_hard[Ll]);
+  }
+  for (int c = 0; c < EC_NCFG; c++) {
+    for (uint32_t Ll = 0; Ll <= 3; Ll++) {
+      char what[64];
+      snprintf(what, sizeof(what), "%s AL%u correcting (6.1)", ename[c], 1U << Ll);
+      ec_time_report(what, t_ec[c][Ll], n_ec[c][Ll]);
+      snprintf(what, sizeof(what), "%s AL%u noise only (6.2)", ename[c], 1U << Ll);
+      ec_time_report(what, t_noise[c][Ll], n_noise[c][Ll]);
+    }
+  }
+  tx_free(&tx);
+}
+
 int main(int argc, char** argv)
 {
   uint32_t seed = argc > 1 ? (uint32_t)atoi(argv[1]) : 1234;
@@ -672,12 +1045,28 @@ int main(int argc, char** argv)
   gs_t* warm = gs_create(&args); /* builds the shared tables once */
   gs_destroy(warm);
 
-  test_dmrs_direct();
-  test_dmrs_underdet();
-  test_gf2();
-  test_search();
-  test_tracked();
-  test_tracked_multi();
+  int only = argc > 2 ? atoi(argv[2]) : 0;
+  if (only == 0 || only == 1) {
+    test_dmrs_direct();
+  }
+  if (only == 0 || only == 2) {
+    test_dmrs_underdet();
+  }
+  if (only == 0 || only == 3) {
+    test_gf2();
+  }
+  if (only == 0 || only == 4) {
+    test_search();
+  }
+  if (only == 0 || only == 5) {
+    test_tracked();
+  }
+  if (only == 0 || only == 6) {
+    test_soft();
+  }
+  if (only == 0 || only == 7) {
+    test_tracked_multi();
+  }
 
   srsran_random_free(rnd);
   printf("%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
