@@ -97,6 +97,7 @@ struct GoldenSnifferArgs {
   double   keep_s         = 300;   // a converged UE is kept (tracked) until silent this long
   bool     track_full_band   = true; // tracked decode over the whole band, all ALs
   bool     discover_in_track = true; // other C-RNTIs it finds are sightings (discovery)
+  bool     searcher_idle     = true; // searcher threads at SCHED_IDLE: only spare CPU time
   double   quiet_s        = 1.0;   // a blind-tracked UE silent this long starts a sweep (gone or new RNTI?)
 };
 

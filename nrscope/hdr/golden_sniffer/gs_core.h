@@ -190,6 +190,12 @@ void gs_unwrap_qpsk(const cf_t* y, uint32_t n, cf_t* y_corr);
 /* GF(2) DCI decoder for nof_bits payload bits in E = 108 L hard bits (one per byte).
  * n_rnti selects the scrambling: false -> c_init = n_id (common search space),
  * true -> c_init = (RNTI << 16) + n_id. Returns true on a consistent solution. */
+/* Builds every GF(2) table (sizes size_min..size_max, every AL; `first` sizes first) in a
+ * background thread at idle priority. Until it is done gs_dci_try never builds or waits:
+ * a table not ready yet fails that (size, AL), so real-time threads never stall on it. */
+int  gs_gf2_prebuild_start(uint32_t size_min, uint32_t size_max, const uint32_t* first, uint32_t nof_first);
+bool gs_gf2_prebuild_done(void);
+
 bool gs_dci_try(const uint8_t* bits, uint32_t E, uint32_t nof_bits, uint32_t n_id, bool n_rnti, uint8_t* payload,
                 uint16_t* rnti);
 

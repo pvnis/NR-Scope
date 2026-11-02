@@ -15,6 +15,8 @@
 #include "srsran/common/band_helper.h"
 #include "srsran/phy/common/phy_common_nr.h"
 
+extern "C" void srsran_dft_exit();
+
 int main(int argc, char** argv){
 
   /* Line-buffer stdout: piped into tee it is block-buffered, and a run stopped by
@@ -72,6 +74,10 @@ int main(int argc, char** argv){
     // the estimates still queued for sensing.record_estimates, before _exit drops them
     nrscope_sensing_record_close();
     golden_sniffer_report();
+    /* _exit skips the library destructors, srsRAN's FFTW wisdom export among them: every
+      run then measured every FFT plan again, GoldenSniffer's full-carrier ones inside the
+      workers, mid-stream (bursts of dropped slots). Saved here, later runs plan at once. */
+    srsran_dft_exit();
     printf("Radio streams stopped, exiting\n");
     fflush(nullptr);
     _exit(0);

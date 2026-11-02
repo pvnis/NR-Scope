@@ -31,6 +31,8 @@
 #include "srsran/phy/fec/polar/polar_rm.h"
 #include "srsran/phy/utils/bit.h"
 #include <pthread.h>
+#include <sched.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -58,6 +60,9 @@ static gs_entry_t      gs_tab[GS_MAX_DCI_BITS + 1][GS_MAX_L_LOG2 + 1];
 static uint64_t        gs_scr[GS_MAX_L_LOG2 + 1][31][GS_EW]; /* x2 part of the scrambling for c_init = 2^b */
 static pthread_mutex_t gs_gf2_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int             gs_gf2_inited = 0;
+/* While the background builder runs, nobody else builds or waits: a table not built yet
+   makes gs_dci_try fail for that (size, AL). The real-time threads never block on it. */
+static volatile int    gs_gf2_background = 0;
 
 static srsran_polar_code_t    gs_code;
 static srsran_polar_encoder_t gs_enc;
@@ -306,6 +311,9 @@ static const gs_entry_t* gs_entry_get(uint32_t N, uint32_t Ll)
   if (__atomic_load_n(&e->ready, __ATOMIC_ACQUIRE)) {
     return e;
   }
+  if (__atomic_load_n(&gs_gf2_background, __ATOMIC_ACQUIRE)) {
+    return NULL;
+  }
   pthread_mutex_lock(&gs_gf2_mutex);
   if (!e->ready) {
     gs_entry_build(N, Ll);
@@ -316,6 +324,9 @@ static const gs_entry_t* gs_entry_get(uint32_t N, uint32_t Ll)
 
 void gs_gf2_prepare(uint32_t N)
 {
+  if (__atomic_load_n(&gs_gf2_background, __ATOMIC_ACQUIRE)) {
+    return; /* the background builder does it */
+  }
   for (uint32_t Ll = 0; Ll <= GS_MAX_L_LOG2; Ll++) {
     if (gs_gf2_size_valid(N, Ll)) {
       gs_entry_get(N, Ll);
@@ -334,7 +345,10 @@ bool gs_dci_try(const uint8_t* bits, uint32_t E, uint32_t nof_bits, uint32_t n_i
     return false;
   }
   const gs_entry_t* e = gs_entry_get(nof_bits, Ll);
-  const gs_sys_t*   s = &e->sys[n_rnti ? 1 : 0];
+  if (e == NULL) {
+    return false; /* still being built in the background */
+  }
+  const gs_sys_t* s = &e->sys[n_rnti ? 1 : 0];
   if (!s->valid) {
     return false;
   }
@@ -388,4 +402,88 @@ bool gs_dci_try(const uint8_t* bits, uint32_t E, uint32_t nof_bits, uint32_t n_i
   }
   *rnti = r;
   return true;
+}
+
+/* ------------------------------------------------------------ background builder */
+
+typedef struct {
+  uint32_t size_min, size_max;
+  uint32_t first[32], nof_first;
+} gs_prebuild_args_t;
+
+static gs_prebuild_args_t gs_prebuild_a;
+
+static void gs_prebuild_one(uint32_t N)
+{
+  for (uint32_t Ll = 0; Ll <= GS_MAX_L_LOG2; Ll++) {
+    if (!gs_gf2_size_valid(N, Ll)) {
+      continue;
+    }
+    gs_entry_t* e = &gs_tab[N][Ll];
+    if (__atomic_load_n(&e->ready, __ATOMIC_ACQUIRE)) {
+      continue;
+    }
+    pthread_mutex_lock(&gs_gf2_mutex); /* per table: the lock is never held long */
+    if (!e->ready) {
+      gs_entry_build(N, Ll);
+    }
+    pthread_mutex_unlock(&gs_gf2_mutex);
+  }
+}
+
+static void* gs_prebuild_thread(void* arg)
+{
+  (void)arg;
+  /* lowest priority there is: it only uses idle CPU time */
+  struct sched_param sp = {0};
+  pthread_setschedparam(pthread_self(), SCHED_IDLE, &sp);
+  pthread_setname_np(pthread_self(), "gs-gf2-build");
+  struct timespec t0, t1;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  gs_gf2_init();
+  const gs_prebuild_args_t* a = &gs_prebuild_a;
+  /* configured sizes first, then outwards from the sizes most cells use */
+  for (uint32_t i = 0; i < a->nof_first; i++) {
+    if (a->first[i] <= GS_MAX_DCI_BITS) {
+      gs_prebuild_one(a->first[i]);
+    }
+  }
+  const int c = 45;
+  for (int d = 0; d <= GS_MAX_DCI_BITS; d++) {
+    for (int sgn = 0; sgn < 2; sgn++) {
+      const int N = sgn ? c - d : c + d;
+      if ((sgn && d == 0) || N < (int)a->size_min || N > (int)a->size_max) {
+        continue;
+      }
+      gs_prebuild_one((uint32_t)N);
+    }
+  }
+  __atomic_store_n(&gs_gf2_background, 0, __ATOMIC_RELEASE);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  printf("GoldenSniffer: GF(2) tables for DCI sizes %u..%u built in %.1f s (background)\n", a->size_min, a->size_max,
+         (double)(t1.tv_sec - t0.tv_sec) + 1e-9 * (double)(t1.tv_nsec - t0.tv_nsec));
+  return NULL;
+}
+
+int gs_gf2_prebuild_start(uint32_t size_min, uint32_t size_max, const uint32_t* first, uint32_t nof_first)
+{
+  gs_prebuild_a.size_min  = size_min;
+  gs_prebuild_a.size_max  = size_max;
+  gs_prebuild_a.nof_first = 0;
+  for (uint32_t i = 0; first != NULL && i < nof_first && i < 32; i++) {
+    gs_prebuild_a.first[gs_prebuild_a.nof_first++] = first[i];
+  }
+  __atomic_store_n(&gs_gf2_background, 1, __ATOMIC_RELEASE);
+  pthread_t th;
+  if (pthread_create(&th, NULL, gs_prebuild_thread, NULL) != 0) {
+    __atomic_store_n(&gs_gf2_background, 0, __ATOMIC_RELEASE);
+    return -1;
+  }
+  pthread_detach(th);
+  return 0;
+}
+
+bool gs_gf2_prebuild_done(void)
+{
+  return !__atomic_load_n(&gs_gf2_background, __ATOMIC_ACQUIRE);
 }

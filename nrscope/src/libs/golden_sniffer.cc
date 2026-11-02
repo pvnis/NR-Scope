@@ -38,66 +38,100 @@ uint64_t                      gs_total       = 0;
 /* Execution time of one GoldenSniffer stage: count, mean, max, and a log histogram
   (10 bins per decade from 1 us) for the median and the 99th percentile */
 struct GsTimer {
-  const char* name;
-  std::mutex  m;
-  uint64_t    n = 0;
-  double      sum = 0, max = 0;
-  uint32_t    hist[70] = {};
-  explicit GsTimer(const char* nm) : name(nm) {}
+  /* lock-free: the real-time workers add to it */
+  const char*           name;
+  std::atomic<uint64_t> n{0}, sum_ns{0}, max_ns{0};
+  std::atomic<uint32_t> hist[70];
+  explicit GsTimer(const char* nm) : name(nm)
+  {
+    for (auto& h : hist) {
+      h.store(0, std::memory_order_relaxed);
+    }
+  }
   void add(double ms)
   {
-    int b = ms > 0 ? (int)std::floor(10.0 * std::log10(ms * 1e3)) : 0;
-    b     = std::max(0, std::min(69, b));
-    std::lock_guard<std::mutex> lock(m);
-    n++;
-    sum += ms;
-    max = std::max(max, ms);
-    hist[b]++;
+    const uint64_t ns = ms > 0 ? (uint64_t)(ms * 1e6) : 0;
+    int            b  = ms > 0 ? (int)std::floor(10.0 * std::log10(ms * 1e3)) : 0;
+    b                 = std::max(0, std::min(69, b));
+    n.fetch_add(1, std::memory_order_relaxed);
+    sum_ns.fetch_add(ns, std::memory_order_relaxed);
+    hist[b].fetch_add(1, std::memory_order_relaxed);
+    uint64_t m = max_ns.load(std::memory_order_relaxed);
+    while (ns > m && !max_ns.compare_exchange_weak(m, ns, std::memory_order_relaxed)) {
+    }
   }
   std::string str()
   {
-    std::lock_guard<std::mutex> lock(m);
-    if (n == 0) {
+    const uint64_t cnt = n.load(std::memory_order_relaxed);
+    if (cnt == 0) {
       return std::string("  ") + name + ": -\n";
     }
-    auto q = [&](double p) {
-      uint64_t want = (uint64_t)std::ceil(p * (double)n), acc = 0;
+    const double mx = 1e-6 * (double)max_ns.load(std::memory_order_relaxed);
+    auto         q  = [&](double p) {
+      uint64_t want = (uint64_t)std::ceil(p * (double)cnt), acc = 0;
       for (int b = 0; b < 70; b++) {
-        acc += hist[b];
+        acc += hist[b].load(std::memory_order_relaxed);
         if (acc >= want) {
           return std::pow(10.0, (b + 1) / 10.0) * 1e-3; /* bin upper edge, ms */
         }
       }
-      return max;
+      return mx;
     };
     char buf[200];
     snprintf(buf, sizeof(buf), "  %-26s n %9llu  mean %8.3f  p50 <%7.3f  p99 <%7.3f  max %8.3f ms\n", name,
-             (unsigned long long)n, sum / (double)n, q(0.5), q(0.99), max);
+             (unsigned long long)cnt, 1e-6 * (double)sum_ns.load(std::memory_order_relaxed) / (double)cnt, q(0.5),
+             q(0.99), mx);
     return buf;
   }
 };
 static GsTimer gs_t_fft("worker: PDCCH FFT"), gs_t_track("worker: tracked decode"), gs_t_enq("worker: copy + queue"),
     gs_t_wait("searcher: queue wait"), gs_t_search0("searcher: slot, no DCI"), gs_t_search1("searcher: slot with DCIs"),
-    gs_t_lat_search("latency: slot -> search DCI"), gs_t_lat_track("latency: slot -> tracked DCI");
+    gs_t_lat_search("latency: slot -> search DCI"), gs_t_lat_track("latency: slot -> tracked DCI"),
+    gs_t_update("scheduler: GS update"), gs_t_submit("worker: GS total");
 
 static double gs_steady_s()
 {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-struct GsJob {
-  uint32_t          sfn = 0, slot_idx = 0, nof_sc = 0, nof_symb = 0, first_crb = 0, pci = 0;
-  int32_t           ref_crb0 = GS_NO_REF, ref_cs0 = GS_NO_REF;
-  uint32_t          cs0_nof_sc = 0;
-  std::vector<cf_t> grid;
-  double            t_submit = 0, t_enq = 0; /* steady clock, s */
-  /* converged UEs in this slot: their DCIs of a learned size come from the tracked decode */
-  std::vector<gs_track_t> tracked;
+/* A mutex with priority inheritance: the real-time workers and the searchers (normal
+  priority) share the job queue; a searcher preempted while holding it is boosted rather
+  than leaving a worker stuck behind it (priority inversion). */
+class GsPiMutex
+{
+public:
+  GsPiMutex()
+  {
+    pthread_mutexattr_t a;
+    pthread_mutexattr_init(&a);
+    pthread_mutexattr_setprotocol(&a, PTHREAD_PRIO_INHERIT);
+    pthread_mutex_init(&m_, &a);
+    pthread_mutexattr_destroy(&a);
+  }
+  void lock() { pthread_mutex_lock(&m_); }
+  void unlock() { pthread_mutex_unlock(&m_); }
+  bool try_lock() { return pthread_mutex_trylock(&m_) == 0; }
+
+private:
+  pthread_mutex_t m_;
 };
 
+#define GS_JOB_TRACKS 32
+struct GsJob {
+  uint32_t sfn = 0, slot_idx = 0, nof_sc = 0, nof_symb = 0, first_crb = 0, pci = 0;
+  int32_t  ref_crb0 = GS_NO_REF, ref_cs0 = GS_NO_REF;
+  uint32_t cs0_nof_sc = 0;
+  cf_t*    grid       = nullptr; /* one of the pool's preallocated buffers */
+  int      buf        = -1;
+  double   t_submit = 0, t_enq = 0; /* steady clock, s */
+  /* converged UEs in this slot: their DCIs of a learned size come from the tracked decode */
+  gs_track_t tracked[GS_JOB_TRACKS];
+  uint32_t   nof_tracked = 0;
+};
 static bool gs_job_tracks(const GsJob& job, const gs_dci_t& d)
 {
-  for (const gs_track_t& t : job.tracked) {
+  for (uint32_t k = 0; k < job.nof_tracked; k++) {
+    const gs_track_t& t = job.tracked[k];
     if (t.rnti == d.rnti && !d.coreset0) {
       for (uint32_t z = 0; z < t.nof_sizes; z++) {
         if (t.sizes[z] == d.nof_bits) {
@@ -112,10 +146,18 @@ static bool gs_job_tracks(const GsJob& job, const gs_dci_t& d)
 /* The searcher pool: its own threads and its own bounded queue. GoldenSniffer is never
   on the worker's critical path; when the pool falls behind, it drops its own slots. */
 struct GsPool {
-  std::once_flag          started;
-  std::mutex              m;
-  std::condition_variable cv;
-  std::deque<GsJob>       q;
+  std::once_flag              started;
+  GsPiMutex                   m;
+  std::condition_variable_any cv;
+  /* jobs: preallocated (no allocation on the workers' path); free and queued ones are
+    indices into them, in fixed rings */
+  std::vector<GsJob>             jobs;
+  std::vector<std::vector<cf_t>> bufs;
+  std::vector<int>               free_idx; /* stack */
+  std::vector<int>               ring;     /* queued, FIFO */
+  size_t                         r_head = 0, r_len = 0;
+  std::atomic<uint64_t>          busy{0};  /* slots not queued: the lock was taken */
+  size_t qsize() const { return r_len; }
   gs_args_t               args = {};
   std::vector<uint32_t>   sizes, css;
   /* statistics, under m */
@@ -199,7 +241,7 @@ void print_report_locked()
   uint64_t searched, dropped, submitted;
   double   t_sum, t_max;
   {
-    std::lock_guard<std::mutex> lock(gs_pool.m);
+    std::lock_guard<GsPiMutex> lock(gs_pool.m);
     searched  = gs_pool.searched;
     dropped   = gs_pool.dropped;
     submitted = gs_pool.submitted;
@@ -211,9 +253,10 @@ void print_report_locked()
          (unsigned long long)gs_total, gs_stats.size(), (unsigned long long)searched,
          searched ? t_sum / (double)searched : 0.0, t_max, (unsigned long long)dropped,
          (unsigned long long)submitted);
-  printf("GoldenSniffer execution time:\n%s%s%s%s%s%s%s%s", gs_t_fft.str().c_str(), gs_t_track.str().c_str(),
-         gs_t_enq.str().c_str(), gs_t_wait.str().c_str(), gs_t_search0.str().c_str(), gs_t_search1.str().c_str(),
-         gs_t_lat_search.str().c_str(), gs_t_lat_track.str().c_str());
+  printf("GoldenSniffer execution time:\n%s%s%s%s%s%s%s%s%s%s", gs_t_submit.str().c_str(), gs_t_fft.str().c_str(),
+         gs_t_track.str().c_str(), gs_t_enq.str().c_str(), gs_t_wait.str().c_str(), gs_t_search0.str().c_str(),
+         gs_t_search1.str().c_str(), gs_t_update.str().c_str(), gs_t_lat_search.str().c_str(),
+         gs_t_lat_track.str().c_str());
   if (!gs_track_summary.empty()) {
     printf("%s", gs_track_summary.c_str());
   }
@@ -337,10 +380,20 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
   if (g["discover_in_track"]) {
     a.discover_in_track = g["discover_in_track"].as<bool>();
   }
+  if (g["searcher_idle"]) {
+    a.searcher_idle = g["searcher_idle"].as<bool>();
+  }
   if (g["quiet_s"]) {
     a.quiet_s = g["quiet_s"].as<double>();
   }
   if (a.enable) {
+    /* the GF(2) tables, built in the background while the radio starts and the cell is
+      acquired: no real-time thread builds or waits for one */
+    {
+      std::vector<uint32_t> first = a.dci_sizes;
+      first.insert(first.end(), a.css_sizes.begin(), a.css_sizes.end());
+      gs_gf2_prebuild_start(a.size_min, a.size_max, first.data(), (uint32_t)first.size());
+    }
     gs_csv = fopen(a.csv.c_str(), "w");
     if (gs_csv == nullptr) {
       std::cerr << "golden_sniffer: cannot write " << a.csv << std::endl;
@@ -398,21 +451,54 @@ static void gs_log_one_locked(double now, uint32_t sfn, uint32_t slot_idx, uint3
   }
 }
 
-/* Logs one searched slot's DCIs and hands the C-RNTI ones to the scheduler; called by the
-  searcher threads */
+/* DCIs found by the searchers, for the scheduler to log and learn from. The searchers run
+  at idle priority: they must not hold a lock the pipeline waits for, so they only append
+  here (a few instructions, priority inheritance); the scheduler drains it with try_lock. */
+struct GsFound {
+  double   t;
+  uint32_t sfn, slot_idx, first_crb;
+  gs_dci_t d;
+};
+static GsPiMutex            gs_found_m;
+static std::vector<GsFound> gs_found, gs_found_drain;
+static bool                 gs_found_reserved = [] {
+  gs_found.reserve(8192);
+  gs_found_drain.reserve(8192);
+  return true;
+}();
+
 static void gs_log_dcis(const GsJob& job, const gs_dci_t* out, int n)
 {
   if (n <= 0) {
     return;
   }
-  const double                now = wall_now();
-  std::lock_guard<std::mutex> lock(gs_log_mutex);
+  const double               now = wall_now();
+  std::lock_guard<GsPiMutex> lock(gs_found_m);
   for (int i = 0; i < n; i++) {
     const gs_dci_t& d = out[i];
     if (gs_job_tracks(job, d)) {
       continue; // the worker's tracked decode reports it
     }
-    gs_log_one_locked(now, job.sfn, job.slot_idx, job.first_crb, d, "search");
+    if (gs_found.size() < 8192) {
+      gs_found.push_back({now, job.sfn, job.slot_idx, job.first_crb, d});
+    }
+  }
+}
+
+/* The scheduler's side, under gs_log_mutex: logs the searchers' DCIs, hands the C-RNTI
+  ones to the fallback state machine (gs_sightings), feeds the regular decoders */
+static void gs_drain_found_locked()
+{
+  {
+    std::unique_lock<GsPiMutex> l(gs_found_m, std::try_to_lock);
+    if (!l) {
+      return; /* next slot */
+    }
+    gs_found_drain.swap(gs_found);
+  }
+  for (const GsFound& f : gs_found_drain) {
+    const gs_dci_t& d = f.d;
+    gs_log_one_locked(f.t, f.sfn, f.slot_idx, f.first_crb, d, "search");
     const bool c_rnti = std::string(rnti_kind(d.rnti, d.coreset0, d.n_rnti)) == "C";
     if (c_rnti && gs_sightings.size() < 4096) {
       gs_sightings.push_back(d);
@@ -423,6 +509,7 @@ static void gs_log_dcis(const GsJob& job, const gs_dci_t* out, int n)
       s.fed = true;
     }
   }
+  gs_found_drain.clear(); /* keeps its capacity */
 }
 
 static void gs_searcher_thread(uint32_t id)
@@ -430,6 +517,13 @@ static void gs_searcher_thread(uint32_t id)
   char name[16];
   snprintf(name, sizeof(name), "nrs-gs%u", id);
   pthread_setname_np(pthread_self(), name);
+  /* idle priority: the blind search only takes CPU time nobody else wants. Unpinned and
+    at normal priority it landed on the workers' CPUs and slowed them (dropped slots in
+    every sweep): NR-Scope's workers run at normal priority too. */
+  if (nrscope_gs_args.searcher_idle) {
+    struct sched_param sp = {};
+    pthread_setschedparam(pthread_self(), SCHED_IDLE, &sp);
+  }
   gs_t* gs = gs_create(&gs_pool.args);
   if (gs == nullptr) {
     ERROR("GoldenSniffer: could not create a searcher");
@@ -437,15 +531,17 @@ static void gs_searcher_thread(uint32_t id)
   }
   gs_dci_t out[GS_MAX_DCI_PER_SLOT];
   while (true) {
-    GsJob job;
+    int idx;
     {
-      std::unique_lock<std::mutex> lock(gs_pool.m);
-      gs_pool.cv.wait(lock, [] { return !gs_pool.q.empty(); });
-      job = std::move(gs_pool.q.front());
-      gs_pool.q.pop_front();
+      std::unique_lock<GsPiMutex> lock(gs_pool.m);
+      gs_pool.cv.wait(lock, [] { return gs_pool.r_len > 0; });
+      idx            = gs_pool.ring[gs_pool.r_head];
+      gs_pool.r_head = (gs_pool.r_head + 1) % gs_pool.ring.size();
+      gs_pool.r_len--;
     }
+    const GsJob& job = gs_pool.jobs[idx];
     gs_slot_t sl = {};
-    sl.grid      = job.grid.data();
+    sl.grid      = job.grid;
     sl.nof_sc    = job.nof_sc;
     sl.slot_idx  = job.slot_idx;
     sl.ref_crb0  = job.ref_crb0;
@@ -460,13 +556,14 @@ static void gs_searcher_thread(uint32_t id)
     if (n > 0) {
       gs_t_lat_search.add(1e3 * (gs_steady_s() - job.t_submit));
     }
+    gs_log_dcis(job, out, n);
     {
-      std::lock_guard<std::mutex> lock(gs_pool.m);
+      std::lock_guard<GsPiMutex> lock(gs_pool.m);
       gs_pool.searched++;
       gs_pool.t_sum_ms += ms;
       gs_pool.t_max_ms = std::max(gs_pool.t_max_ms, ms);
+      gs_pool.free_idx.push_back(idx); /* capacity reserved: no allocation */
     }
-    gs_log_dcis(job, out, n);
   }
 }
 
@@ -631,6 +728,10 @@ void golden_sniffer_update(WorkState&                   state,
   if (!nrscope_gs_args.enable) {
     return;
   }
+  struct UpdTimer {
+    double t0 = gs_steady_s();
+    ~UpdTimer() { gs_t_update.add(1e3 * (gs_steady_s() - t0)); }
+  } upd_timer;
   const double now_wall = now; /* the regular RNTI list keeps wall-clock times */
   if (nrscope_lossless.load() && gs_spf.load() > 0) {
     now = gs_air_now(result);
@@ -641,6 +742,7 @@ void golden_sniffer_update(WorkState&                   state,
   const GoldenSnifferArgs&    a = nrscope_gs_args;
   std::lock_guard<std::mutex> lock(gs_log_mutex);
   auto&                       ues = state.blind_ues;
+  gs_drain_found_locked();
 
   /* A fresh RRCSetup: the UE is decoded from it again, whatever it was before. Armed at
     once: a reconfiguration follows within a second, its SRB1 PDU may go with a DCI the
@@ -1044,6 +1146,19 @@ int GoldenSnifferDecoder::Init(WorkState* state, cf_t* input0)
     gs_pool.sizes          = nrscope_gs_args.dci_sizes;
     gs_pool.css            = css;
     gs_pool.args           = ga;
+    {
+      const size_t nq = std::max(1u, nrscope_gs_args.queue);
+      gs_pool.jobs.resize(nq);
+      gs_pool.bufs.resize(nq);
+      gs_pool.free_idx.reserve(nq);
+      gs_pool.ring.assign(nq, -1);
+      for (size_t k = 0; k < nq; k++) {
+        gs_pool.bufs[k].assign((size_t)GS_MAX_SC * (GS_MAX_DURATION + 1), cf_t{});
+        gs_pool.jobs[k].grid = gs_pool.bufs[k].data();
+        gs_pool.jobs[k].buf  = (int)k;
+        gs_pool.free_idx.push_back((int)k);
+      }
+    }
     gs_pool.args.sizes     = gs_pool.sizes.data();
     gs_pool.args.nof_sizes = (uint32_t)gs_pool.sizes.size();
     gs_pool.args.css_sizes = gs_pool.css.data();
@@ -1084,6 +1199,10 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
   if (!search && !tracked && getenv("GS_DUMP") == nullptr) {
     return; // nothing to do in this slot: not even the FFT
   }
+  struct SubTimer {
+    double t0 = gs_steady_s();
+    ~SubTimer() { gs_t_submit.add(1e3 * (gs_steady_s() - t0)); }
+  } sub_timer;
   /* Demodulate the PDCCH symbols here (cheap: a few FFTs) since the worker's buffer is
     only valid during its slot. One symbol more than searched: the duration detector
     compares it. */
@@ -1098,7 +1217,8 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
   const uint32_t nof_sc = grid_carrier.nof_prb * NRSCOPE_NSC_PER_RB_NR;
 
   /* Converged UEs: decoded right here, from what was learned of their PDCCH */
-  std::vector<gs_track_t> tracked_now;
+  static thread_local std::vector<gs_track_t> tracked_now; /* keeps its capacity */
+  tracked_now.clear();
   if (tracked && track_gs != nullptr) {
     gs_slot_t s  = {};
     s.grid       = ue_dl.sf_symbols[0];
@@ -1139,7 +1259,12 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
   job.ref_crb0   = ref_crb0;
   job.ref_cs0    = ref_cs0;
   job.cs0_nof_sc = cs0_nof_sc;
-  job.tracked    = std::move(tracked_now);
+  job.nof_tracked = 0;
+  for (const gs_track_t& t : tracked_now) {
+    if (job.nof_tracked < GS_JOB_TRACKS) {
+      job.tracked[job.nof_tracked++] = t;
+    }
+  }
 
   /* Debug: GS_DUMP=<file> appends the searched symbols of every slot, as
     [sfn u32, slot u32, nof_sc u32, nof_symb u32, cf32 grid], for offline analysis */
@@ -1162,31 +1287,47 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
     return;
   }
 
-  /* Replaying a file nothing is dropped: wait for room. Live, never wait: drop. */
-  while (nrscope_lossless.load(std::memory_order_relaxed) && !nrscope_stop.load(std::memory_order_relaxed)) {
-    {
-      std::lock_guard<std::mutex> lock(gs_pool.m);
-      if (gs_pool.q.size() < std::max(1u, nrscope_gs_args.queue)) {
-        break;
-      }
+  /* A free buffer: replaying a file nothing is dropped (wait for one); live, never wait
+    nor block: the lock taken or no buffer free, this slot is not searched. */
+  int idx = -1;
+  while (idx < 0) {
+    std::unique_lock<GsPiMutex> lock(gs_pool.m, std::defer_lock);
+    const bool                  lossless = nrscope_lossless.load(std::memory_order_relaxed);
+    if (lossless) {
+      lock.lock();
+    } else if (!lock.try_lock()) {
+      gs_pool.busy.fetch_add(1, std::memory_order_relaxed);
+      return;
     }
-    std::this_thread::sleep_for(std::chrono::microseconds(100));
-  }
-  {
-    std::lock_guard<std::mutex> lock(gs_pool.m);
-    gs_pool.submitted++;
-    if (gs_pool.q.size() >= std::max(1u, nrscope_gs_args.queue)) {
+    if (!gs_pool.free_idx.empty()) {
+      idx = gs_pool.free_idx.back();
+      gs_pool.free_idx.pop_back();
+      gs_pool.submitted++;
+      break;
+    }
+    if (!lossless || nrscope_stop.load(std::memory_order_relaxed)) {
+      gs_pool.submitted++;
       gs_pool.dropped++;
       return;
     }
+    lock.unlock();
+    std::this_thread::sleep_for(std::chrono::microseconds(100));
   }
   const double t_enq0 = gs_steady_s();
-  job.t_submit        = t_fft0;
-  job.grid.assign(ue_dl.sf_symbols[0], ue_dl.sf_symbols[0] + (size_t)nof_sc * nsym);
-  job.t_enq = gs_steady_s();
+  GsJob&       dst    = gs_pool.jobs[idx];
+  cf_t* const  buf    = dst.grid;
+  dst                 = job;
+  dst.grid            = buf;
+  dst.buf             = idx;
+  dst.t_submit        = t_fft0;
+  memcpy(dst.grid, ue_dl.sf_symbols[0], sizeof(cf_t) * (size_t)nof_sc * nsym);
+  dst.t_enq = gs_steady_s();
   {
-    std::lock_guard<std::mutex> lock(gs_pool.m);
-    gs_pool.q.push_back(std::move(job));
+    /* the buffer is ours: wait for the lock rather than lose it (held only for a few
+      instructions, with priority inheritance) */
+    std::lock_guard<GsPiMutex> lock(gs_pool.m);
+    gs_pool.ring[(gs_pool.r_head + gs_pool.r_len) % gs_pool.ring.size()] = idx;
+    gs_pool.r_len++;
   }
   gs_t_enq.add(1e3 * (gs_steady_s() - t_enq0));
   gs_pool.cv.notify_one();
