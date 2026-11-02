@@ -46,6 +46,7 @@
  *     arm_s: 10
  *     stale_hits: 3
  *     converge_hits: 10
+ *     converge_s: 3          # converge on DL alone (or UL alone) after this
  *     quiet_s: 1             # a blind-tracked UE silent this long starts a sweep at once
  */
 #ifndef NRSCOPE_GOLDEN_SNIFFER_H
@@ -81,6 +82,7 @@ struct GoldenSnifferArgs {
   double   arm_s          = 10;    // how long an armed UE keeps the search on
   uint32_t stale_hits     = 3;     // blind sightings without a regular DCI that make a UE stale
   uint32_t converge_hits  = 10;    // DCIs learned before decoding a UE directly
+  double   converge_s     = 3;     // ... and both DL and UL seen, or this long learning
   double   quiet_s        = 1.0;   // a blind-tracked UE silent this long starts a sweep (gone or new RNTI?)
 };
 

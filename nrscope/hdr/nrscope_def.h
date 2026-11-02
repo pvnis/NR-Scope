@@ -312,6 +312,8 @@ struct BlindUe {
   double                       last_regular     = 0; // last DCI from the regular decoders
   uint32_t                     blind_since_reg  = 0; // blind sightings since then
   uint32_t                     hits             = 0; // DCIs learned from
+  uint8_t                      dirs             = 0; // formats learned: 1 = UL (0_x), 2 = DL (1_x)
+  double                       learn_since      = 0; // first DCI learned
   bool                         interleaved      = false;
   bool                         quiet            = false; // went quiet: a sweep was started for it
   std::map<uint32_t, uint32_t> size_count;

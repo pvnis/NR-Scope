@@ -40,7 +40,23 @@ struct GsJob {
   int32_t           ref_crb0 = GS_NO_REF, ref_cs0 = GS_NO_REF;
   uint32_t          cs0_nof_sc = 0;
   std::vector<cf_t> grid;
+  /* converged UEs in this slot: their DCIs of a learned size come from the tracked decode */
+  std::vector<gs_track_t> tracked;
 };
+
+static bool gs_job_tracks(const GsJob& job, const gs_dci_t& d)
+{
+  for (const gs_track_t& t : job.tracked) {
+    if (t.rnti == d.rnti && !d.coreset0) {
+      for (uint32_t z = 0; z < t.nof_sizes; z++) {
+        if (t.sizes[z] == d.nof_bits) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
 
 /* The searcher pool: its own threads and its own bounded queue. GoldenSniffer is never
   on the worker's critical path; when the pool falls behind, it drops its own slots. */
@@ -222,6 +238,9 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
   if (g["converge_hits"]) {
     a.converge_hits = g["converge_hits"].as<uint32_t>();
   }
+  if (g["converge_s"]) {
+    a.converge_s = g["converge_s"].as<double>();
+  }
   if (g["quiet_s"]) {
     a.quiet_s = g["quiet_s"].as<double>();
   }
@@ -294,6 +313,9 @@ static void gs_log_dcis(const GsJob& job, const gs_dci_t* out, int n)
   std::lock_guard<std::mutex> lock(gs_log_mutex);
   for (int i = 0; i < n; i++) {
     const gs_dci_t& d = out[i];
+    if (gs_job_tracks(job, d)) {
+      continue; // the worker's tracked decode reports it
+    }
     gs_log_one_locked(now, job.sfn, job.slot_idx, job.first_crb, d, "search");
     const bool c_rnti = std::string(rnti_kind(d.rnti, d.coreset0, d.n_rnti)) == "C";
     if (c_rnti && gs_sightings.size() < 4096) {
@@ -349,7 +371,7 @@ static void gs_searcher_thread(uint32_t id)
 
 /* Learns one DCI of a UE: its PDCCH N_ID and scrambling, the CORESET extent its DCIs were
   seen in, its ALs and its DCI sizes (the most frequent four). */
-static void gs_learn(BlindUe& e, const gs_dci_t& d)
+static void gs_learn(BlindUe& e, const gs_dci_t& d, double now)
 {
   /* The tracked decode targets the UE-specific CORESET. DCIs in CORESET#0 (Msg4, the
     RRCSetup, fallback DCIs while the UE is still on the common config) are interleaved
@@ -391,6 +413,15 @@ static void gs_learn(BlindUe& e, const gs_dci_t& d)
     }
   }
   e.interleaved = e.interleaved || d.cand.nof_iv > 1;
+  /* The first bit of DCI 0_x/1_x is the format identifier (TS 38.212 7.3.1): 0 UL, 1 DL.
+    UL and DL DCIs differ in size, so a UE that converged on one direction alone would
+    have the other's size missing from its track and lose those DCIs. */
+  if (d.nof_bits > 0) {
+    e.dirs |= d.payload[0] ? 2 : 1;
+  }
+  if (e.hits == 0) {
+    e.learn_since = now;
+  }
   e.hits++;
 }
 
@@ -491,7 +522,7 @@ void golden_sniffer_update(WorkState&                   state,
     gs_log_one_locked(now, result.outcome.sfn, d.slot_idx, first_crb, d, "tracked");
     auto it = ues.find(d.rnti);
     if (it != ues.end()) {
-      gs_learn(it->second, d);
+      gs_learn(it->second, d, now);
       it->second.last_seen = now;
     }
   }
@@ -502,21 +533,25 @@ void golden_sniffer_update(WorkState&                   state,
     if (gs_is_known(state, d.rnti)) {
       BlindUe& e = ues[d.rnti];
       e.from_rach = true;
-      gs_learn(e, d);
+      gs_learn(e, d, now);
       e.last_seen = now;
-      e.blind_since_reg++;
+      /* DCIs in CORESET#0 (Msg4, RRCSetup, fallback) are the RACH decoder's, not the
+        regular per-UE decoders': they say nothing about a stale UE-specific config */
+      if (!d.coreset0) {
+        e.blind_since_reg++;
+      }
       const uint32_t need = e.state == BlindUe::ARMED ? 2 : a.stale_hits;
       if ((e.state == BlindUe::RRC || e.state == BlindUe::ARMED) && e.blind_since_reg >= need) {
         gs_set_state(e, d.rnti, BlindUe::STALE, "seen blind, not by the regular decoders");
       }
     } else if (it != ues.end()) {
-      gs_learn(it->second, d);
+      gs_learn(it->second, d, now);
       it->second.last_seen = now;
     } else if (gs_discovery_window(now)) {
       BlindUe e;
       e.state     = BlindUe::DISCOVERED;
       e.last_seen = now;
-      gs_learn(e, d);
+      gs_learn(e, d, now);
       ues[d.rnti] = e;
       printf("GoldenSniffer: UE 0x%04x discovered blind (N_ID %u, %s)\n", d.rnti, d.n_id,
              d.n_rnti ? "n_RNTI" : "PCI scrambling");
@@ -531,7 +566,7 @@ void golden_sniffer_update(WorkState&                   state,
     const uint16_t rnti = it->first;
     const bool     known = gs_is_known(state, rnti);
     if ((e.state == BlindUe::STALE || e.state == BlindUe::DISCOVERED) && e.hits >= a.converge_hits &&
-        !e.interleaved && e.track.nof_sizes > 0) {
+        !e.interleaved && e.track.nof_sizes > 0 && (e.dirs == 3 || now - e.learn_since >= a.converge_s)) {
       char why[160];
       char sz[32];
       if (e.track.nof_sizes > 1) {
@@ -795,6 +830,7 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
   const uint32_t nof_sc = grid_carrier.nof_prb * NRSCOPE_NSC_PER_RB_NR;
 
   /* Converged UEs: decoded right here, from what was learned of their PDCCH */
+  std::vector<gs_track_t> tracked_now;
   if (tracked && track_gs != nullptr) {
     gs_slot_t s  = {};
     s.grid       = ue_dl.sf_symbols[0];
@@ -808,6 +844,7 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
       if (u.second.state != BlindUe::CONVERGED) {
         continue;
       }
+      tracked_now.push_back(u.second.track);
       gs_dci_t out[4];
       int      n = gs_decode_tracked(track_gs, &s, &u.second.track, out, 4);
       for (int i = 0; i < n; i++) {
@@ -826,6 +863,7 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
   job.ref_crb0   = ref_crb0;
   job.ref_cs0    = ref_cs0;
   job.cs0_nof_sc = cs0_nof_sc;
+  job.tracked    = std::move(tracked_now);
 
   /* Debug: GS_DUMP=<file> appends the searched symbols of every slot, as
     [sfn u32, slot u32, nof_sc u32, nof_symb u32, cf32 grid], for offline analysis */
