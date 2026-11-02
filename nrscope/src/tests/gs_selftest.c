@@ -436,6 +436,86 @@ static void test_search(void)
   tx_free(&tx);
 }
 
+
+/* 5. Tracked UE: its learned PDCCH (CORESET extent, N_ID, sizes, ALs) decodes its DCIs
+ * directly; another UE's DCI in the same CORESET must not be reported. */
+static void test_tracked(void)
+{
+  gs_args_t args;
+  gs_args_default(&args);
+  gs_t* gs = gs_create(&args);
+  tx_t  tx;
+  tx_init(&tx, 51, 0);
+  const uint16_t rnti = 0x4613, other = 0x4620;
+  const uint32_t n_id = 1234, sizes[2] = {43, 47};
+  int            placed = 0, found = 0, wrong = 0, others = 0;
+  double         t_tot  = 0;
+  for (int t = 0; t < 300; t++) {
+    uint32_t dur  = 1 + (t & 1), slot = rint_(0, 19), pci = rint_(0, 1007);
+    tx.carrier.pci = pci;
+    memset(&tx.coreset, 0, sizeof(tx.coreset));
+    tx.coreset.id                         = 1;
+    tx.coreset.duration                   = dur;
+    tx.coreset.dmrs_scrambling_id_present = true;
+    tx.coreset.dmrs_scrambling_id         = n_id;
+    for (uint32_t r = 1; r < 6; r++) {
+      tx.coreset.freq_resources[r] = true; /* RBs 6..35 */
+    }
+    srsran_vec_cf_zero(tx.grid, 51 * 12 * 14);
+    const uint32_t n_cce = 5 * dur;
+    uint32_t       Ll    = rint_(0, dur == 1 ? 1 : 2), L = 1U << Ll;
+    uint32_t       ncce  = L * rint_(0, n_cce / L - 1);
+    uint32_t       nb    = sizes[rint_(0, 1)];
+    uint8_t        payload[128], other_payload[128];
+    tx_put(&tx, slot, Ll, ncce, srsran_search_space_type_ue, rnti, nb, payload);
+    placed++;
+    /* another UE on the next free CCE, if any */
+    uint32_t oc = ncce + L;
+    if (oc < n_cce) {
+      tx_put(&tx, slot, 0, oc, srsran_search_space_type_ue, other, 43, other_payload);
+    }
+    float snr   = getenv("GS_TEST_SNR") ? (float)atof(getenv("GS_TEST_SNR")) : 20.0f;
+    float sigma = powf(10.0f, -snr / 20.0f) * (float)M_SQRT1_2;
+    float ph = srsran_random_uniform_real_dist(rnd, -M_PI, M_PI), tau = srsran_random_uniform_real_dist(rnd, -3, 3) / 1024.0f;
+    for (uint32_t l = 0; l < 3; l++) {
+      for (uint32_t k = 0; k < 51 * 12; k++) {
+        cf_t h = cexpf(I * (ph + 0.2f * l + 2.0f * (float)M_PI * tau * k));
+        cf_t n = sigma * (srsran_random_gauss_dist(rnd, 1.0f) + I * srsran_random_gauss_dist(rnd, 1.0f));
+        tx.grid[l * 51 * 12 + k] = tx.grid[l * 51 * 12 + k] * h + n;
+      }
+    }
+    gs_slot_t sl = {.grid = tx.grid, .nof_sc = 51 * 12, .slot_idx = slot, .ref_crb0 = 0, .ref_cs0 = GS_NO_REF, .pci = pci};
+    gs_track_t tr = {.rnti = rnti, .n_id = n_id, .n_rnti = true, .coreset0 = false, .sc_lo = 6 * 12,
+                     .sc_hi = 36 * 12 - 1, .duration = dur, .al_mask = 0x1f, .sizes = {43, 47}, .nof_sizes = 2};
+    gs_dci_t out[8];
+    double   t0 = now_s();
+    int      n  = gs_decode_tracked(gs, &sl, &tr, out, 8);
+    t_tot += now_s() - t0;
+    int hit = 0;
+    for (int i = 0; i < n; i++) {
+      hit |= out[i].rnti == rnti;
+    }
+    if (!hit && getenv("GS_TEST_DEBUG")) {
+      printf("   miss: dur %u L %u ncce %u size %u other %d\n", dur, L, ncce, nb, oc < n_cce);
+    }
+    for (int i = 0; i < n; i++) {
+      if (out[i].rnti != rnti) {
+        others++;
+      } else if (out[i].nof_bits == nb && out[i].L == L && memcmp(out[i].payload, payload, nb) == 0) {
+        found++;
+      } else {
+        wrong++;
+      }
+    }
+  }
+  printf("5. Tracked UE decode at %s dB: %d/%d, %d wrong, %d of another UE (%.3f ms/slot)\n",
+         getenv("GS_TEST_SNR") ? getenv("GS_TEST_SNR") : "20", found, placed, wrong, others, 1e3 * t_tot / 300);
+  CHECK(found >= placed * 98 / 100, "tracked decode: %d/%d", found, placed);
+  CHECK(wrong == 0 && others == 0, "tracked decode: %d wrong, %d of another UE", wrong, others);
+  tx_free(&tx);
+  gs_destroy(gs);
+}
+
 int main(int argc, char** argv)
 {
   uint32_t seed = argc > 1 ? (uint32_t)atoi(argv[1]) : 1234;
@@ -449,6 +529,7 @@ int main(int argc, char** argv)
   test_dmrs_underdet();
   test_gf2();
   test_search();
+  test_tracked();
 
   srsran_random_free(rnd);
   printf("%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);

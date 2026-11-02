@@ -208,6 +208,7 @@ int TaskSchedulerNRScope::DecodeMIB(cell_searcher_args_t*          args_t_,
 
 int TaskSchedulerNRScope::UpdatewithResult(const SlotResult& now_result)
 {
+  std::vector<uint16_t> regular_hits; // RNTIs the regular DCI decoders found in this slot
   task_scheduler_lock.lock();
   double now = get_now_timestamp_in_double();
   /* This slot contains SIBs decoder's result */
@@ -366,8 +367,6 @@ int TaskSchedulerNRScope::UpdatewithResult(const SlotResult& now_result)
       task_scheduler_state.dci_inited = true;
     }
   }
-  /* GoldenSniffer: with feed_rntis, the C-RNTIs it found; its periodic report */
-  golden_sniffer_update(task_scheduler_state, now);
   task_scheduler_lock.unlock();
 
   /* This slot contains the DCI decoder's result, put all the results to log */
@@ -387,6 +386,7 @@ int TaskSchedulerNRScope::UpdatewithResult(const SlotResult& now_result)
             log_node.dl_dci                   = result.dl_dcis[i];
             log_node.bwp_id                   = result.dl_dcis[i].bwp_id;
             task_scheduler_state.last_seen[i] = now;
+            regular_hits.push_back(task_scheduler_state.known_rntis[i]);
             status_nof_dl_dci++;
             if (local_log) {
               NRScopeLog::push_node(log_node, rf_index);
@@ -406,6 +406,7 @@ int TaskSchedulerNRScope::UpdatewithResult(const SlotResult& now_result)
             log_node.ul_dci                   = result.ul_dcis[i];
             log_node.bwp_id                   = result.ul_dcis[i].bwp_id;
             task_scheduler_state.last_seen[i] = now;
+            regular_hits.push_back(task_scheduler_state.known_rntis[i]);
             status_nof_ul_dci++;
             if (local_log) {
               NRScopeLog::push_node(log_node, rf_index);
@@ -423,6 +424,9 @@ int TaskSchedulerNRScope::UpdatewithResult(const SlotResult& now_result)
     copies these lists into the workers under it, and erasing while a copy runs
     reads freed memory. */
   std::lock_guard<std::mutex>     prune_lock(task_scheduler_lock);
+  /* GoldenSniffer: fallback states, blind and tracked DCIs (they also keep a UE from
+    expiring while it is still seen), discovery windows, report */
+  golden_sniffer_update(task_scheduler_state, now_result, regular_hits, now);
   std::vector<double>::iterator   last_seen_iter = task_scheduler_state.last_seen.begin();
   std::vector<uint16_t>::iterator ue_list_iter   = task_scheduler_state.known_rntis.begin();
 

@@ -42,6 +42,7 @@
 #include "test/phy/dummy_ue_stack.h"
 #include <boost/program_options.hpp>
 #include <boost/program_options/parsers.hpp>
+#include "nrscope/hdr/golden_sniffer/gs_core.h"
 
 #define MAX_NOF_DCI_DECODER 4
 #define MAX_NOF_RF_DEV 4
@@ -294,6 +295,37 @@ struct ScanLogNode_ {
   uint32 pci;
 };
 
+/* GoldenSniffer tracking of one UE (golden_sniffer.h): where it is in the fallback
+  from its RRC-derived config to blind decoding, and what was learned of its PDCCH. */
+struct BlindUe {
+  enum State : uint8_t {
+    RRC = 0,    // decoded by the regular DCI decoders, from its RRCSetup
+    ARMED,      // an RRC message was sent to it on SRB1: its config may change
+    STALE,      // seen blind where the regular decoders did not find it: learning
+    CONVERGED,  // learned: decoded directly in the workers, regular search skipped
+    DISCOVERED, // found blind, no RRCSetup ever seen: learning
+  };
+  State                        state            = RRC;
+  bool                         from_rach        = false;
+  double                       armed_at         = 0;
+  double                       last_seen        = 0; // last blind or tracked DCI
+  double                       last_regular     = 0; // last DCI from the regular decoders
+  uint32_t                     blind_since_reg  = 0; // blind sightings since then
+  uint32_t                     hits             = 0; // DCIs learned from
+  bool                         interleaved      = false;
+  bool                         quiet            = false; // went quiet: a sweep was started for it
+  std::map<uint32_t, uint32_t> size_count;
+  gs_track_t                   track = {};
+};
+
+/* An RRC PDU on an SRB, seen by the RACH decoder (headers only: the body is ciphered) */
+struct SrbEvent {
+  uint16_t rnti;
+  uint32_t lcid;
+  uint32_t len;
+  int32_t  pdcp_sn; // -1: a segment without the PDCP header
+};
+
 typedef struct WorkState_ WorkState;
 struct WorkState_ {
   uint32_t nof_threads;
@@ -358,6 +390,9 @@ struct WorkState_ {
   the Sunrise cell it is C-RNTI + PCI. It seeds both the PDCCH DM-RS and the
   DCI scrambling, so a UE searched with another UE's ID is never found. */
   std::map<uint16_t, std::map<uint32_t, uint32_t> > pdcch_dmrs_ids_by_rnti;
+
+  /* GoldenSniffer fallback state per RNTI (golden_sniffer.h) */
+  std::map<uint16_t, BlindUe> blind_ues;
 };
 
 typedef struct SlotResult_ SlotResult;
@@ -401,6 +436,10 @@ struct SlotResult_ {
   /* The worker works on DCI decoding */
   bool                     dci_result;
   std::vector<DCIFeedback> dci_feedback_results;
+
+  /* GoldenSniffer: RRC PDUs on SRBs (trigger), DCIs of tracked UEs decoded directly */
+  std::vector<SrbEvent> srb_events;
+  std::vector<gs_dci_t> tracked_dcis;
 
   /* Define the compare operator between structure by sf_round,
     sfn and slot idx */

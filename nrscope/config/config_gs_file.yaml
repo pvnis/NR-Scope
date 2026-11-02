@@ -42,7 +42,8 @@ log_config:
 golden_sniffer:
   enable: true
   max_duration: 2
-  css_sizes: auto      # DCI 1_0 of the CORESET#0 bandwidth, for n_RNTI = 0 DCIs in CORESET#0
+  css_sizes: auto
+  mode: always         # a recorded capture has no RACH to trigger the fallback: search every slot
   feed_rntis: false
   report_s: 5
   csv: "/tmp/golden_sniffer.csv"

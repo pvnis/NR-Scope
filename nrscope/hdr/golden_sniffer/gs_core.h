@@ -120,6 +120,27 @@ int gs_search_slot(gs_t* q, const gs_slot_t* s, gs_dci_t* out, uint32_t max_out)
 /* Default arguments */
 void gs_args_default(gs_args_t* args);
 
+/* What has been learned of one UE's PDCCH by the blind search: enough to decode its
+ * DCIs directly, without searching the slot. */
+typedef struct {
+  uint16_t rnti;
+  uint32_t n_id;       /* PDCCH DM-RS scrambling ID */
+  bool     n_rnti;     /* scrambled with n_RNTI = RNTI */
+  bool     coreset0;   /* DM-RS referenced to CORESET#0 (else point A) */
+  int32_t  sc_lo;      /* grid subcarriers its DCIs were seen in, inclusive */
+  int32_t  sc_hi;
+  uint32_t duration;   /* CORESET symbols */
+  uint32_t al_mask;    /* bit l set: AL 2^l seen */
+  uint32_t sizes[4];   /* DCI sizes seen (e.g. one UL, one DL) */
+  uint32_t nof_sizes;
+} gs_track_t;
+
+/* Decodes the DCIs of one tracked UE in a slot: every AL it was seen with, at every CCE
+ * position inside its extent (non-interleaved), gated by the correlation with the DM-RS
+ * its N_ID gives, equalized with those pilots; a DCI counts only when the GF(2) solve
+ * returns this UE's RNTI. Returns the number written to out (<= max_out). */
+int gs_decode_tracked(gs_t* q, const gs_slot_t* s, const gs_track_t* t, gs_dci_t* out, uint32_t max_out);
+
 /* ---- building blocks, exposed for the self-test ---- */
 
 /* Gold sequence c(n), n in [offset, offset + len), as one bit per byte. */

@@ -31,6 +31,7 @@
  *  - a decode needs min_parity (16) observed bits beyond the unknowns, not 8.
  */
 #include "gs_internal.h"
+#include "srsran/phy/common/sequence.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -489,6 +490,11 @@ static void gs_equalize(const gs_slot_t* s, int32_t first, uint32_t len, uint32_
   for (uint32_t m = 0; m < Nf; m++) {
     w[m] = cexpf(-2.0f * I * (float)M_PI * (float)m / (float)Nf);
   }
+  /* DM-RS channel with the mean phase and the slope taken out, once */
+  cf_t Hn[Nd];
+  for (uint32_t i = 0; i < Nd; i++) {
+    Hn[i] = hd[i] * cexpf(-I * (mean + (float)(1 + 4 * i) * slope / 4.0f));
+  }
   /* kept taps: [0, half - 1] and [Nf - half - 1, Nf - 1], the two edge ones halved */
   for (uint32_t t = 0; t < Nf; t++) {
     h[t] = 0;
@@ -498,8 +504,7 @@ static void gs_equalize(const gs_slot_t* s, int32_t first, uint32_t len, uint32_
     cf_t acc = 0;
     for (uint32_t i = 0; i < Nd; i++) {
       uint32_t k = 1 + 4 * i;
-      cf_t     H = hd[i] * cexpf(-I * (mean + (float)k * slope / 4.0f));
-      acc += H * conjf(w[(uint64_t)k * t % Nf]);
+      acc += Hn[i] * conjf(w[(uint64_t)k * t % Nf]);
     }
     h[t] = acc / (float)Nf;
     if (t == half - 1 || t == Nf - half - 1) {
@@ -877,4 +882,136 @@ int gs_search_slot(gs_t* q, const gs_slot_t* s, gs_dci_t* out, uint32_t max_out)
     Ll = Ll == 0 ? UINT32_MAX : Ll - 1;
   }
   return (int)nof_dci;
+}
+
+/* --------------------------------------------------------- tracked UE, no search */
+
+#define GS_TRACK_GATE 0.6f /* DM-RS correlation a candidate needs before it is decoded */
+
+int gs_decode_tracked(gs_t* q, const gs_slot_t* s, const gs_track_t* t, gs_dci_t* out, uint32_t max_out)
+{
+  if (q == NULL || s == NULL || t == NULL || s->grid == NULL || t->duration < 1 || t->duration > GS_MAX_DURATION ||
+      s->nof_sc == 0 || s->nof_sc > GS_MAX_SC) {
+    return -1;
+  }
+  const int32_t ref = t->coreset0 ? s->ref_cs0 : s->ref_crb0;
+  if (ref == GS_NO_REF) {
+    return 0;
+  }
+  const uint32_t N   = s->nof_sc;
+  const uint32_t dur = t->duration;
+  const int32_t  cce = GS_NSC_CCE / (int32_t)dur;
+  cf_t(*dm)[GS_MAX_SC / 4] = q->cdm; /* expected DM-RS per symbol */
+
+  int32_t  used_lo[GS_MAX_DCI_PER_SLOT], used_hi[GS_MAX_DCI_PER_SLOT];
+  uint32_t nof = 0;
+
+  for (int Ll = GS_MAX_L_LOG2; Ll >= 0 && nof < max_out; Ll--) {
+    if (!((t->al_mask >> Ll) & 1U)) {
+      continue;
+    }
+    const int32_t span = (1 << Ll) * cce;
+    for (int32_t first = t->sc_lo; first + span - 1 <= t->sc_hi && nof < max_out; first += cce) {
+      if (first < 0 || first + span > (int32_t)N || span % GS_NSC_REG != 0) {
+        continue;
+      }
+      bool overlap = false;
+      for (uint32_t i = 0; i < nof && !overlap; i++) {
+        overlap = first <= used_hi[i] && first + span - 1 >= used_lo[i];
+      }
+      const int32_t k0 = first - ref;
+      if (overlap || k0 < 0 || k0 % 4 != 0) {
+        continue;
+      }
+      const uint32_t nd = (uint32_t)span / 4;
+
+      /* expected DM-RS, and how well the REs match it, coherently over 2 RBs at a time */
+      double num = 0, den = 0;
+      for (uint32_t l = 0; l < dur; l++) {
+        /* as srsRAN generates it (dmrs_pdcch.c): sequence from c_init, k0/4 pilots in */
+        srsran_sequence_state_t seq;
+        srsran_sequence_state_init(&seq, gs_pdcch_dmrs_cinit(s->slot_idx, l, t->n_id));
+        srsran_sequence_state_advance(&seq, (uint32_t)k0 / 2);
+        srsran_sequence_state_gen_f(&seq, (float)M_SQRT1_2, (float*)dm[l], 2 * nd);
+        const cf_t* Y = s->grid + l * N + first;
+        for (uint32_t g = 0; g < nd; g += 6) {
+          cf_t   acc = 0;
+          double pw  = 0;
+          uint32_t n = 0;
+          for (uint32_t m = g; m < g + 6 && m < nd; m++, n++) {
+            cf_t y = Y[1 + 4 * m];
+            acc += y * conjf(dm[l][m]);
+            pw += crealf(y * conjf(y));
+          }
+          num += cabsf(acc);
+          den += sqrt(pw * n);
+        }
+      }
+      if (gs_debug()) {
+        printf("GS track 0x%04x L%u [%d..%d] gate %.2f\n", t->rnti, 1U << Ll, first, first + span - 1,
+               den > 0 ? num / den : 0.0);
+      }
+      if (den <= 0 || num / den < GS_TRACK_GATE) {
+        continue;
+      }
+
+      /* each symbol with its own pilots: a CFO turns the channel from one symbol to the next */
+      cf_t*          yeq = q->yeq_iv[0];
+      const uint32_t nre = 3 * (uint32_t)span / 4;
+      for (uint32_t l = 0; l < dur; l++) {
+        gs_slot_t one = *s;
+        one.grid      = s->grid + l * N;
+        gs_equalize(&one, first, (uint32_t)span, 1, dm[l], 0, yeq + l * nre);
+      }
+      uint32_t       E   = 0;
+      double         err = 0, epre = 0;
+      for (uint32_t l = 0; l < dur; l++) {
+        for (uint32_t m = 0; m < nre; m++) {
+          cf_t v         = yeq[l * nre + m];
+          q->bits[E++]   = crealf(v) < 0.0f;
+          q->bits[E++]   = cimagf(v) < 0.0f;
+          cf_t  d        = ((crealf(v) < 0 ? -1.0f : 1.0f) + I * (cimagf(v) < 0 ? -1.0f : 1.0f)) * (float)M_SQRT1_2;
+          float e        = cabsf(v - d);
+          err += e * e;
+        }
+        for (int32_t k = first; k < first + span; k++) {
+          float a = cabsf(s->grid[l * N + k]);
+          epre += a * a;
+        }
+      }
+      if (E != (108U << Ll)) {
+        continue;
+      }
+      for (uint32_t z = 0; z < t->nof_sizes; z++) {
+        const uint32_t nb = t->sizes[z];
+        uint16_t       rnti;
+        if (!gs_gf2_size_valid(nb, (uint32_t)Ll) || nb + 16 + q->args.min_parity > E) {
+          continue;
+        }
+        if (!gs_dci_try(q->bits, E, nb, t->n_id, t->n_rnti, out[nof].payload, &rnti) || rnti != t->rnti) {
+          continue;
+        }
+        gs_dci_t* o      = &out[nof];
+        o->slot_idx      = s->slot_idx;
+        o->duration      = dur;
+        o->L             = 1U << Ll;
+        o->cand.nof_iv   = 1;
+        o->cand.iv[0].first = first;
+        o->cand.iv[0].last  = first + span - 1;
+        o->coreset0      = t->coreset0;
+        o->ref_ambiguous = s->ref_cs0 != GS_NO_REF && s->ref_cs0 == s->ref_crb0;
+        o->n_id          = t->n_id;
+        o->rnti          = rnti;
+        o->n_rnti        = t->n_rnti;
+        o->nof_bits      = nb;
+        o->evm           = (float)sqrt(err / (double)(nre * dur));
+        o->epre          = (float)(epre / ((double)span * dur));
+        used_lo[nof]     = first;
+        used_hi[nof]     = first + span - 1;
+        nof++;
+        break;
+      }
+    }
+  }
+  return (int)nof;
 }

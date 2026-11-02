@@ -135,3 +135,8 @@ target_link_libraries(gs_grid_replay nrscope_libs
                                      srsran_common
                                      ${CMAKE_THREAD_LIBS_INIT}
                                      m)
+
+# Parses the SRB PDUs the RACH decoder logs (msg4_bytes.log, mac:srb) as RRC DL-DCCH
+# messages: readable when the network does not cipher RRC (NEA0). Not a ctest.
+add_executable(srb_rrc_parse srb_rrc_parse.cc)
+target_link_libraries(srb_rrc_parse rrc_nr_asn1 srsran_mac srsran_common srsran_phy ${CMAKE_THREAD_LIBS_INIT})

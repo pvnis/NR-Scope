@@ -1204,6 +1204,14 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
   int total_ul_dci = 0;
 
   for (uint32_t rnti_idx = 0; rnti_idx < n_rntis; rnti_idx++) {
+    /* A UE GoldenSniffer decodes directly (its RRC config is stale) is not searched here:
+      its DCIs cannot pass the CRC with the old sizes, and the search is the costly part */
+    {
+      auto b = state->blind_ues.find(sharded_rntis[dci_decoder_id][rnti_idx]);
+      if (b != state->blind_ues.end() && b->second.state == BlindUe::CONVERGED) {
+        continue;
+      }
+    }
     // With carrier aggregation
     memcpy(ue_dl_tmp, &ue_dl_dci, sizeof(srsran_ue_dl_nr_t));
     memcpy(slot_tmp, slot, sizeof(srsran_slot_cfg_t));

@@ -564,7 +564,9 @@ int RachDecoder::DecodeandParseMS4fromSlot(srsran_slot_cfg_t* slot, WorkState* s
         if (first && len >= hdr + 2) {
           const uint32_t pdcp_sn = ((sdu[hdr] & 0x0f) << 8) | sdu[hdr + 1];
           printf("RRC on SRB%u for UE 0x%04x: %u bytes, RLC SN %u, PDCP SN %u (ciphered)\n", lcid, tc_rnti, len, rlc_sn, pdcp_sn);
+          result->srb_events.push_back({tc_rnti, lcid, len, (int32_t)pdcp_sn});
         } else {
+          result->srb_events.push_back({tc_rnti, lcid, len, -1});
           printf("RRC on SRB%u for UE 0x%04x: %u bytes, RLC SN %u, segment (ciphered)\n", lcid, tc_rnti, len, rlc_sn);
         }
       }

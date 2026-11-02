@@ -30,6 +30,23 @@
  *     report_s: 10
  *     threads: 2             # searcher threads; the workers only demodulate and queue
  *     queue: 256             # slots waiting for a searcher; beyond, GoldenSniffer drops its own
+ *
+ *   Fallback (docs/blind_fallback_plan.md): a UE is decoded from its RRC config as usual;
+ *   an RRC PDU on SRB1 (the reconfiguration, ciphered) arms it; blind sightings while the
+ *   regular decoders find nothing make it stale; GoldenSniffer then learns its PDCCH
+ *   (N_ID, CORESET extent, DCI sizes, ALs) and decodes it directly in the workers
+ *   (converged; its regular search is skipped). The whole-slot search runs only while
+ *   needed: discovery at start and periodic sweeps (UEs never seen at RACH), armed or
+ *   learning UEs, or always with mode: always.
+ *     mode: fallback         # | always
+ *     startup_s: 10
+ *     scan_period_s: 30      # 0 = no sweeps
+ *     scan_window_s: 2
+ *     trigger_on_srb: true
+ *     arm_s: 10
+ *     stale_hits: 3
+ *     converge_hits: 10
+ *     quiet_s: 1             # a blind-tracked UE silent this long starts a sweep at once
  */
 #ifndef NRSCOPE_GOLDEN_SNIFFER_H
 #define NRSCOPE_GOLDEN_SNIFFER_H
@@ -54,6 +71,17 @@ struct GoldenSnifferArgs {
   double                report_s = 10.0;
   uint32_t              threads  = 2;   // searcher threads, off the workers' path
   uint32_t              queue    = 256; // slots waiting for a searcher; beyond, GoldenSniffer drops
+
+  /* Fallback (blind decoding of UEs whose RRC config went stale) */
+  bool     always         = false; // mode: always = search every slot (the old behaviour)
+  double   startup_s      = 10;    // discovery window after SIB1 (UEs already connected)
+  double   scan_period_s  = 30;    // periodic discovery sweep (0 = none)
+  double   scan_window_s  = 2;
+  bool     trigger_on_srb = true;  // an RRC PDU on SRB1 to a UE arms its fallback
+  double   arm_s          = 10;    // how long an armed UE keeps the search on
+  uint32_t stale_hits     = 3;     // blind sightings without a regular DCI that make a UE stale
+  uint32_t converge_hits  = 10;    // DCIs learned before decoding a UE directly
+  double   quiet_s        = 1.0;   // a blind-tracked UE silent this long starts a sweep (gone or new RNTI?)
 };
 
 extern GoldenSnifferArgs nrscope_gs_args;
@@ -63,8 +91,13 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml);
 /* Per-RNTI summary on stdout and CSV flush; called by the exit path */
 void golden_sniffer_report();
 
-/* Under the scheduler lock: with feed_rntis, adds the C-RNTIs found; periodic report */
-void golden_sniffer_update(WorkState& state, double now);
+/* Under the scheduler lock, once per slot result: the fallback state machine (SRB triggers,
+  blind sightings, regular hits, learning, convergence, expiry), the logging of tracked
+  DCIs, the discovery windows, feed_rntis, and the periodic report. */
+void golden_sniffer_update(WorkState&                   state,
+                           const SlotResult&            result,
+                           const std::vector<uint16_t>& regular_hits,
+                           double                       now);
 
 class GoldenSnifferDecoder
 {
@@ -77,7 +110,7 @@ public:
 
   /* One slot, from the worker: demodulates the PDCCH symbols and queues them for the
     searcher threads. Never waits for the search. */
-  void Submit(srsran_slot_cfg_t* slot, WorkState* state);
+  void Submit(srsran_slot_cfg_t* slot, WorkState* state, SlotResult* result);
 
   bool ready = false;
 
@@ -87,6 +120,7 @@ private:
   srsran_ue_dl_nr_sratescs_info arg_scs_grid = {};
   int32_t                       ref_crb0 = GS_NO_REF;
   int32_t                       ref_cs0  = GS_NO_REF;
+  gs_t*                         track_gs = nullptr; // this worker's decoder of tracked UEs
   uint32_t                      cs0_nof_sc = 0;
   uint32_t                      pci      = 0;
   uint32_t                      slots_per_frame = 20;
