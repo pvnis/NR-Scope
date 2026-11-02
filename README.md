@@ -216,7 +216,7 @@ Differences from the MATLAB are listed at the top of `gs_search.c`.
 ```
 golden_sniffer:
   enable: true
-  max_duration: 2       # PDCCH symbols scanned
+  max_duration: 2       # PDCCH symbols scanned (3 for cells with 3-symbol CORESETs)
   css_sizes: auto       # sizes allowed for n_RNTI = 0 DCIs that may be in CORESET#0
   min_parity: 16        # bits checked beyond the unknowns (false-detection guard)
   feed_rntis: false     # hand the C-RNTIs found to the regular DCI decoders
@@ -240,5 +240,74 @@ cd build/nrscope/src && ./nrscope -c config_gs_file.yaml          # rx_file, ssb
 conf3 (FDD, 15 kHz, 1 UE) 10939/10939 DCIs, conf17 (TDD, 30 kHz, 2 UEs, 2-symbol
 CORESETs) 8290/8290 and 5223/5223, no false DCI. Self-test (no radio):
 `build/nrscope/src/tests/gs_selftest` (also `ctest -R gs`).
+
+### Fallback: UEs whose RRC config went stale
+
+`mode: fallback` (default) runs the regular decoders as before and GoldenSniffer only
+where they cannot follow a UE (its RRC reconfiguration is ciphered, or it attached before
+NR-Scope started):
+
+- **RRC**: decoded by the regular decoders from its RRCSetup.
+- **ARMED**: a new RRCSetup or an RRC PDU on SRB1; the blind search runs for `arm_s`.
+- **STALE**: seen blind (outside CORESET#0) where the regular decoders found nothing;
+  its PDCCH is learned: N_ID, scrambling, duration, sizes, ALs, DL and UL.
+- **CONVERGED**: decoded directly in the workers (`gs_decode_tracked_multi`): all
+  converged UEs at once, over the whole band on their CCE grid, every AL; the DM-RS is
+  correlated once per RB, each candidate is solved once per size and the solve gives the
+  RNTI; candidates the hard decision cannot solve get a soft decision (`gs_ec.c`,
+  5GDescrambler's error correction; `soft`). Other C-RNTIs found there are sightings.
+- **DISCOVERED**: a C-RNTI found blind with no RRCSetup (startup window, sweeps, or the
+  tracked decode's sightings), learned the same way.
+
+A converged UE re-learns in a shadow when a DCI disagrees with its track or an RRC PDU
+goes to it; a sweep starts when it goes quiet or one of its directions stops; it is kept
+`keep_s` after its last DCI. In a replay the timers run on air time.
+
+```
+golden_sniffer:
+  mode: fallback          # | always (search every slot: recorded captures without RACH)
+  startup_s: 10           # discovery window after SIB1
+  scan_period_s: 30       # periodic sweep, scan_window_s long
+  converge_hits: 10       # DCIs learned before decoding a UE directly...
+  converge_s: 3           # ...with DL and UL both seen, or this long
+  keep_s: 300
+  size_min: 20
+  size_max: 140
+  soft: true
+  searcher_idle: true     # searchers at SCHED_IDLE: never in the pipeline's way
+```
+
+The final report gives the execution time of every stage (worker FFT, tracked decode,
+search of empty and busy slots, queue wait, slot-to-DCI latency).
+
+### Evaluation
+
+- `build/nrscope/src/tests/gs_selftest [seed] [test]`: DM-RS inversion, GF(2), blind
+  search, tracked decode (one UE, many UEs, vs SNR with and without soft decisions), soft
+  error correction (detection, false alarms, timing).
+- `nrscope/scripts/gs_eval_dataset.py --conf 1,3,6,...`: GoldenSniffer dataset captures
+  (srsRAN gNB, FDD 15 kHz and TDD 30 kHz), blind search and fallback, scored per gNB log.
+- `nrscope/scripts/gs_cellsim_run.sh run_dir nrscope/config/cellsim/c.ini`: synthetic
+  cells with ground truth (`gs_cellsim`): many UEs, interleaved CORESETs, 3-symbol
+  CORESETs, ScramblingID, idle periods, size changes, re-attaches, multipath;
+  `gs_compare.py --truth` scores them.
+- Live: `gs_compare.py gnb.log golden_sniffer.csv` against OCUDU's MAC "Slot decisions".
+
+### Field test on commercial networks (sens6 + X410)
+
+```
+nrscope/scripts/field_prep.sh                       # X410 management IP, RT settings, checks
+sudo nrscope/scripts/field_scan.py                  # cells around: SSB frequency and PCI
+nrscope/scripts/field_run.sh --ssb 3624480000 --pci 123 --secs 120 --tag site1
+#   -> prints "GoldenSniffer: carrier ... set rx_center_freq: F" if the capture does not
+#      hold the whole carrier: run again with --center F
+nrscope/scripts/field_run.sh --ssb 3624480000 --pci 123 --center F --secs 600 --tag site1
+```
+
+Each run directory (`~/field/<date>_<tag>`) keeps the config, the log, the DCI CSV, the
+SRB PDUs and a summary. There is no gNB log to score against outdoors: a C-RNTI seen
+many times with stable sizes is a UE; one-off RNTIs are false decodes (rare: 3 in 46 000
+DCIs on the 100-UE synthetic cell). Keep the `[status]` RX peak below about -10 dBFS
+(`--gain`). The X410's reference is about -4 ppm off (`freq_offset_ppm: -4.02`).
 
 Please refer to this [wiki page](https://github.com/PrincetonUniversity/NR-Scope/wiki/1.-Introduction#output-format) for the description of log output and [FAQ](https://github.com/PrincetonUniversity/NR-Scope/wiki/7.-Usage-Recommendations-and-FAQ).

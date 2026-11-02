@@ -242,7 +242,7 @@ const char* rnti_kind(uint16_t rnti, bool coreset0, bool n_rnti)
   return "C";
 }
 
-void print_report_locked()
+void print_report_locked(bool final = false)
 {
   uint64_t searched, dropped, submitted;
   double   t_sum, t_max;
@@ -259,6 +259,7 @@ void print_report_locked()
          (unsigned long long)gs_total, gs_stats.size(), (unsigned long long)searched,
          searched ? t_sum / (double)searched : 0.0, t_max, (unsigned long long)dropped,
          (unsigned long long)submitted);
+  if (final)
   printf("GoldenSniffer execution time:\n%s%s%s%s%s%s%s%s%s%s", gs_t_submit.str().c_str(), gs_t_fft.str().c_str(),
          gs_t_track.str().c_str(), gs_t_enq.str().c_str(), gs_t_wait.str().c_str(), gs_t_search0.str().c_str(),
          gs_t_search1.str().c_str(), gs_t_update.str().c_str(), gs_t_lat_search.str().c_str(),
@@ -420,7 +421,7 @@ void golden_sniffer_report()
     return;
   }
   std::lock_guard<std::mutex> lock(gs_log_mutex);
-  print_report_locked();
+  print_report_locked(true);
   if (gs_csv != nullptr) {
     fflush(gs_csv);
   }
