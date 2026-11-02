@@ -1,0 +1,48 @@
+# GoldenSniffer on a recorded capture: NR-Scope replays an IQ file through srsRAN's file
+# radio and finds every DCI blind (golden_sniffer.h), without a RACH.
+#
+# Set up for the GoldenSniffer dataset (https://doi.org/10.5281/zenodo.21678295): srsRAN
+# gNB, FDD at 1980 MHz, 20 MHz, 15 kHz, 23.04 Msps. Its captures are int16; convert them:
+#   nrscope/scripts/sc16_to_fc32.py iq_1980M_23.04M_conf3_0.sc16 /tmp/conf3.fc32
+# and point rx_file at the result. The file is read once, as fast as the workers take it
+# (nothing is dropped), and the end of the file stops NR-Scope with the per-RNTI report.
+# For the 3820.02 MHz (TDD, 30 kHz) captures, change the frequencies, band and scs_index.
+nof_usrp_dev: 1
+usrp_setting_0:
+  device_name: file
+  rf_args: "rx_file=/tmp/conf3.fc32,base_srate=23.04e6"
+  ssb_freq: 1972950000 # found with GIOVANNI/tools/gs/find_ssb.py: PSS at 1972.95 MHz
+  rx_center_freq: 1980000000
+  band_list: [2]
+  rx_gain: 0
+  min_rx_gain: 0
+  max_rx_gain: 0
+  srate_hz: 23040000
+  srsran_srate_hz: 23040000
+  nof_carriers: 1
+  nof_antennas: 1
+  scs_index: 0 #(0: 15kHz, 1: 30kHz)
+  rf_log_level: "info"
+  nof_rnti_worker_groups: 1
+  nof_bwps: 1
+  nof_workers: 4
+  cpu_affinity: false
+  disable_cfo: false
+  rnti_expiry_s: 30
+  agc: false
+  log_name: "logs_nrscope_gs_file.csv"
+
+log_config:
+  recording_mode: false
+  quiet: true
+  local_log: false
+  push_to_google: false
+  enable_gui: false
+
+golden_sniffer:
+  enable: true
+  max_duration: 2
+  css_sizes: auto      # DCI 1_0 of the CORESET#0 bandwidth, for n_RNTI = 0 DCIs in CORESET#0
+  feed_rntis: false
+  report_s: 5
+  csv: "/tmp/golden_sniffer.csv"

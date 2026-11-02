@@ -52,7 +52,8 @@ The main features are as follows:
 18. PCI can be configured in the config.yaml. If configured, NR-Scope will proceed only if the detected cell's PCI matches what is configured.
 19. Enable real-time constellation graph for PDCCH symbols, by setting `enable_gui: true` in the config file, now this function only support single USRP setting.
 20. User provided RRCReconfiguration is supported, please check `rrc_recfg_config` folder for more information. We provide several examples of RRCReconfiguration for different scenarios (T-Mobile FDD and TDD SA cells).
-21. Stay tuned... 😄
+21. GoldenSniffer blind DCI detection (`golden_sniffer:` in the config): every DCI of every UE, without having seen its RACH and without knowing its RNTI, from SIB1 on. A C port of [5G-GoldenSniffer](https://github.com/5G-GoldenSniffer/5G-GoldenSniffer) (MobiCom '26); see [GoldenSniffer](#goldensniffer) below.
+22. Stay tuned... 😄
 
 Please refer to the [wiki page](https://github.com/PrincetonUniversity/NG-Scope-5G/wiki) for more feature description and documentation.
 
@@ -193,5 +194,51 @@ sudo ./nrscope | tee ./$(date +"%Y-%m-%d_%H:%M:%S").txt | grep Found 	# This com
 # or to scan all 5G SA cells (in nrscope/src/)
 sudo ./nrscan
 ```
+
+## GoldenSniffer
+
+The regular DCI decoders only search the RNTIs learned from an RRCSetup (Msg4), with
+the CORESET it configured. GoldenSniffer finds DCIs blind, as soon as SIB1 is decoded:
+
+1. the busy subcarriers of the first PDCCH symbols are clustered into runs, and PDCCH
+   candidates are cut from them (non-interleaved, and interleaved pairs/triples);
+2. the QPSK modulation is removed by phase unwrapping, and the PDCCH DM-RS c_init, hence
+   the scrambling ID N_ID, is read by inverting the Gold sequence (no ID search);
+3. with the scrambling known, polar code + CRC + RNTI mask are affine over GF(2): one
+   linear solve per DCI size gives the payload and the RNTI (no RNTI search).
+
+Code: `nrscope/src/libs/golden_sniffer/` (C core, `nrscope/hdr/golden_sniffer/gs_core.h`,
+MIT, ported from the MATLAB of the 5G-GoldenSniffer authors) and
+`nrscope/src/libs/golden_sniffer.cc` (the worker thread, CSV, report). The encrypted
+`PDCCH_DMRS_solve_underdet.p` of the MATLAB is replaced by `gs_dmrs_solve_underdet()`.
+Differences from the MATLAB are listed at the top of `gs_search.c`.
+
+```
+golden_sniffer:
+  enable: true
+  max_duration: 2       # PDCCH symbols scanned
+  css_sizes: auto       # sizes allowed for n_RNTI = 0 DCIs that may be in CORESET#0
+  min_parity: 16        # bits checked beyond the unknowns (false-detection guard)
+  feed_rntis: false     # hand the C-RNTIs found to the regular DCI decoders
+  csv: /tmp/golden_sniffer.csv
+```
+
+Every DCI goes to the CSV (SFN, slot, RNTI, N_ID, AL, size, payload); a per-RNTI count is
+printed every `report_s` seconds and at exit.
+
+Offline, on a recorded capture (srsRAN's `file` radio; NR-Scope then drops no slot and
+stops at the end of the file), e.g. the GoldenSniffer dataset
+(https://doi.org/10.5281/zenodo.21678295):
+
+```
+nrscope/scripts/sc16_to_fc32.py iq_1980M_23.04M_conf3_0.sc16 /tmp/conf3.fc32
+cd build/nrscope/src && ./nrscope -c config_gs_file.yaml          # rx_file, ssb_freq inside
+../../../nrscope/scripts/gs_compare.py gnb_conf3.log /tmp/golden_sniffer.csv --rnti 0x4601
+```
+
+`gs_compare.py` scores the CSV against the gNB log's `PDCCH:` lines. On the dataset:
+conf3 (FDD, 15 kHz, 1 UE) 10939/10939 DCIs, conf17 (TDD, 30 kHz, 2 UEs, 2-symbol
+CORESETs) 8290/8290 and 5223/5223, no false DCI. Self-test (no radio):
+`build/nrscope/src/tests/gs_selftest` (also `ctest -R gs`).
 
 Please refer to this [wiki page](https://github.com/PrincetonUniversity/NR-Scope/wiki/1.-Introduction#output-format) for the description of log output and [FAQ](https://github.com/PrincetonUniversity/NR-Scope/wiki/7.-Usage-Recommendations-and-FAQ).

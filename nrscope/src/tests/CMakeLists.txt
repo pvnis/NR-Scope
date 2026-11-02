@@ -115,3 +115,14 @@ target_link_libraries(sensing_offline srsue_phy
                                       ${Boost_LIBRARIES}
                                       ${YAML_CPP_LIBRARIES}
                                       m)
+
+# GoldenSniffer blind PDCCH detection (src/libs/golden_sniffer): srsRAN encodes DCIs
+# into synthetic slots, the blind search must find them with no RNTI, scrambling ID,
+# size or location given. Needs no radio and no gNB.
+add_executable(gs_selftest gs_selftest.c)
+target_link_libraries(gs_selftest nrscope_libs
+                                  srsran_phy
+                                  srsran_common
+                                  ${CMAKE_THREAD_LIBS_INIT}
+                                  m)
+add_test(nrscope_gs_selftest gs_selftest)

@@ -794,7 +794,13 @@ static int slot_sync_recv_callback(void* ptr, cf_t** buffer, uint32_t nsamples, 
   srsran::rf_timestamp_t& rf_timestamp = a;
   *ts                                  = a.get(0);
 
-  return radio->rx_now(rf_buffer, rf_timestamp);
+  /* rx_now returns a bool, and returned as is a failure (false, 0) reads as
+    SRSRAN_SUCCESS. A failure only matters when replaying a file: it is the end. */
+  bool ok = radio->rx_now(rf_buffer, rf_timestamp);
+  if (!ok && nrscope_lossless.load(std::memory_order_relaxed)) {
+    return SRSRAN_ERROR;
+  }
+  return ok;
 }
 
 int Radio::SyncandDownlinkInit()
@@ -972,6 +978,15 @@ int Radio::FetchAndResample()
         here, as before, stopped the whole capture for good. The RF layer
         restarts the stream on the next receive and the sync re-acquires, so give
         back the count this iteration took and carry on. */
+      if (nrscope_lossless.load(std::memory_order_relaxed)) {
+        /* end of the replayed file: let the workers finish the queued slots, then stop */
+        std::cout << "End of the input file" << std::endl;
+        sleep(3);
+        if (!nrscope_stop.exchange(true)) {
+          sem_post(&nrscope_stop_sem);
+        }
+        break;
+      }
       if (nof_rx_errors++ % 100 == 0) {
         std::cerr << "SYNC: receive failed (" << nof_rx_errors << " so far), restarting stream" << std::endl;
       }

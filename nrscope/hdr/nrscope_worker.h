@@ -5,6 +5,7 @@
 #include "nrscope/hdr/rach_decoder.h"
 #include "nrscope/hdr/sibs_decoder.h"
 #include "nrscope/hdr/dci_decoder.h"
+#include "nrscope/hdr/golden_sniffer.h"
 
 namespace NRScopeTask{
 
@@ -22,6 +23,8 @@ public:
   WorkState worker_state;
   RachDecoder rach_decoder; 
   SIBsDecoder sibs_decoder;
+  GoldenSnifferDecoder gs_decoder;
+  bool                 gs_inited = false;
   std::vector<std::unique_ptr <DCIDecoder> > dci_decoders;
   bool initializing;
 

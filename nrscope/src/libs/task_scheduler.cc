@@ -2,6 +2,8 @@
 #include "nrscope/hdr/run_recorder.h"
 #include <ctime>
 
+std::atomic<bool> nrscope_lossless{false};
+
 namespace NRScopeTask {
 
 TaskSchedulerNRScope::TaskSchedulerNRScope()
@@ -364,6 +366,8 @@ int TaskSchedulerNRScope::UpdatewithResult(SlotResult now_result)
       task_scheduler_state.dci_inited = true;
     }
   }
+  /* GoldenSniffer's DCIs: CSV, per-RNTI counts, and with feed_rntis new C-RNTIs */
+  golden_sniffer_update(task_scheduler_state, now_result, now);
   task_scheduler_lock.unlock();
 
   /* This slot contains the DCI decoder's result, put all the results to log */
@@ -709,6 +713,12 @@ int TaskSchedulerNRScope::StoreSlotData(uint64_t                    sf_round,
 {
   const uint32_t i = next_slot_idx.load(std::memory_order_relaxed);
   SlotData_&     s = slot_data[i];
+
+  /* A file has no real time to keep: wait for the workers rather than drop */
+  while (nrscope_lossless.load(std::memory_order_relaxed) && !slot_data[i].processed.load(std::memory_order_acquire) &&
+         !nrscope_stop.load(std::memory_order_relaxed)) {
+    usleep(100);
+  }
 
   /* Queue full: the entry at the write cursor has not been taken by a worker
   yet. The incoming slot is dropped and the cursor left where it is.

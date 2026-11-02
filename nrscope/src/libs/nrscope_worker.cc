@@ -356,6 +356,12 @@ void NRScopeWorker::Run()
       worker_state.dci_inited = true;
     }
 
+    /* GoldenSniffer needs only SIB1 (the carrier and the TDD pattern), no RACH */
+    if (nrscope_gs_args.enable && !gs_inited && worker_state.sib1_found) {
+      gs_decoder.Init(&worker_state, rx_buffer[0]);
+      gs_inited = true;
+    }
+
     /* Nothing is sent downlink in an uplink-only TDD slot: skip the RACH and DCI
       decoders, their FFTs included. The slot still yields a result, empty, so
       the scheduler's per-slot bookkeeping is unchanged. */
@@ -401,6 +407,11 @@ void NRScopeWorker::Run()
           std::thread{&RachDecoder::DecodeandParseMS4fromSlot, &rach_decoder, &slot, &worker_state, &slot_result};
     }
 
+    std::thread gs_thread;
+    if (gs_decoder.ready && !uplink_only) {
+      gs_thread = std::thread{&GoldenSnifferDecoder::DecodeSlot, &gs_decoder, &slot, &worker_state, &slot_result};
+    }
+
     std::vector<std::thread> dci_threads;
     if (worker_state.dci_inited && !uplink_only) {
       slot_result.dci_result = true;
@@ -439,6 +450,10 @@ void NRScopeWorker::Run()
 
     if (rach_thread.joinable()) {
       rach_thread.join();
+    }
+
+    if (gs_thread.joinable()) {
+      gs_thread.join();
     }
 
     if (worker_state.dci_inited && !uplink_only) {

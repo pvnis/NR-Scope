@@ -360,6 +360,23 @@ struct WorkState_ {
   std::map<uint16_t, std::map<uint32_t, uint32_t> > pdcch_dmrs_ids_by_rnti;
 };
 
+/* A DCI found blind by GoldenSniffer (golden_sniffer.h), RNTI unknown beforehand */
+struct GsDciResult {
+  uint32_t             slot_idx  = 0;
+  uint16_t             rnti      = 0;
+  uint32_t             n_id      = 0;     // PDCCH DM-RS scrambling ID read from the DM-RS
+  bool                 n_rnti    = false; // scrambled with n_RNTI = RNTI (UE search space)
+  bool                 coreset0  = false; // DM-RS referenced to CORESET#0
+  uint32_t             L         = 0;
+  uint32_t             duration  = 0;
+  uint32_t             first_crb = 0;
+  uint32_t             nof_iv    = 0;     // 2 or 3: interleaved
+  uint32_t             nof_bits  = 0;
+  std::vector<uint8_t> payload;
+  float                evm  = 0;
+  float                epre = 0;
+};
+
 typedef struct SlotResult_ SlotResult;
 struct SlotResult_ {
   /* 3GPP only marks system frame up to 10.24 seconds, 0-1023.
@@ -401,6 +418,9 @@ struct SlotResult_ {
   /* The worker works on DCI decoding */
   bool                     dci_result;
   std::vector<DCIFeedback> dci_feedback_results;
+
+  /* GoldenSniffer: DCIs found without knowing their RNTI */
+  std::vector<GsDciResult> gs_dcis;
 
   /* Define the compare operator between structure by sf_round,
     sfn and slot idx */
@@ -506,6 +526,9 @@ double get_now_timestamp_in_double();
  */
 void my_sig_handler(int s);
 extern std::atomic<bool> nrscope_stop;
+/* Replaying a file (device_name: file): the slot queue waits for a worker instead of
+   dropping, and the end of the file stops NR-Scope as Ctrl-C does. */
+extern std::atomic<bool> nrscope_lossless;
 extern sem_t             nrscope_stop_sem;
 
 /**

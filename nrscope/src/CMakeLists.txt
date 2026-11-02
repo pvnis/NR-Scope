@@ -60,7 +60,7 @@ target_link_libraries(nrscan    srsue_phy
 #   sudo ./nrscope config_sunrise.yaml
 set(NRSCOPE_CONFIG_DIR ${PROJECT_SOURCE_DIR}/nrscope/config)
 set(NRSCOPE_CONFIGS config.yaml config_sunrise.yaml config_x410_UC200.yaml config_x410_benetel.yaml
-                    config_x410_benetel_nearby.yaml)
+                    config_x410_benetel_nearby.yaml config_gs_file.yaml)
 
 set(NRSCOPE_CONFIG_LINK_COMMANDS)
 foreach(cfg ${NRSCOPE_CONFIGS})

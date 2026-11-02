@@ -3,6 +3,7 @@
 
 #include "nrscope/hdr/sensing/nrscope_sensing.h"
 #include "nrscope/hdr/ul_dmrs.h"
+#include "nrscope/hdr/golden_sniffer.h"
 #include "srsran/common/band_helper.h"
 #include "srsran/common/crash_handler.h"
 #include "srsran/common/string_helpers.h"
@@ -178,6 +179,10 @@ int load_config(std::vector<Radio>& radios, std::string file_name)
       if (config_yaml[setting_name]["device_name"]) {
         std::string rf_args_devicename = config_yaml[setting_name]["device_name"].as<string>();
         radios[i].rf_args.device_name  = rf_args_devicename;
+        if (rf_args_devicename == "file") {
+          nrscope_lossless = true;
+          std::cout << "    replaying a file: no slot is dropped, the end of the file stops NR-Scope" << std::endl;
+        }
       }
       std::cout << "    device_name: " << radios[i].rf_args.device_name << endl;
 
@@ -405,6 +410,7 @@ int load_config(std::vector<Radio>& radios, std::string file_name)
                                        config_yaml[setting_name]["record_pdcch_candidates"].as<bool>());
 
   load_sensing_config(config_yaml);
+  load_golden_sniffer_config(config_yaml);
   if (nrscope_ul_dmrs) {
     ul_dmrs_open(nrscope_sensing_args.dump);
   }
