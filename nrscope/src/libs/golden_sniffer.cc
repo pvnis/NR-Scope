@@ -351,6 +351,13 @@ static void gs_searcher_thread(uint32_t id)
   seen in, its ALs and its DCI sizes (the most frequent four). */
 static void gs_learn(BlindUe& e, const gs_dci_t& d)
 {
+  /* The tracked decode targets the UE-specific CORESET. DCIs in CORESET#0 (Msg4, the
+    RRCSetup, fallback DCIs while the UE is still on the common config) are interleaved
+    and have their own size: learning them would mark the UE interleaved for good and
+    keep it from converging, and add their size and extent to the track. */
+  if (d.coreset0) {
+    return;
+  }
   gs_track_t& t   = e.track;
   int32_t     lo  = d.cand.iv[0].first, hi = d.cand.iv[0].last;
   for (uint32_t i = 1; i < d.cand.nof_iv; i++) {

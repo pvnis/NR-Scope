@@ -233,6 +233,7 @@ int RachDecoder::RACHReceptionInit(WorkState* state, cf_t* input[SRSRAN_MAX_PORT
   ue_dl_args.nof_max_prb                   = 275;
   ue_dl_args.pdcch_dmrs_corr_thr           = 0.05;
 
+  SRSRAN_MEM_ZERO(&ue_dl_rach, srsran_ue_dl_nr_t, 1);
   if (srsran_ue_dl_nr_init_nrscope(&ue_dl_rach, input, &ue_dl_args, arg_scs)) {
     ERROR("RACHDecoder -- Error UE DL");
     return SRSRAN_ERROR;
@@ -276,6 +277,7 @@ int RachDecoder::RACHReceptionInit(WorkState* state, cf_t* input[SRSRAN_MAX_PORT
       "carrier (Msg4 PDSCH)", arg_scs_pdsch.coreset_offset_scs, pdsch_carrier.nof_prb, arg_scs.srate, cell.abs_pdcch_scs);
 
   // The lower boundary of PDSCH can be not aligned with the lower boundary of PDCCH
+  SRSRAN_MEM_ZERO(&ue_dl_pdsch, srsran_ue_dl_nr_t, 1);
   if (srsran_ue_dl_nr_init_nrscope(&ue_dl_pdsch, input, &ue_dl_args, arg_scs_pdsch)) {
     ERROR("Error UE DL");
     return SRSRAN_ERROR;

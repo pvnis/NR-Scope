@@ -19,6 +19,16 @@ DCIDecoder::DCIDecoder(uint32_t max_nof_rntis)
     array: "pdsch_nr.c: Malloc", "Error UE DL", heap corruption. Zero means "size them
     from the carrier", which set_carrier then does. */
   ue_dl_args = {};
+  /* Same for the PDCCH config: only the CORESETs and search spaces from RRC are set,
+    the rest kept heap garbage ("CORESET duration ... out-of-bounds", init failed). */
+  pdcch_cfg    = {};
+  dci_cfg      = {};
+  dci_cfg_ca   = {};
+  base_carrier = {};
+  coreset0_t   = {};
+  coreset1_t   = {};
+  carrier_dl   = {};
+  carrier_ul   = {};
 
   ue_dl_tmp = (srsran_ue_dl_nr_t*)malloc(sizeof(srsran_ue_dl_nr_t));
   slot_tmp  = (srsran_slot_cfg_t*)malloc(sizeof(srsran_slot_cfg_t));
@@ -1010,6 +1020,9 @@ int DCIDecoder::DCIDecoderandReceptionInit(WorkState* state, int bwp_id, cf_t* i
   dci_cfg_ca.multiple_scell         = true;
   dci_cfg_ca.carrier_indicator_size = 3;
 
+  /* the decoder is heap-allocated: init must not find old memory (ofdm.c then keeps
+    a garbage config, and CFR init and FFTW fail on it) */
+  SRSRAN_MEM_ZERO(&ue_dl_dci, srsran_ue_dl_nr_t, 1);
   if (srsran_ue_dl_nr_init_nrscope(&ue_dl_dci, input, &ue_dl_args, arg_scs)) {
     ERROR("Error UE DL");
     return SRSRAN_ERROR;
