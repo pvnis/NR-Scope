@@ -126,3 +126,12 @@ target_link_libraries(gs_selftest nrscope_libs
                                   ${CMAKE_THREAD_LIBS_INIT}
                                   m)
 add_test(nrscope_gs_selftest gs_selftest)
+
+# Replays GoldenSniffer grid dumps (GS_DUMP=<file> nrscope ...) through the search, for
+# debugging on real captures; GS_DEBUG=1 prints every stage. Not a ctest.
+add_executable(gs_grid_replay gs_grid_replay.c)
+target_link_libraries(gs_grid_replay nrscope_libs
+                                     srsran_phy
+                                     srsran_common
+                                     ${CMAKE_THREAD_LIBS_INIT}
+                                     m)

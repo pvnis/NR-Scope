@@ -32,10 +32,21 @@
  */
 #include "gs_internal.h"
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define GS_CORR_THRES 0.975f
+
+/* GS_DEBUG=1 in the environment: one line per stage, for replaying dumped grids */
+static int gs_debug(void)
+{
+  static int v = -1;
+  if (v < 0) {
+    v = getenv("GS_DEBUG") != NULL;
+  }
+  return v;
+}
 #define GS_AMPLITUDE_TOL 0.4f
 
 void gs_args_default(gs_args_t* a)
@@ -651,7 +662,14 @@ static bool gs_try_candidate(gs_t* q, const gs_slot_t* s, const gs_cand_t* c, ui
       }
     }
     if (!res.ok) {
+      if (gs_debug()) {
+        printf("GS   cand L%u [%d..%d]: no DM-RS c_init\n", 1U << Ll, iv->first, iv->last);
+      }
       return false;
+    }
+    if (gs_debug()) {
+      printf("GS   cand L%u [%d..%d]: N_ID %u (%s ref, symbol %u)\n", 1U << Ll, iv->first, iv->last, res.n_id,
+             refs[r] == s->ref_cs0 ? "CORESET#0" : "point A", res.l_est);
     }
     bool iv_cs0 = refs[r] == s->ref_cs0;
     if (i == 0) {
@@ -691,6 +709,16 @@ static bool gs_try_candidate(gs_t* q, const gs_slot_t* s, const gs_cand_t* c, ui
     return false;
   }
 
+  /* Could this candidate be in CORESET#0? Its DM-RS says so (or cannot tell, the two
+    references coinciding), and it lies inside CORESET#0's band when that is known. A
+    CORESET 1 DCI next to it must not be held to CORESET#0's DCI sizes. */
+  bool in_cs0 = cs0 || (s->ref_cs0 != GS_NO_REF && s->ref_cs0 == s->ref_crb0);
+  if (in_cs0 && s->cs0_nof_sc > 0) {
+    for (uint32_t i = 0; i < c->nof_iv; i++) {
+      in_cs0 = in_cs0 && c->iv[i].first >= s->ref_cs0 && c->iv[i].last < s->ref_cs0 + (int32_t)s->cs0_nof_sc;
+    }
+  }
+
   /* n_RNTI = RNTI decodes are strong (the CRC must match the RNTI the scrambling
     used): the first one wins. n_RNTI = 0 decodes are weak across sizes (nested polar
     codes): every size that solves is kept, and the one seen most often wins, the
@@ -715,7 +743,7 @@ static bool gs_try_candidate(gs_t* q, const gs_slot_t* s, const gs_cand_t* c, ui
       bool     n_rnti = h == 0 ? first_hyp : !first_hyp;
       uint16_t rnti;
       /* the size list of the common search spaces applies where their DM-RS is: CORESET#0 */
-      if (!n_rnti && (cs0 || s->ref_cs0 == s->ref_crb0) && !q->css_ok[nb]) {
+      if (!n_rnti && in_cs0 && !q->css_ok[nb]) {
         continue;
       }
       if (!gs_dci_try(bits, E, nb, (uint32_t)n_id, n_rnti, payload, &rnti)) {
@@ -740,6 +768,9 @@ static bool gs_try_candidate(gs_t* q, const gs_slot_t* s, const gs_cand_t* c, ui
     }
   }
   if (!strong && !have_weak) {
+    if (gs_debug()) {
+      printf("GS   cand L%u: no DCI size solves (evm %.2f)\n", 1U << Ll, sqrt(err / (ref_pow > 0 ? ref_pow : 1)));
+    }
     return false;
   }
   if (!strong) {
@@ -752,7 +783,7 @@ static bool gs_try_candidate(gs_t* q, const gs_slot_t* s, const gs_cand_t* c, ui
   out->duration      = dur;
   out->L             = 1U << Ll;
   out->cand          = *c;
-  out->coreset0      = cs0 || (s->ref_cs0 != GS_NO_REF && s->ref_cs0 == s->ref_crb0);
+  out->coreset0      = in_cs0;
   out->ref_ambiguous = s->ref_cs0 != GS_NO_REF && s->ref_cs0 == s->ref_crb0;
   out->n_id          = (uint32_t)n_id;
   out->rnti          = final_rnti;
@@ -792,6 +823,13 @@ int gs_search_slot(gs_t* q, const gs_slot_t* s, gs_dci_t* out, uint32_t max_out)
     return 0;
   }
   const uint32_t N = s->nof_sc;
+  if (gs_debug()) {
+    printf("GS slot %u: duration %u, %u runs:", s->slot_idx, dur, q->nof_runs);
+    for (uint32_t i = 0; i < q->nof_runs; i++) {
+      printf(" [%d..%d]", q->runs[i].first, q->runs[i].last);
+    }
+    printf("\n");
+  }
 
   /* channel estimates up to j^k per run, aligned across symbols */
   cf_t* tmp = q->tmp;

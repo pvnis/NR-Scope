@@ -87,6 +87,7 @@ private:
   srsran_ue_dl_nr_sratescs_info arg_scs_grid = {};
   int32_t                       ref_crb0 = GS_NO_REF;
   int32_t                       ref_cs0  = GS_NO_REF;
+  uint32_t                      cs0_nof_sc = 0;
   uint32_t                      pci      = 0;
   uint32_t                      slots_per_frame = 20;
   uint32_t                      first_crb = 0; /* CRB of grid subcarrier 0 */

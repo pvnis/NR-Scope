@@ -10,6 +10,9 @@ the most matching (SFN, slot, RNTI) is taken), then, over the slots the CSV cove
 per RNTI and format; plus whether the AL and the DCI direction (first payload bit, the
 format identifier of 0_0/1_0) agree.
 
+The log's "PDCCH: rnti=... format=... al=..." lines are used, or, if the PHY does not log
+them (OCUDU at PHY info), the MAC "Slot decisions" grants (DL/UL per RNTI, no AL).
+
 usage: gs_compare.py gnb.log golden_sniffer.csv [--scs-khz 15] [--rnti 0x4601,0x4602]
 """
 import argparse
@@ -41,16 +44,40 @@ def unwrapper():
     return f
 
 
+# OCUDU/srsRAN MAC "Slot decisions" lines, when the PHY does not log PDCCH: one grant
+# per "DL: ue=N c-rnti=..." / "UL: ue=N rnti=..." entry; format by direction, AL unknown.
+sched_re = re.compile(r"\[\s*(\d+)\.(\d+)\]\s+Slot decisions")
+grant_re = re.compile(r"(DL|UL): ue=\d+ (?:c-|tc-)?rnti=(0x[0-9a-fA-F]+)")
+
 sent = []  # (abs_slot, rnti, fmt, al)
 uw = unwrapper()
+uw2 = unwrapper()
+sched = []
 for line in open(a.log, errors="replace"):
-    if "PDCCH:" not in line:
-        continue
-    m = line_re.search(line)
-    if not m:
-        continue
-    sfn, slot = int(m.group(1)), int(m.group(2))
-    sent.append((uw(sfn) * spf + slot, m.group(3).lower(), m.group(4), int(m.group(5))))
+    if "PDCCH:" in line:
+        m = line_re.search(line)
+        if not m:
+            continue
+        sfn, slot = int(m.group(1)), int(m.group(2))
+        sent.append((uw(sfn) * spf + slot, m.group(3).lower(), m.group(4), int(m.group(5))))
+    elif "Slot decisions" in line:
+        m = sched_re.search(line)
+        if not m:
+            continue
+        sfn, slot = int(m.group(1)), int(m.group(2))
+        base = uw2(sfn) * spf + slot
+        # one segment per grant; an UL grant is logged at its PUSCH slot, its DCI is k2 earlier
+        for seg in re.split(r"(?=\b(?:DL|UL): ue=)", line):
+            m2 = grant_re.match(seg.strip())
+            if not m2:
+                continue
+            d, r = m2.group(1), m2.group(2)
+            k2 = re.search(r"\bk2=(\d+)", seg)
+            at = base - (int(k2.group(1)) if d == "UL" and k2 else 0)
+            sched.append((at, r.lower(), "1_x" if d == "DL" else "0_x", -1))
+if not sent:
+    print("no PDCCH lines in the log: using the MAC slot decisions (AL not logged)")
+    sent = sched
 
 rows = list(csv.DictReader(open(a.csv)))
 got = []
@@ -93,7 +120,7 @@ for rnti in sorted(rntis):
             same_dir = [g for g in cands if g[3] == want]
             g = same_dir[0] if same_dir else cands[0]
             fnd[s[2]] += 1
-            al_ok[s[2]] += g[2] == s[3]
+            al_ok[s[2]] += s[3] < 0 or g[2] == s[3]
             dir_ok[s[2]] += g[3] == want
     extra = sum(1 for g in got if g[1] == rnti and (g[0], rnti) not in sent_set)
     print("RNTI %s" % rnti)

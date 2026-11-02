@@ -86,7 +86,8 @@ typedef struct {
    * size with only 8 CRC bits left to check (1/256 per size). Sizes are tried in
    * ascending order, which leaves ~0.4% of these DCIs at a wrong size; listing the
    * sizes actually used (e.g. DCI 1_0 in CORESET#0) removes that. Applied to the
-   * candidates whose DM-RS is referenced to CORESET#0 only. 0 = no restriction. */
+   * candidates that can be in CORESET#0: DM-RS referenced to it (or to point A when
+   * the two coincide) and, when its width is known, lying inside it. 0 = no restriction. */
   const uint32_t* css_sizes;
   uint32_t nof_css_sizes;
   uint32_t max_L_log2;     /* default 4 (AL16) */
@@ -102,6 +103,7 @@ typedef struct {
   uint32_t    slot_idx; /* n_s,f^mu: slot index within the frame */
   int32_t     ref_crb0; /* grid subcarrier index of point A (usually <= 0), GS_NO_REF if unknown */
   int32_t     ref_cs0;  /* grid subcarrier index of the first CORESET#0 subcarrier, GS_NO_REF if none */
+  uint32_t    cs0_nof_sc; /* CORESET#0 width in subcarriers; 0 if unknown */
   uint32_t    pci;
 } gs_slot_t;
 

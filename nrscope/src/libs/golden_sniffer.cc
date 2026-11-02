@@ -36,6 +36,7 @@ uint64_t                      gs_total       = 0;
 struct GsJob {
   uint32_t          sfn = 0, slot_idx = 0, nof_sc = 0, nof_symb = 0, first_crb = 0, pci = 0;
   int32_t           ref_crb0 = GS_NO_REF, ref_cs0 = GS_NO_REF;
+  uint32_t          cs0_nof_sc = 0;
   std::vector<cf_t> grid;
 };
 
@@ -267,6 +268,7 @@ static void gs_searcher_thread(uint32_t id)
     sl.slot_idx  = job.slot_idx;
     sl.ref_crb0  = job.ref_crb0;
     sl.ref_cs0   = job.ref_cs0;
+    sl.cs0_nof_sc = job.cs0_nof_sc;
     sl.pci       = job.pci;
     auto t0      = std::chrono::steady_clock::now();
     int  n       = gs_search_slot(gs, &sl, out, GS_MAX_DCI_PER_SLOT);
@@ -392,6 +394,7 @@ int GoldenSnifferDecoder::Init(WorkState* state, cf_t* input0)
 
   ref_crb0 = -(int32_t)(first_crb * NRSCOPE_NSC_PER_RB_NR);
   ref_cs0  = (int32_t)std::lround((state->coreset0_args_t.coreset0_lower_freq_hz - grid_lo) / scs);
+  cs0_nof_sc = srsran_coreset_get_bw(&state->coreset0_t) * NRSCOPE_NSC_PER_RB_NR;
   pci      = state->cs_ret.ssb_res.N_id;
   slots_per_frame = SRSRAN_NSLOTS_PER_FRAME_NR(state->arg_scs.scs);
 
@@ -420,6 +423,13 @@ int GoldenSnifferDecoder::Init(WorkState* state, cf_t* input0)
     if (fallback(bwp) != css[0]) {
       css.push_back(fallback(bwp));
     }
+    /* When CORESET#0 starts at point A the DM-RS cannot tell its DCIs from those of a
+      CORESET over the same RBs, and a UE's DCIs of other sizes there (0_1, 1_1) would be
+      rejected. Then no list: the most frequent of the sizes that solve settles it. */
+    if (ref_cs0 == ref_crb0) {
+      css.clear();
+      printf("GoldenSniffer: CORESET#0 starts at point A, no CSS size list\n");
+    }
   }
   /* The searcher pool, once for all workers (they all see the same cell) */
   std::call_once(gs_pool.started, [&]() {
@@ -440,11 +450,11 @@ int GoldenSnifferDecoder::Init(WorkState* state, cf_t* input0)
   printf("GoldenSniffer ready: grid of %u PRBs from CRB %u, point A at grid subcarrier %d, CORESET#0 at %d, PCI %u, "
          "CSS sizes",
          grid_carrier.nof_prb, first_crb, ref_crb0, ref_cs0, pci);
-  printf(" (%u searcher threads, queue %u slots)", nrscope_gs_args.threads, nrscope_gs_args.queue);
   for (uint32_t c : css) {
     printf(" %u", c);
   }
-  printf("\n");
+  printf("%s; %u searcher threads, queue %u slots\n", css.empty() ? " none" : "", nrscope_gs_args.threads,
+         nrscope_gs_args.queue);
   return SRSRAN_SUCCESS;
 }
 
@@ -471,6 +481,7 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state)
   job.pci       = pci;
   job.ref_crb0  = ref_crb0;
   job.ref_cs0   = ref_cs0;
+  job.cs0_nof_sc = cs0_nof_sc;
 
   /* Debug: GS_DUMP=<file> appends the searched symbols of every slot, as
     [sfn u32, slot u32, nof_sc u32, nof_symb u32, cf32 grid], for offline analysis */
@@ -481,7 +492,9 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state)
     if (dump == nullptr) {
       dump = fopen(getenv("GS_DUMP"), "wb");
     }
-    if (dump != nullptr) {
+    static uint64_t nof_dumped = 0;
+    const uint64_t  max_dump   = getenv("GS_DUMP_SLOTS") ? strtoull(getenv("GS_DUMP_SLOTS"), nullptr, 10) : UINT64_MAX;
+    if (dump != nullptr && nof_dumped++ < max_dump) {
       uint32_t hdr[4] = {job.sfn, job.slot_idx, nof_sc, nsym};
       fwrite(hdr, sizeof(hdr), 1, dump);
       fwrite(ue_dl.sf_symbols[0], sizeof(cf_t), (size_t)nof_sc * nsym, dump);
