@@ -131,7 +131,7 @@ typedef struct {
   int32_t  sc_hi;
   uint32_t duration;   /* CORESET symbols */
   uint32_t al_mask;    /* bit l set: AL 2^l seen */
-  uint32_t sizes[4];   /* DCI sizes seen (e.g. one UL, one DL) */
+  uint32_t sizes[8];   /* DCI sizes seen (1_1, 0_1, the fallback ones, after reconfigurations) */
   uint32_t nof_sizes;
 } gs_track_t;
 

@@ -1123,7 +1123,9 @@ int gs_decode_tracked_multi(gs_t*             q,
     }
 
     /* the group: its tracks, the union of their sizes, ALs and extents */
-    uint32_t sizes[16], nsz = 0, al_mask = 0;
+    /* every size of the group (with many UEs, each with its own sizes, 16 were too few:
+      the UEs whose sizes did not fit were never decoded) */
+    uint32_t sizes[128], nsz = 0, al_mask = 0;
     int32_t  lo = t0->sc_lo, hi = t0->sc_hi;
     for (uint32_t i = g; i < nt; i++) {
       const gs_track_t* t = &tracks[i];
@@ -1139,7 +1141,7 @@ int gs_decode_tracked_multi(gs_t*             q,
         for (uint32_t k = 0; k < nsz; k++) {
           have = have || sizes[k] == t->sizes[z];
         }
-        if (!have && nsz < 16) {
+        if (!have && nsz < 128) {
           sizes[nsz++] = t->sizes[z];
         }
       }

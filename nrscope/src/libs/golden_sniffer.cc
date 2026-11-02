@@ -116,7 +116,13 @@ private:
   pthread_mutex_t m_;
 };
 
-#define GS_JOB_TRACKS 32
+/* what the searchers need of a converged UE to leave its DCIs to the tracked decode */
+struct GsJobTrack {
+  uint16_t rnti;
+  uint8_t  nof_sizes;
+  uint8_t  sizes[8];
+};
+#define GS_JOB_TRACKS 512
 struct GsJob {
   uint32_t sfn = 0, slot_idx = 0, nof_sc = 0, nof_symb = 0, first_crb = 0, pci = 0;
   int32_t  ref_crb0 = GS_NO_REF, ref_cs0 = GS_NO_REF;
@@ -125,13 +131,13 @@ struct GsJob {
   int      buf        = -1;
   double   t_submit = 0, t_enq = 0; /* steady clock, s */
   /* converged UEs in this slot: their DCIs of a learned size come from the tracked decode */
-  gs_track_t tracked[GS_JOB_TRACKS];
+  GsJobTrack tracked[GS_JOB_TRACKS];
   uint32_t   nof_tracked = 0;
 };
 static bool gs_job_tracks(const GsJob& job, const gs_dci_t& d)
 {
   for (uint32_t k = 0; k < job.nof_tracked; k++) {
-    const gs_track_t& t = job.tracked[k];
+    const GsJobTrack& t = job.tracked[k];
     if (t.rnti == d.rnti && !d.coreset0) {
       for (uint32_t z = 0; z < t.nof_sizes; z++) {
         if (t.sizes[z] == d.nof_bits) {
@@ -606,7 +612,7 @@ static void gs_learn_into(BlindUe& e, const gs_dci_t& d, double now)
   std::sort(by.begin(), by.end(), [](const auto& x, const auto& y) { return x.second > y.second; });
   t.nof_sizes = 0;
   for (const auto& z : by) {
-    if (t.nof_sizes < 4) {
+    if (t.nof_sizes < 8) {
       t.sizes[t.nof_sizes++] = z.first;
     }
   }
@@ -659,6 +665,8 @@ static void gs_start_shadow(BlindUe& e, uint16_t rnti, double now, const char* w
 /* Learns one DCI of a UE. A converged UE learns only what agrees with its track; a DCI
   that does not (a reconfiguration changed its sizes, its CORESET or its scrambling)
   starts a fresh learning in its shadow, which replaces the track once it converges. */
+static void gs_set_state(BlindUe& e, uint16_t rnti, BlindUe::State to, const char* why);
+
 static void gs_learn(BlindUe& e, const gs_dci_t& d, double now)
 {
   if (d.coreset0) {
@@ -668,6 +676,17 @@ static void gs_learn(BlindUe& e, const gs_dci_t& d, double now)
     e.last_dir[d.payload[0] ? 1 : 0] = now;
   }
   if (e.state != BlindUe::CONVERGED) {
+    gs_learn_into(e, d, now);
+    return;
+  }
+  if (d.cand.nof_iv > 1) {
+    /* Its CORESET is interleaved: the first DCIs it converged on were AL1 (one REG bundle
+      looks contiguous), and the tracked decode (non-interleaved) misses the others. Back
+      to learning: the blind search, which handles interleaving, decodes it. */
+    e.interleaved = true;
+    e.shadow.reset();
+    gs_set_state(e, d.rnti, e.from_rach ? BlindUe::STALE : BlindUe::DISCOVERED,
+                 "an interleaved DCI: its CORESET is interleaved, left to the blind search");
     gs_learn_into(e, d, now);
     return;
   }
@@ -900,8 +919,25 @@ void golden_sniffer_update(WorkState&                   state,
                gs_sizes_str(e.track).c_str(), gs_sizes_str(s.track).c_str(), e.track.n_id, s.track.n_id,
                (int)first_crb + s.track.sc_lo / NRSCOPE_NSC_PER_RB_NR,
                (int)first_crb + s.track.sc_hi / NRSCOPE_NSC_PER_RB_NR, s.track.duration);
+        /* the sizes of both, by count: a re-learning started by a fallback DCI (1_0/0_0 in
+          the UE search space) saw few 0_1 and lost that size, which then looked like UL
+          stopping and started it again */
+        std::map<uint32_t, uint32_t> merged = e.size_count;
+        for (const auto& z : s.size_count) {
+          merged[z.first] += z.second;
+        }
         e.track       = s.track;
-        e.size_count  = s.size_count;
+        e.size_count  = merged;
+        {
+          std::vector<std::pair<uint32_t, uint32_t> > by(merged.begin(), merged.end());
+          std::sort(by.begin(), by.end(), [](const auto& x, const auto& y) { return x.second > y.second; });
+          e.track.nof_sizes = 0;
+          for (const auto& z : by) {
+            if (e.track.nof_sizes < 8) {
+              e.track.sizes[e.track.nof_sizes++] = z.first;
+            }
+          }
+        }
         e.dirs        = s.dirs;
         e.hits        = s.hits;
         e.learn_since = s.learn_since;
@@ -1262,7 +1298,12 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
   job.nof_tracked = 0;
   for (const gs_track_t& t : tracked_now) {
     if (job.nof_tracked < GS_JOB_TRACKS) {
-      job.tracked[job.nof_tracked++] = t;
+      GsJobTrack& jt = job.tracked[job.nof_tracked++];
+      jt.rnti        = t.rnti;
+      jt.nof_sizes   = (uint8_t)std::min<uint32_t>(t.nof_sizes, 8);
+      for (uint32_t z = 0; z < jt.nof_sizes; z++) {
+        jt.sizes[z] = (uint8_t)t.sizes[z];
+      }
     }
   }
 
