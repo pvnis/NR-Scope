@@ -145,8 +145,11 @@ int Radio::ScanInitandStart()
   /* Allocate receive buffer. Cell scanning runs on the synchronised chain
   alone: it is looking for an SSB, and extra chains would only duplicate the
   search. The sensing chains are allocated later, in RadioInitandStart(). */
-  rx_buffer[0] = srsran_vec_cf_malloc(SRSRAN_NOF_SLOTS_PER_SF_NR(args_t.ssb_scs) * pre_resampling_slot_sz);
-  srsran_vec_zero(rx_buffer[0], SRSRAN_NOF_SLOTS_PER_SF_NR(args_t.ssb_scs) * pre_resampling_slot_sz * sizeof(cf_t));
+  /* one slot more: the search window is the last SSB-length of the previous slot followed
+    by the new one (see the trial loop) */
+  rx_buffer[0] = srsran_vec_cf_malloc((SRSRAN_NOF_SLOTS_PER_SF_NR(args_t.ssb_scs) + 1) * pre_resampling_slot_sz);
+  srsran_vec_zero(rx_buffer[0],
+                  (SRSRAN_NOF_SLOTS_PER_SF_NR(args_t.ssb_scs) + 1) * pre_resampling_slot_sz * sizeof(cf_t));
   /* the actual slot size after resampling */
   uint32_t actual_slot_szs[CS_RESAMPLE_WORKER_NUM];
 
@@ -313,9 +316,13 @@ int Radio::ScanInitandStart()
       rf_buffer.set_nof_samples(pre_resampling_slot_sz);
       rf_buffer.set(0, pre_resampling_rx_buffer);
 
+      /* as in RadioInitandStart: the last SSB-length of the previous slot, then the new one */
+      const uint32_t cs_symbol_sz = (uint32_t)std::lround(rf_args.srsran_srate_hz / SRSRAN_SUBC_SPACING_NR(ssb_scs));
+      const uint32_t cs_tail      = SRSRAN_SSB_DURATION_NSYMB * (cs_symbol_sz + (144 * cs_symbol_sz) / 2048);
+      cf_t* const    cs_new       = rx_buffer[0] + cs_tail;
       for (uint32_t trial = 0; trial < nof_trials_scan && !nrscope_stop.load(std::memory_order_relaxed); trial++) {
         if (trial == 0) {
-          srsran_vec_cf_zero(rx_buffer[0], pre_resampling_slot_sz);
+          srsran_vec_cf_zero(rx_buffer[0], pre_resampling_slot_sz + cs_tail);
           srsran_vec_cf_zero(pre_resampling_rx_buffer, pre_resampling_slot_sz);
         }
 
@@ -323,6 +330,9 @@ int Radio::ScanInitandStart()
 
         if (not radio->rx_now(rf_buffer, rf_timestamp)) {
           return SRSRAN_ERROR;
+        }
+        if (trial > 0) {
+          memmove(rx_buffer[0], rx_buffer[0] + slot_sz, sizeof(cf_t) * cs_tail);
         }
 
         if (resample_needed) {
@@ -340,7 +350,7 @@ int Radio::ScanInitandStart()
             }
           }
           // sequentially merge back
-          cf_t* buf_split_ptr = rx_buffer[0];
+          cf_t* buf_split_ptr = cs_new;
           for (uint8_t k = 0; k < CS_RESAMPLE_WORKER_NUM; k++) {
             copy_cpp_to_c_complex_arr(temp_y[k], buf_split_ptr, actual_slot_szs[k]);
             buf_split_ptr += actual_slot_szs[k];
@@ -348,10 +358,11 @@ int Radio::ScanInitandStart()
         } else {
           // pre_resampling_slot_sz should be the same as slot_sz as
           // resample ratio is 1 in this case
-          srsran_vec_cf_copy(rx_buffer[0], pre_resampling_rx_buffer, pre_resampling_slot_sz);
+          srsran_vec_cf_copy(cs_new, pre_resampling_rx_buffer, pre_resampling_slot_sz);
         }
 
         *(last_rx_time.get_ptr(0)) = rf_timestamp.get(0);
+        srsran_timestamp_sub(last_rx_time.get_ptr(0), 0, (double)cs_tail / rf_args.srsran_srate_hz);
 
         cs_ret = srsran_searcher.run_slot(rx_buffer[0], slot_sz);
         if (cs_ret.result == srsue::nr::cell_search::ret_t::CELL_FOUND) {
@@ -648,9 +659,18 @@ int Radio::RadioInitandStart()
     uint32_t nof_rx_fail        = 0;
     uint32_t nof_rx_fail_in_row = 0;
 
+    /* srsran's cell_search::run_slot searches slot_sz + ssb_sz samples: the SSB may start
+      near the end of a slot and finish in the next one. Each slot was written at the start
+      of the buffer, so the search read stale samples after it and an SSB across a slot
+      boundary was never found: with no clock drift, never at all (about one start offset
+      in four). The buffer now holds the last ssb_sz samples of the previous slot, then the
+      new slot. */
+    const uint32_t cs_symbol_sz = (uint32_t)std::lround(rf_args.srsran_srate_hz / SRSRAN_SUBC_SPACING_NR(ssb_scs));
+    const uint32_t cs_tail      = SRSRAN_SSB_DURATION_NSYMB * (cs_symbol_sz + (144 * cs_symbol_sz) / 2048);
+    cf_t* const    cs_new       = rx_buffer[0] + cs_tail;
     for (uint32_t trial = 0; trial < nof_trials && !nrscope_stop.load(std::memory_order_relaxed); trial++) {
       if (trial == 0) {
-        srsran_vec_cf_zero(rx_buffer[0], slot_sz);
+        srsran_vec_cf_zero(rx_buffer[0], slot_sz + cs_tail);
         srsran_vec_cf_zero(pre_resampling_rx_buffer, pre_resampling_slot_sz);
       }
       // srsran_vec_cf_copy(rx_buffer[0], rx_buffer[0] + slot_sz, slot_sz);
@@ -668,6 +688,10 @@ int Radio::RadioInitandStart()
         continue;
       }
       nof_rx_fail_in_row = 0;
+      /* the previous slot's last SSB-length goes in front of the new slot */
+      if (trial > 0) {
+        memmove(rx_buffer[0], rx_buffer[0] + slot_sz, sizeof(cf_t) * cs_tail);
+      }
 
       if (resample_needed) {
         // srsran_vec_fprint2_c(fp_time_series_pre_resample,
@@ -689,7 +713,7 @@ int Radio::RadioInitandStart()
         }
 
         // sequentially merge back
-        cf_t* buf_split_ptr = rx_buffer[0];
+        cf_t* buf_split_ptr = cs_new;
         for (uint8_t k = 0; k < RESAMPLE_WORKER_NUM; k++) {
           copy_cpp_to_c_complex_arr(temp_y[k], buf_split_ptr, actual_slot_szs[k]);
           buf_split_ptr += actual_slot_szs[k];
@@ -700,10 +724,12 @@ int Radio::RadioInitandStart()
       } else {
         // pre_resampling_slot_sz should be the same as slot_sz as
         // resample ratio is 1 in this case
-        srsran_vec_cf_copy(rx_buffer[0], pre_resampling_rx_buffer, pre_resampling_slot_sz);
+        srsran_vec_cf_copy(cs_new, pre_resampling_rx_buffer, pre_resampling_slot_sz);
       }
 
+      /* the buffer starts cs_tail samples before the slot just received */
       *(last_rx_time.get_ptr(0)) = rf_timestamp.get(0);
+      srsran_timestamp_sub(last_rx_time.get_ptr(0), 0, (double)cs_tail / rf_args.srsran_srate_hz);
       cs_ret                     = srsran_searcher.run_slot(rx_buffer[0], slot_sz);
       // std::cout << "Slot_sz: " << slot_sz << std::endl;
       best_snr_db = std::max(best_snr_db, cs_ret.ssb_res.measurements.snr_dB);

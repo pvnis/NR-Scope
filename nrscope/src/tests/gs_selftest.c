@@ -54,6 +54,10 @@ static int rint_(int lo, int hi)
   return srsran_random_uniform_int_dist(rnd, lo, hi);
 }
 
+/* N(0, 1): srsran_random_gauss_dist(rnd, s) is N(s, 1) (std::normal_distribution takes the
+   mean first), which put a constant offset into the noise of tests 4, 5 and 7 */
+static float ec_gauss(void);
+
 static double now_s(void)
 {
   struct timespec t;
@@ -359,7 +363,7 @@ static int make_slot(tx_t* tx, int scenario, uint32_t slot, truth_t* truth, gs_s
     for (uint32_t k = 0; k < nsc; k++) {
       float mag = 1.0f + ripple * sinf(2.0f * (float)M_PI * k / 300.0f);
       cf_t  h   = mag * cexpf(I * (ph0 + dph * l + 2.0f * (float)M_PI * tau * k));
-      cf_t  n   = sigma * (srsran_random_gauss_dist(rnd, 1.0f) + I * srsran_random_gauss_dist(rnd, 1.0f));
+      cf_t  n   = sigma * (ec_gauss() + I * ec_gauss());
       tx->grid[l * nsc + k] = tx->grid[l * nsc + k] * h + n;
     }
   }
@@ -485,7 +489,7 @@ static void test_tracked(void)
     for (uint32_t l = 0; l < 3; l++) {
       for (uint32_t k = 0; k < 51 * 12; k++) {
         cf_t h = cexpf(I * (ph + 0.2f * l + 2.0f * (float)M_PI * tau * k));
-        cf_t n = sigma * (srsran_random_gauss_dist(rnd, 1.0f) + I * srsran_random_gauss_dist(rnd, 1.0f));
+        cf_t n = sigma * (ec_gauss() + I * ec_gauss());
         tx.grid[l * 51 * 12 + k] = tx.grid[l * 51 * 12 + k] * h + n;
       }
     }
@@ -612,7 +616,7 @@ static void test_tracked_multi(void)
     for (uint32_t l = 0; l < 3; l++) {
       for (uint32_t k = 0; k < nprb * 12; k++) {
         cf_t h = cexpf(I * (ph + 0.2f * l + 2.0f * (float)M_PI * tau * k));
-        cf_t n = sigma * (srsran_random_gauss_dist(rnd, 1.0f) + I * srsran_random_gauss_dist(rnd, 1.0f));
+        cf_t n = sigma * (ec_gauss() + I * ec_gauss());
         tx.grid[l * nprb * 12 + k] = tx.grid[l * nprb * 12 + k] * h + n;
       }
     }

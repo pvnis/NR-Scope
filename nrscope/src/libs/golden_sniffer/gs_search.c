@@ -1144,6 +1144,15 @@ int gs_decode_tracked_multi(gs_t*             q,
         }
       }
     }
+    /* ascending: polar codes are nested, a DCI of K bits is also a valid codeword at every
+      larger size (with another RNTI), so the smallest size that solves is the real one */
+    for (uint32_t x = 1; x < nsz; x++) {
+      for (uint32_t y = x; y > 0 && sizes[y - 1] > sizes[y]; y--) {
+        const uint32_t t = sizes[y];
+        sizes[y]         = sizes[y - 1];
+        sizes[y - 1]     = t;
+      }
+    }
     if (full_band) {
       lo      = ref + ((t0->sc_lo - ref) % cce);
       hi      = (int32_t)N - 1;
@@ -1244,12 +1253,12 @@ int gs_decode_tracked_multi(gs_t*             q,
         if (E != (108U << Ll)) {
           continue;
         }
-        /* every size of the group: a tracked RNTI at one of its sizes wins over another RNTI */
+        /* the smallest size that solves (nested codes, above); then tracked or not */
         int      best = -1; /* 1: tracked, 0: untracked */
         uint32_t best_nb = 0;
         uint16_t best_rnti = 0;
         uint8_t  pay[GS_MAX_DCI_BITS];
-        for (uint32_t z = 0; z < nsz && best < 1; z++) {
+        for (uint32_t z = 0; z < nsz && best < 0; z++) {
           const uint32_t nb = sizes[z];
           uint16_t       rnti;
           if (!gs_gf2_size_valid(nb, (uint32_t)Ll) || nb + 16 + q->args.min_parity > E) {
@@ -1263,7 +1272,7 @@ int gs_decode_tracked_multi(gs_t*             q,
             const gs_track_t* t = &tracks[i];
             is_tracked = t->rnti == rnti && gs_track_same_group(t0, t, ref, cce) && gs_track_has_size(t, nb);
           }
-          if (is_tracked > best) {
+          if (best < 0) {
             best      = is_tracked;
             best_nb   = nb;
             best_rnti = rnti;
