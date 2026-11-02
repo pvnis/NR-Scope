@@ -13,4 +13,4 @@ with open(src, "rb") as fi, open(dst, "wb") as fo:
         a = np.fromfile(fi, dtype=np.int16, count=chunk)
         if a.size == 0:
             break
-        (a.astype(np.float32) * scale).tofile(fo)
+        fo.write((a.astype(np.float32) * scale).tobytes())  # not tofile(): it needs a seekable file (FIFO)

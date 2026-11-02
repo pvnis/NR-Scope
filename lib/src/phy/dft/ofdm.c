@@ -1229,6 +1229,47 @@ static void ofdm_rx_slot(srsran_ofdm_t* q, int slot_in_sf)
 }
 
 // slot_in_sf is always 0 since we input each slot into it
+/* FFT shift of the band wanted, nof_re subcarriers centred coreset_offset_scs below the
+ * radio's centre (coreset_offset_scs = (radio centre - wanted centre) / scs), from the FFT
+ * output tmp (symbol_sz bins, DC at 0, negative frequencies at the end; with dc, the
+ * positive ones start at bin 1). Whatever the offset: the band may straddle DC, or lie
+ * entirely below or above it (an SSB/CORESET#0 far from the centre of a wide carrier).
+ * Subcarriers outside the FFT are zeroed. */
+static void nrscope_fftshift_copy(cf_t*       output,
+                                  const cf_t* tmp,
+                                  uint32_t    symbol_sz,
+                                  uint32_t    nof_re,
+                                  int         coreset_offset_scs,
+                                  uint32_t    dc)
+{
+  const int lo   = -((int)nof_re / 2 + coreset_offset_scs); /* frequency of output[0], in subcarriers */
+  const int fmin = -(int)symbol_sz / 2, fmax = (int)symbol_sz / 2 - 1 - (int)dc; /* what the FFT holds */
+  for (int k = 0; k < (int)nof_re;) {
+    const int f = lo + k, rem = (int)nof_re - k;
+    if (f < fmin) { /* below the captured band */
+      const int g = fmin - f < rem ? fmin - f : rem;
+      memset(output + k, 0, sizeof(cf_t) * g);
+      k += g;
+      continue;
+    }
+    if (f > fmax) { /* above it */
+      memset(output + k, 0, sizeof(cf_t) * rem);
+      break;
+    }
+    int idx, run;
+    if (f < 0) {
+      idx = (int)symbol_sz + f;
+      run = -f;
+    } else {
+      idx = f + (int)dc;
+      run = fmax - f + 1;
+    }
+    run = run < rem ? run : rem;
+    memcpy(output + k, tmp + idx, sizeof(cf_t) * run);
+    k += run;
+  }
+}
+
 static void ofdm_rx_slot_nrscope_15khz(srsran_ofdm_t* q, int slot_in_sf, int coreset_offset_scs, int scs_idx)
 {
 #ifdef AVOID_GURU
@@ -1270,8 +1311,7 @@ static void ofdm_rx_slot_nrscope_15khz(srsran_ofdm_t* q, int slot_in_sf, int cor
     // Perform FFT shift
     // the position of CORESET 0's center is not on current radio's center frequency
     // coreset_offset_scs = (ssb_center_freq - coreset_center_freq) / scs, all in hz
-    memcpy(output, tmp + symbol_sz - (nof_re / 2 + coreset_offset_scs), sizeof(cf_t) * (nof_re / 2 + coreset_offset_scs));
-    memcpy(output + (nof_re / 2 + coreset_offset_scs), &tmp[dc], sizeof(cf_t) * (nof_re / 2 - coreset_offset_scs));
+    nrscope_fftshift_copy(output, tmp, symbol_sz, nof_re, coreset_offset_scs, dc);
     // memcpy(output, tmp + symbol_sz - nof_re / 2, sizeof(cf_t) * nof_re / 2);
     // memcpy(output + nof_re / 2, &tmp[dc], sizeof(cf_t) * nof_re / 2);
 
@@ -1349,12 +1389,7 @@ static void ofdm_rx_symbol_post_nrscope_30khz(srsran_ofdm_t* q,
 
   // FFT shift: the centre of the carrier (or CORESET 0) is not on the radio's centre frequency,
   // coreset_offset_scs = (radio centre - wanted centre) / scs
-  if ((nof_re / 2 + coreset_offset_scs) > nof_re) {
-    memcpy(output, tmp + symbol_sz - (nof_re / 2 + coreset_offset_scs), sizeof(cf_t) * nof_re);
-  } else {
-    memcpy(output, tmp + symbol_sz - (nof_re / 2 + coreset_offset_scs), sizeof(cf_t) * (nof_re / 2 + coreset_offset_scs));
-    memcpy(output + (nof_re / 2 + coreset_offset_scs), &tmp[dc], sizeof(cf_t) * (nof_re / 2 - coreset_offset_scs));
-  }
+  nrscope_fftshift_copy(output, tmp, symbol_sz, nof_re, coreset_offset_scs, dc);
 
   // Phase compensation and normalisation
   if (isnormal(q->cfg.phase_compensation_hz)) {
