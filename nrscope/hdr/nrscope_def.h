@@ -372,6 +372,11 @@ struct GsGrant {
   float    pwr_db = 0;                // power on its PRBs (DM-RS symbol) over the slot's quietest PRBs, dB
   int32_t  blind_nid = -1;            // survey only: for a grant with energy but no DM-RS of ours, the
   float    blind_coh = 0;             //   PCI (0-1007) whose DM-RS fits its PRBs best, and how well
+  /* precoding inside the grant: mean |phase step| (deg) between neighbouring DM-RS values 4
+    subcarriers apart, the common slope removed: inside a PRB, across PRB boundaries at
+    CRB % 4 == 0, % 4 == 2, odd; and how many boundaries each */
+  float    step_deg[4] = {};
+  uint16_t step_n[4]   = {};
   uint16_t sym_seen = 0;              // OFDM symbols where its PRBs showed DM-RS (of those tested)
   uint8_t  nruns    = 0;              // its PRBs as runs (BWP-relative): type 0 need not be contiguous
   uint16_t runs[2 * 18] = {};         // first, last of each

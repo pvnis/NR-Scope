@@ -476,7 +476,7 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
       if (gs_grants_csv != nullptr) {
         fprintf(gs_grants_csv,
                 "timestamp,sfn,slot,rnti,bwp_start_crb,rb_start,nof_rb,dmrs_coherence,hyp,sensed,ports,cdm,dmrs_add,"
-                "occ,comb1_power,comb1_coherence,dmrs_symbols,prb_runs,coh_comb0_scid1,coh_comb1_scid1,power_over_floor_db,blind_pci,blind_pci_coh\n");
+                "occ,comb1_power,comb1_coherence,dmrs_symbols,prb_runs,coh_comb0_scid1,coh_comb1_scid1,power_over_floor_db,blind_pci,blind_pci_coh,step_inside,step_crb4,step_crb2,step_odd\n");
       }
     }
     if (gs_csv == nullptr) {
@@ -1041,7 +1041,9 @@ void golden_sniffer_update(WorkState&                   state,
               g.slot, g.rnti, g.bwp_start, g.rb_start, g.nof_rb, g.coherence, g.hyp, g.sensed ? 1 : 0, g.ports, g.cdm,
               g.dmrs_add, g.occ, g.e1, g.coh1, g.sym_seen, rs.c_str());
       fseek(gs_grants_csv, -1, SEEK_CUR);
-      fprintf(gs_grants_csv, ",%.3f,%.3f,%.1f,%d,%.3f\n", g.coh0_s1, g.coh1_s1, g.pwr_db, g.blind_nid, g.blind_coh);
+      fprintf(gs_grants_csv, ",%.3f,%.3f,%.1f,%d,%.3f,%.1f:%u,%.1f:%u,%.1f:%u,%.1f:%u\n", g.coh0_s1, g.coh1_s1, g.pwr_db,
+              g.blind_nid, g.blind_coh, g.step_deg[0], g.step_n[0], g.step_deg[1], g.step_n[1], g.step_deg[2], g.step_n[2],
+              g.step_deg[3], g.step_n[3]);
     }
   }
   for (const gs_dci_t& d : result.tracked_dcis) {
@@ -1843,6 +1845,41 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
             std::nth_element(srt.begin(), srt.begin() + nprb / 10, srt.end());
             const double floor_e = srt[nprb / 10];
             g.pwr_db = ng > 0 && floor_e > 0 ? (float)(10 * log10(pg / ng / floor_e)) : 0;
+            if (gs_survey_csv != nullptr) {
+              static thread_local cf_t  pp[3 * SRSRAN_MAX_PRB_NR];
+              static thread_local float t2x[SRSRAN_MAX_PRB_NR];
+              gs_dmrs_rb_pairs(y, first_crb, nprb, g.slot, dmrs_l0, dm_nid, pp, t2x);
+              cf_t rho = 0;
+              for (uint32_t c = 0; c < nprb; c++) {
+                if (gp[c]) {
+                  rho += pp[3 * c + 1] * gs_cj(pp[3 * c]) + pp[3 * c + 2] * gs_cj(pp[3 * c + 1]);
+                }
+              }
+              const float phi = gs_arg(rho);
+              auto        dv  = [phi](cf_t a, cf_t b) {
+                float x = gs_arg(b * gs_cj(a)) - phi;
+                x       = x > (float)M_PI ? x - 2 * (float)M_PI : x < -(float)M_PI ? x + 2 * (float)M_PI : x;
+                return fabsf(x) * 57.29578f;
+              };
+              double sd[4] = {};
+              for (uint32_t c = 0; c < nprb; c++) {
+                if (!gp[c]) {
+                  continue;
+                }
+                for (uint32_t n = 0; n < 2; n++) {
+                  sd[0] += dv(pp[3 * c + n], pp[3 * c + n + 1]);
+                  g.step_n[0]++;
+                }
+                if (c + 1 < nprb && gp[c + 1]) {
+                  const uint32_t crb = first_crb + c + 1, k = crb % 4 == 0 ? 1 : crb % 2 == 0 ? 2 : 3;
+                  sd[k] += dv(pp[3 * c + 2], pp[3 * c + 3]);
+                  g.step_n[k]++;
+                }
+              }
+              for (int k = 0; k < 4; k++) {
+                g.step_deg[k] = g.step_n[k] ? (float)(sd[k] / g.step_n[k]) : -1;
+              }
+            }
             /* survey: energy there but none of our DM-RS: whose is it? every PCI tried */
             static std::atomic<int> blind_left{600};
             if (gs_survey_csv != nullptr && g.pwr_db > 6 && s0.coh0 < 0.4f && blind_left.load() > 0) {
