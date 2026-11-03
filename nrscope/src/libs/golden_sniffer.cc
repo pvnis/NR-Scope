@@ -1677,6 +1677,26 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
         for (uint32_t l = 1; l < 14; l++) {
           float co[12][4], pz[12];
           gs_csirs_scan(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, np, sl, l, pci, co, pz);
+          /* dump: the 8-port CSI-RS symbol (CDM pairs on subcarriers 0-7) as raw REs.
+            Record: "GSC1", sfn u16, slot u8, l u8, first_crb u16, nprb u16, then 12 * nprb complex floats. */
+          if (gs_dump_bin != nullptr && l == 13) {
+            float cm = 0;
+            for (uint32_t c = 0; c < 8; c++) {
+              cm += co[c][1] / 8;
+            }
+            if (cm > 0.5f) {
+              const uint16_t sfn16 = (uint16_t)state->sfn, fc16 = (uint16_t)first_crb, np16 = (uint16_t)np;
+              const uint8_t  sl8 = (uint8_t)sl, l8 = (uint8_t)l;
+              std::lock_guard<std::mutex> lk(gs_dump_mutex);
+              fwrite("GSC1", 1, 4, gs_dump_bin);
+              fwrite(&sfn16, 2, 1, gs_dump_bin);
+              fwrite(&sl8, 1, 1, gs_dump_bin);
+              fwrite(&l8, 1, 1, gs_dump_bin);
+              fwrite(&fc16, 2, 1, gs_dump_bin);
+              fwrite(&np16, 2, 1, gs_dump_bin);
+              fwrite(ue_dl.sf_symbols[0] + l * nof_sc, sizeof(cf_t), 12 * np, gs_dump_bin);
+            }
+          }
           char e[48];
           for (uint32_t c = 0; c < 12; c++) {
             for (uint32_t h = 0; h < 4; h++) {
