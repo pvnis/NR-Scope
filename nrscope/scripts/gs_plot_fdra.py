@@ -29,7 +29,7 @@ for k in seq:
 A=sorted((ab[k],k) for k in ab)
 best=(0,0)
 for i in range(0,len(A)-160,20):
-    n=sum(len(G.get(A[j][1],[])) for j in range(i,i+160)); best=max(best,(n,i))
+    n=len(set(u for j in range(i,i+160) for u,_,_ in G.get(A[j][1],[]))); best=max(best,(n,i))
 win=A[best[1]:best[1]+160]
 ues=C.Counter(u for _,k in win for u,_,_ in G.get(k,[]))
 cmap=plt.get_cmap("tab20"); col={u:cmap(i%20) for i,(u,_) in enumerate(ues.most_common())}
@@ -43,7 +43,7 @@ for a,k in win:
         for s,e in runs: ax.add_patch(Rectangle((x+0.1,s),0.8,e-s+1,color=col[u],lw=0))
 ax.set_xlim(0,max(a for a,_ in win)-a0+1); ax.set_ylim(0,N)
 ax.set_xlabel("slot (30 kHz, 0.5 ms each); slots 4 and 9 of every 5 ms are uplink"); ax.set_ylabel("PRB (CRB)")
-ax.set_title("Sunrise PCI 632, DL grants of decoded UEs (colour = UE, FDRA type 0, RBG 16) over PDSCH DM-RS seen on air (grey), 100 ms (160 DL slots)")
+ax.set_title("Sunrise PCI 632, DL grants of decoded UEs (colour = UE, FDRA type 0, RBG 16) over PDSCH DM-RS seen on air (grey), the 100 ms with the most UEs")
 h=[Rectangle((0,0),1,1,color=col[u]) for u,_ in ues.most_common(12)]+[Rectangle((0,0),1,1,color="0.82")]
 ax.legend(h,[u for u,_ in ues.most_common(12)]+["DM-RS on air"],loc="upper right",fontsize=7,ncol=2)
 plt.tight_layout(); plt.savefig(O+"/fdra_map.png",dpi=110)
@@ -81,7 +81,7 @@ plt.tight_layout(); plt.savefig(O+"/rs_symbols.png",dpi=100)
 print("grants %d in %d slots; PRBs/grant p10/50/90 %s; UEs per slot mean %.1f max %d"%(len(sz),len(G),np.percentile(sz,[10,50,90]),np.mean(nue),max(nue)))
 print("slot band share by decoded grants: median %.2f; gaps between neighbours: p10/50/90 %s, overlap share %.2f, adjacent (gap 0) %.2f"%(np.median(share),np.percentile(gaps,[10,50,90]),np.mean(np.array(gaps)<0),np.mean(np.array(gaps)==0)))
 print("DM-RS on air explained by decoded grants: median %.2f"%np.median(expl))
-print("window: %d slots, %d grants, %d UEs"%(len(win),best[0],len(ues)))
+print("window: %d DL slots, %d UEs, grants per UE:"%(len(win),len(ues)),ues.most_common(8))
 
 # sharing on the actual PRB sets
 ov=0; tot=0; gp=[]; adj=0; trans=0; nseg=[]; perue=[]

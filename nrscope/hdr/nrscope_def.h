@@ -329,6 +329,8 @@ struct BlindUe {
     over its DL DCIs; the hypothesis kept, once it stands out */
   float                        fdra_sum[128]    = {};
   uint16_t                     fdra_cnt[128]    = {}; // DCIs each hypothesis was scored on
+  uint16_t                     fdra_learn_size  = 0;  // the DL DCI size learned on (another size: another layout)
+  uint16_t                     fdra_lock_size   = 0;  // the DL DCI size fdra_lock holds for
   uint32_t                     fdra_n           = 0;
   int16_t                      fdra_lock        = -1;
   bool                         fdra_gave_up     = false;

@@ -190,6 +190,17 @@ std::atomic<uint32_t> gs_spf{0};            // slots per frame
 /* the cell's FDRA hypotheses (gs_fdra.h), set once by the first worker */
 static GsFdraHyp      gs_fdra_h[GS_FDRA_MAX_HYP];
 static std::atomic<uint32_t> gs_fdra_nh{0};
+/* the cell's FDRA hypothesis per DL DCI size, once UEs of that size agree (-1: none yet):
+   a UE whose config changes its DCI size gets the layout of its new size */
+static std::atomic<int16_t> gs_fdra_size_hyp[256];
+static struct GsFdraSizeInit {
+  GsFdraSizeInit()
+  {
+    for (auto& v : gs_fdra_size_hyp) {
+      v.store(-1);
+    }
+  }
+} gs_fdra_size_init;
 static std::once_flag gs_fdra_once;
 static FILE*          gs_grants_csv = nullptr;
 
@@ -915,6 +926,11 @@ void golden_sniffer_update(WorkState&                   state,
       continue;
     }
     BlindUe& e = it->second;
+    if (e.fdra_learn_size == 0) {
+      e.fdra_learn_size = o.size;
+    } else if (e.fdra_learn_size != o.size) {
+      continue; // another DCI size: another layout, not mixed into this one
+    }
     for (uint32_t k = 0; k < o.nof && k < GS_FDRA_MAX_HYP; k++) {
       if (o.score[k] > -1.5f) {
         e.fdra_sum[k] += o.score[k];
@@ -941,8 +957,23 @@ void golden_sniffer_update(WorkState&                   state,
       }
     }
     if (best >= 0 && b1 >= 0.5f && b1 - b2 >= 0.25f) {
-      e.fdra_lock = (int16_t)best;
+      e.fdra_lock      = (int16_t)best;
+      e.fdra_lock_size = o.size;
       fdra_by_size[o.size][(int16_t)best]++;
+      {
+        int16_t  h = -1;
+        uint32_t c = 0, tot = 0;
+        for (const auto& kv : fdra_by_size[o.size]) {
+          tot += kv.second;
+          if (kv.second > c) {
+            c = kv.second;
+            h = kv.first;
+          }
+        }
+        if (o.size < 256 && c >= 2 && c * 4 >= tot * 3) {
+          gs_fdra_size_hyp[o.size].store(h);
+        }
+      }
       printf("GoldenSniffer: UE 0x%04x FDRA: %s; lift %.2f over %u DL DCIs (next hypothesis %.2f), DL size %u\n",
              o.rnti, describe(gs_fdra_h[best]).c_str(), b1, e.fdra_cnt[best], b2, o.size);
       continue;
@@ -960,7 +991,8 @@ void golden_sniffer_update(WorkState&                   state,
         }
       }
       if (h >= 0 && c >= 2 && c * 4 >= tot * 3) {
-        e.fdra_lock = h;
+        e.fdra_lock      = h;
+        e.fdra_lock_size = o.size;
         printf("GoldenSniffer: UE 0x%04x FDRA: %s, taken from %u UE(s) with DL size %u (its own DCIs: best lift %.2f)\n",
                o.rnti, describe(gs_fdra_h[h]).c_str(), c, o.size, b1);
         continue;
@@ -1670,7 +1702,17 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
             f_u        = gs_fdra_occ_map(ue_s, ue_d, nprb, occ_u);
             ue_map_nid = dd.n_id;
           }
-          if (b.fdra_lock < 0) {
+          /* the layout for this DCI's size: the cell's for that size, else the UE's own lock
+            when it was learned at this size; another size with neither is learned (or, for a
+            UE already locked at another size, skipped) */
+          int16_t hsel = dd.nof_bits < 256 ? gs_fdra_size_hyp[dd.nof_bits].load(std::memory_order_relaxed) : -1;
+          if (hsel < 0 && b.fdra_lock >= 0 && b.fdra_lock_size == dd.nof_bits) {
+            hsel = b.fdra_lock;
+          }
+          if (hsel < 0 && b.fdra_lock >= 0) {
+            continue;
+          }
+          if (hsel < 0) {
             GsFdraObs o;
             o.rnti = dd.rnti;
             o.nof  = (uint8_t)nh;
@@ -1684,7 +1726,7 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
             result->gs_fdra_obs.push_back(o);
             continue;
           }
-          const GsFdraHyp& hy = gs_fdra_h[b.fdra_lock];
+          const GsFdraHyp& hy = gs_fdra_h[hsel];
           bool             prb[SRSRAN_MAX_PRB_NR];
           uint32_t         nof = 0;
           if (!gs_fdra_parse(hy, dd.payload, dd.nof_bits, prb, &nof) || nof == 0) {
@@ -1699,7 +1741,7 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
           g.sfn       = state->sfn;
           g.slot      = slot->idx % slots_per_frame;
           g.bwp_start = hy.bwp_start;
-          g.hyp       = b.fdra_lock;
+          g.hyp       = hsel;
           g.coherence = coh;
           uint32_t first_rb = 0;
           while (first_rb < hy.nbwp && !prb[first_rb]) {
