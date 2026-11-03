@@ -62,7 +62,13 @@ uint32_t gs_fdra_hypotheses(uint32_t carrier_start_crb, uint32_t carrier_nprb, u
           uint32_t w0 = gs_type0_width(h.nbwp, h.bwp_start, h.rbg_cfg), w1 = gs_type1_width(h.nbwp);
           h.width   = (uint8_t)((w0 > w1 ? w0 : w1) + 1);
         }
-        if (n < max_out) {
+        bool dup = false; // config 1 and 2 give the same RBG size for large BWPs: one of them
+        for (uint32_t i = 0; i < n && !dup; i++) {
+          dup = out[i].off == h.off && out[i].type == h.type && out[i].width == h.width && out[i].nbwp == h.nbwp &&
+                out[i].bwp_start == h.bwp_start &&
+                (h.type == 1 || gs_rbg_p(h.nbwp, out[i].rbg_cfg) == gs_rbg_p(h.nbwp, h.rbg_cfg));
+        }
+        if (!dup && n < max_out) {
           out[n++] = h;
         }
       }
@@ -297,6 +303,47 @@ void gs_dmrs_decide(const GsDmrsShape& s, uint16_t* ports, bool* cdm2, int* dci_
   *ports     = s.occ < 0.08f ? 0x1 : s.occ > 12.0f ? 0x2 : 0x3;
   *cdm2      = s.e1 < 0.3f || s.coh1 > 0.5f;
   *dci_ports = *cdm2 ? 7 : 2;
+}
+
+float gs_fdra_occ_map(const cf_t* s, const float* d, uint32_t nof_prb, bool* occ)
+{
+  for (uint32_t c = 0; c < nof_prb; c++) {
+    const std::complex<float> sc(s[c]);
+    occ[c] = d[c] > 0 && std::abs(sc) / d[c] > 0.8f;
+  }
+  uint32_t n = 0;
+  for (uint32_t c = 0; c < nof_prb; c++) {
+    bool v = occ[c];
+    if (c > 0 && c + 1 < nof_prb && occ[c - 1] == occ[c + 1] && occ[c] != occ[c - 1]) {
+      v = occ[c - 1];
+    }
+    n += v;
+  }
+  for (uint32_t c = 1; c + 1 < nof_prb; c++) {
+    if (occ[c - 1] == occ[c + 1] && occ[c] != occ[c - 1]) {
+      occ[c] = occ[c - 1];
+    }
+  }
+  return nof_prb ? (float)n / (float)nof_prb : 0.0f;
+}
+
+float gs_fdra_lift(const GsFdraHyp& h, const uint8_t* payload, uint32_t nof_bits, uint32_t first_crb,
+                   uint32_t nof_grid_prb, const bool* occ, float f)
+{
+  bool     prb[SRSRAN_MAX_PRB_NR];
+  uint32_t n = 0;
+  if (!gs_fdra_parse(h, payload, nof_bits, prb, &n) || n == 0 || f >= 0.98f) {
+    return -2.0f;
+  }
+  uint32_t in = 0, hit = 0;
+  for (uint32_t i = 0; i < h.nbwp; i++) {
+    const int32_t c = (int32_t)(h.bwp_start + i) - (int32_t)first_crb;
+    if (prb[i] && c >= 0 && c < (int32_t)nof_grid_prb) {
+      in++;
+      hit += occ[c];
+    }
+  }
+  return in > 0 ? ((float)hit / (float)in - f) / (1.0f - f) : -2.0f;
 }
 
 float gs_fdra_score(const GsFdraHyp& h, const uint8_t* payload, uint32_t nof_bits, uint32_t first_crb,

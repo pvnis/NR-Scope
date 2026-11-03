@@ -74,6 +74,18 @@ struct GsDmrsShape {
 void gs_dmrs_shape(const cf_t* sym, uint32_t first_crb, const bool* prb, uint32_t nof_grid_prb, uint32_t slot_idx,
                    uint32_t l, uint32_t n_id, GsDmrsShape* out);
 
+/* Lift of one hypothesis for one DCI: how much more often its PRBs carry DM-RS than the
+   slot's PRBs do, (precision - f) / (1 - f), with occ[c] the strict per-CRB DM-RS map of
+   the slot (CRB first_crb + c) and f its occupancy. 1: only where DM-RS is, 0: no better
+   than chance (what every hypothesis scores in a loaded cell by plain precision). -2 when
+   the hypothesis gives nothing for this payload. */
+float gs_fdra_lift(const GsFdraHyp& h, const uint8_t* payload, uint32_t nof_bits, uint32_t first_crb,
+                   uint32_t nof_grid_prb, const bool* occ, float f);
+
+/* The strict per-CRB map behind it: coherence |s|/d over 0.8 (an empty CRB passes 0.5 a
+   third of the time), single-CRB specks smoothed. Returns the occupancy. */
+float gs_fdra_occ_map(const cf_t* s, const float* d, uint32_t nof_prb, bool* occ);
+
 /* Per CRB of one symbol (CRB first_crb + c at grid subcarrier 12 c), DM-RS type 1 with
    N_ID n_id: coherence of comb 0 and comb 1 (|sum z_j z*_j+2| / power, ~1 where that DM-RS
    is), the CDM-pair ratio of comb 0 (gs_dmrs_shape's occ) and the power of each comb. */

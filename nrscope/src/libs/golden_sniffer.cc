@@ -462,7 +462,7 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
       if (gs_grants_csv != nullptr) {
         fprintf(gs_grants_csv,
                 "timestamp,sfn,slot,rnti,bwp_start_crb,rb_start,nof_rb,dmrs_coherence,hyp,sensed,ports,cdm,dmrs_add,"
-                "occ,comb1_power,comb1_coherence,dmrs_symbols\n");
+                "occ,comb1_power,comb1_coherence,dmrs_symbols,prb_runs\n");
       }
     }
     if (gs_csv == nullptr) {
@@ -896,7 +896,19 @@ void golden_sniffer_update(WorkState&                   state,
   for (const gs_dci_t& d : result.region_dcis) {
     gs_log_one_locked(now, result.outcome.sfn, d.slot_idx, first_crb, d, "region");
   }
-  /* FDRA learning: a hypothesis is kept once its mean stands out over enough DL DCIs */
+  /* FDRA learning: per UE, the mean lift of every hypothesis over its DL DCIs (only the UEs
+    whose PDSCH beam reaches us can show it); one that stands out is kept. Locked hypotheses
+    are remembered per DL DCI size, and a UE whose own DCIs never show it takes the one two
+    other UEs of its size were locked on. */
+  static std::map<uint16_t, std::map<int16_t, uint32_t>> fdra_by_size;
+  auto describe = [](const GsFdraHyp& hy) {
+    char b[160];
+    snprintf(b, sizeof(b), "%s%s, BWP %u PRBs at CRB %u, field at bit %u (%u bits), PDSCH DM-RS N_ID %s",
+             hy.type == 1 ? "type 1" : hy.type == 0 ? "type 0" : "dynamic",
+             hy.type == 1 ? "" : (hy.rbg_cfg == 1 ? " rbg config 1" : " rbg config 2"), hy.nbwp, hy.bwp_start,
+             hy.off, hy.width, hy.nid_ue ? "= its PDCCH DM-RS N_ID" : "= PCI");
+    return std::string(b);
+  };
   for (const GsFdraObs& o : result.gs_fdra_obs) {
     auto it = ues.find(o.rnti);
     if (it == ues.end() || it->second.fdra_lock >= 0) {
@@ -904,36 +916,60 @@ void golden_sniffer_update(WorkState&                   state,
     }
     BlindUe& e = it->second;
     for (uint32_t k = 0; k < o.nof && k < GS_FDRA_MAX_HYP; k++) {
-      e.fdra_sum[k] += o.score[k] > 0 ? o.score[k] : 0.0f;
+      if (o.score[k] > -1.5f) {
+        e.fdra_sum[k] += o.score[k];
+        e.fdra_cnt[k]++;
+      }
     }
     e.fdra_n++;
-    if (e.fdra_n >= 20 && e.fdra_n % 5 == 0) {
-      int   best = -1;
-      float b1 = -1, b2 = -1;
-      for (uint32_t k = 0; k < o.nof && k < 64; k++) {
-        const float m = e.fdra_sum[k] / (float)e.fdra_n;
-        if (m > b1) {
-          b2   = b1;
-          b1   = m;
-          best = (int)k;
-        } else if (m > b2) {
-          b2 = m;
+    if (e.fdra_n < 30 || e.fdra_n % 5 != 0) {
+      continue;
+    }
+    int   best = -1;
+    float b1 = -9, b2 = -9;
+    for (uint32_t k = 0; k < o.nof && k < GS_FDRA_MAX_HYP; k++) {
+      if (e.fdra_cnt[k] < 20) {
+        continue;
+      }
+      const float m = e.fdra_sum[k] / (float)e.fdra_cnt[k];
+      if (m > b1) {
+        b2   = b1;
+        b1   = m;
+        best = (int)k;
+      } else if (m > b2) {
+        b2 = m;
+      }
+    }
+    if (best >= 0 && b1 >= 0.5f && b1 - b2 >= 0.25f) {
+      e.fdra_lock = (int16_t)best;
+      fdra_by_size[o.size][(int16_t)best]++;
+      printf("GoldenSniffer: UE 0x%04x FDRA: %s; lift %.2f over %u DL DCIs (next hypothesis %.2f), DL size %u\n",
+             o.rnti, describe(gs_fdra_h[best]).c_str(), b1, e.fdra_cnt[best], b2, o.size);
+      continue;
+    }
+    /* not shown by its own DCIs (yet): the cell's, for its DCI size */
+    auto bs = fdra_by_size.find(o.size);
+    if (bs != fdra_by_size.end() && e.fdra_n >= 50) {
+      int16_t  h = -1;
+      uint32_t c = 0, tot = 0;
+      for (const auto& kv : bs->second) {
+        tot += kv.second;
+        if (kv.second > c) {
+          c = kv.second;
+          h = kv.first;
         }
       }
-      if (best >= 0 && b1 >= 0.85f && b1 - b2 >= 0.1f) {
-        e.fdra_lock         = (int16_t)best;
-        const GsFdraHyp& hy = gs_fdra_h[best];
-        printf("GoldenSniffer: UE 0x%04x FDRA: %s%s, BWP %u PRBs at CRB %u, field at bit %u (%u bits), PDSCH DM-RS "
-               "N_ID %s; %.2f of its PRBs carry DM-RS over %u DL DCIs, next hypothesis %.2f\n",
-               o.rnti, hy.type == 1 ? "type 1" : hy.type == 0 ? "type 0" : "dynamic",
-               hy.type == 1 ? "" : (hy.rbg_cfg == 1 ? " rbg config 1" : " rbg config 2"), hy.nbwp, hy.bwp_start,
-               hy.off, hy.width, hy.nid_ue ? "= its PDCCH DM-RS N_ID" : "= PCI", b1, e.fdra_n, b2);
-      } else if (e.fdra_n >= 400) {
-        e.fdra_gave_up = true;
-        printf("GoldenSniffer: UE 0x%04x FDRA not found over %u DL DCIs (best %.2f, next %.2f): a loaded cell, or "
-               "PDSCH not in the DCI's slot\n",
-               o.rnti, e.fdra_n, b1, b2);
+      if (h >= 0 && c >= 2 && c * 4 >= tot * 3) {
+        e.fdra_lock = h;
+        printf("GoldenSniffer: UE 0x%04x FDRA: %s, taken from %u UE(s) with DL size %u (its own DCIs: best lift %.2f)\n",
+               o.rnti, describe(gs_fdra_h[h]).c_str(), c, o.size, b1);
+        continue;
       }
+    }
+    if (e.fdra_n >= 600 && !e.fdra_gave_up) {
+      e.fdra_gave_up = true;
+      printf("GoldenSniffer: UE 0x%04x FDRA not found over %u DL DCIs (best lift %.2f, next %.2f), DL size %u\n",
+             o.rnti, e.fdra_n, b1, b2, o.size);
     }
   }
   /* PDSCH DM-RS symbols of tracked UEs: the most symbols a fair share of their grants
@@ -962,9 +998,13 @@ void golden_sniffer_update(WorkState&                   state,
     gs_grant_cdm2 += g.cdm == 2;
     gs_grant_add[g.dmrs_add & 3]++;
     if (gs_grants_csv != nullptr) {
-      fprintf(gs_grants_csv, "%.6f,%u,%u,0x%04x,%u,%u,%u,%.3f,%d,%d,%u,%u,%u,%.3f,%.3f,%.3f,%u\n", now_wall, g.sfn,
+      std::string rs;
+      for (uint32_t r = 0; r < g.nruns; r++) {
+        rs += (r ? ";" : "") + std::to_string(g.runs[2 * r]) + "-" + std::to_string(g.runs[2 * r + 1]);
+      }
+      fprintf(gs_grants_csv, "%.6f,%u,%u,0x%04x,%u,%u,%u,%.3f,%d,%d,%u,%u,%u,%.3f,%.3f,%.3f,%u,%s\n", now_wall, g.sfn,
               g.slot, g.rnti, g.bwp_start, g.rb_start, g.nof_rb, g.coherence, g.hyp, g.sensed ? 1 : 0, g.ports, g.cdm,
-              g.dmrs_add, g.occ, g.e1, g.coh1, g.sym_seen);
+              g.dmrs_add, g.occ, g.e1, g.coh1, g.sym_seen, rs.c_str());
     }
   }
   for (const gs_dci_t& d : result.tracked_dcis) {
@@ -1596,6 +1636,8 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
         static thread_local float       rb_d[SRSRAN_MAX_PRB_NR];
         static thread_local cf_t        ue_s[SRSRAN_MAX_PRB_NR]; // the same with a UE's own N_ID
         static thread_local float       ue_d[SRSRAN_MAX_PRB_NR];
+        static thread_local bool        occ_p[SRSRAN_MAX_PRB_NR], occ_u[SRSRAN_MAX_PRB_NR]; // strict maps
+        float                           f_p = 0, f_u = 0;
         uint32_t                        ue_map_nid = UINT32_MAX;
         const uint32_t                  nprb = grid_carrier.nof_prb;
         for (int i = 0; i < n; i++) {
@@ -1608,7 +1650,7 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
             continue;
           }
           const BlindUe& b = ue->second;
-          if (b.fdra_lock < 0 && (b.fdra_gave_up || b.fdra_n >= 400)) {
+          if (b.fdra_lock < 0 && b.fdra_n >= 2000) { // gave up long ago: not even a cell hypothesis
             continue;
           }
           if (!have_map) {
@@ -1617,6 +1659,7 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
             srsran_ue_dl_nr_estimate_fft_nrscope_symbols(&ue_dl, slot, arg_scs_grid, mask2, done);
             gs_fdra_rb_coherence(ue_dl.sf_symbols[0] + dmrs_l0 * nof_sc, first_crb, nprb,
                                  slot->idx % slots_per_frame, dmrs_l0, pci, rb_s, rb_d);
+            f_p      = gs_fdra_occ_map(rb_s, rb_d, nprb, occ_p);
             have_map = true;
           }
           /* and the map under this UE's own PDCCH DM-RS N_ID, when it has one */
@@ -1624,17 +1667,19 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
           if (own_nid && ue_map_nid != dd.n_id) {
             gs_fdra_rb_coherence(ue_dl.sf_symbols[0] + dmrs_l0 * nof_sc, first_crb, nprb,
                                  slot->idx % slots_per_frame, dmrs_l0, dd.n_id, ue_s, ue_d);
+            f_u        = gs_fdra_occ_map(ue_s, ue_d, nprb, occ_u);
             ue_map_nid = dd.n_id;
           }
           if (b.fdra_lock < 0) {
             GsFdraObs o;
             o.rnti = dd.rnti;
             o.nof  = (uint8_t)nh;
+            o.size = (uint16_t)dd.nof_bits;
             for (uint32_t k = 0; k < nh; k++) {
               const bool u = gs_fdra_h[k].nid_ue != 0;
-              o.score[k]   = u && !own_nid ? -1.0f // the same as its PCI twin
-                                           : gs_fdra_score(gs_fdra_h[k], dd.payload, dd.nof_bits, first_crb, nprb,
-                                                           u ? ue_s : rb_s, u ? ue_d : rb_d, nullptr);
+              o.score[k]   = u && !own_nid ? -2.0f // the same as its PCI twin
+                                           : gs_fdra_lift(gs_fdra_h[k], dd.payload, dd.nof_bits, first_crb, nprb,
+                                                          u ? occ_u : occ_p, u ? f_u : f_p);
             }
             result->gs_fdra_obs.push_back(o);
             continue;
@@ -1662,6 +1707,15 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
           }
           g.rb_start = (uint16_t)first_rb;
           g.nof_rb   = (uint16_t)nof;
+          for (uint32_t k = 0; k < hy.nbwp && k < SRSRAN_MAX_PRB_NR && g.nruns < 18; k++) {
+            if (prb[k] && (k == 0 || !prb[k - 1])) {
+              g.runs[2 * g.nruns] = (uint16_t)k;
+            }
+            if (prb[k] && (k + 1 >= hy.nbwp || !prb[k + 1])) {
+              g.runs[2 * g.nruns + 1] = (uint16_t)k;
+              g.nruns++;
+            }
+          }
           /* sensing: the grant as a single-layer PDSCH on port 1000 (its antenna-ports field
             is not known), the DM-RS symbol from the MIB, scrambled with the PCI */
           /* The DM-RS read on air for every grant with DM-RS, sensing or not (cell statistics) */
