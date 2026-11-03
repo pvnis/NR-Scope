@@ -192,6 +192,23 @@ static GsFdraHyp      gs_fdra_h[GS_FDRA_MAX_HYP];
 static std::atomic<uint32_t> gs_fdra_nh{0};
 static std::once_flag gs_fdra_once;
 static FILE*          gs_grants_csv = nullptr;
+
+/* GNU complex helpers for C++ (the C99 conjf/cargf/crealf are not declared here) */
+static inline cf_t gs_cj(cf_t a)
+{
+  cf_t r;
+  __real__ r = __real__ a;
+  __imag__ r = -__imag__ a;
+  return r;
+}
+static inline float gs_arg(cf_t a)
+{
+  return atan2f(__imag__ a, __real__ a);
+}
+static inline float gs_re(cf_t a)
+{
+  return __real__ a;
+}
 static FILE*          gs_survey_csv = nullptr; // golden_sniffer.survey_csv
 static std::mutex     gs_survey_mutex;
 /* grants of tracked UEs: DM-RS ports (bit i = port 1000 + i), CDM groups 2, extra symbols */
@@ -430,7 +447,8 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
       if (gs_survey_csv != nullptr) {
         setvbuf(gs_survey_csv, nullptr, _IOFBF, 1 << 22);
         fprintf(gs_survey_csv, "sfn,slot,n_dl,n_ul,rbs_comb0_sym1..13,rbs_comb1_sym1..13,l0_bitmap,l0_occ_median,"
-                               "l0_comb1_power_median,ue_nid_tests\n");
+                               "l0_comb1_power_median,l0_bitmap08,l0_type2_rbs,step_inside,step_crb4,step_crb2,"
+                               "step_odd (n:deg:dB),ue_nid_tests\n");
       }
     }
     if (a.fdra) {
@@ -1488,6 +1506,61 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
             char m[64];
             snprintf(m, sizeof(m), ",%.3f,%.3f", med(o), med(p));
             l0_extra = m;
+            /* strict occupancy (coherence 0.8: an empty PRB passes 0.5 a third of the time),
+              type 2 test, and the precoding: phase/amplitude step between neighbouring PRBs
+              that both carry DM-RS, against the step inside a PRB, by CRB class */
+            static thread_local cf_t  pr[3 * SRSRAN_MAX_PRB_NR];
+            static thread_local float t2[SRSRAN_MAX_PRB_NR];
+            gs_dmrs_rb_pairs(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, np, sl, l, pci, pr, t2);
+            std::string bm8;
+            uint32_t    n_t2 = 0;
+            for (uint32_t c = 0; c < np; c += 4) {
+              uint32_t v = 0;
+              for (uint32_t b = 0; b < 4 && c + b < np; b++) {
+                v |= (c0[c + b] > 0.8f ? 1u : 0u) << (3 - b);
+              }
+              snprintf(hx, sizeof(hx), "%x", v);
+              bm8 += hx;
+            }
+            cf_t rho = 0;
+            for (uint32_t c = 0; c < np; c++) {
+              n_t2 += t2[c] > 0.8f;
+              if (c0[c] > 0.8f) {
+                rho += pr[3 * c + 1] * gs_cj(pr[3 * c]) + pr[3 * c + 2] * gs_cj(pr[3 * c + 1]);
+              }
+            }
+            const float phi = gs_arg(rho);
+            auto        dev = [phi](cf_t a, cf_t b) -> float { // phase of b against a, the slope removed, |deg|
+              float x = gs_arg(b * gs_cj(a)) - phi;
+              x       = x > (float)M_PI ? x - 2 * (float)M_PI : x < -(float)M_PI ? x + 2 * (float)M_PI : x;
+              return fabsf(x) * 57.29578f;
+            };
+            auto adb = [](cf_t a, cf_t b) { return fabsf(10.0f * log10f((gs_re(b * gs_cj(b)) + 1e-20f) / (gs_re(a * gs_cj(a)) + 1e-20f))); };
+            double   sd[4] = {}, sa[4] = {}; // 0: inside a PRB, 1: CRB%4==0, 2: CRB%4==2, 3: odd CRB
+            uint32_t nd[4] = {};
+            for (uint32_t c = 0; c < np; c++) {
+              if (c0[c] <= 0.8f) {
+                continue;
+              }
+              for (uint32_t n = 0; n < 2; n++) {
+                sd[0] += dev(pr[3 * c + n], pr[3 * c + n + 1]);
+                sa[0] += adb(pr[3 * c + n], pr[3 * c + n + 1]);
+                nd[0]++;
+              }
+              if (c + 1 < np && c0[c + 1] > 0.8f) {
+                const uint32_t crb = first_crb + c + 1, k = crb % 4 == 0 ? 1 : crb % 2 == 0 ? 2 : 3;
+                sd[k] += dev(pr[3 * c + 2], pr[3 * c + 3]);
+                sa[k] += adb(pr[3 * c + 2], pr[3 * c + 3]);
+                nd[k]++;
+              }
+            }
+            char e[256];
+            snprintf(e, sizeof(e), ",%s,%u", bm8.c_str(), n_t2);
+            l0_extra += e;
+            for (int k = 0; k < 4; k++) {
+              snprintf(e, sizeof(e), ",%u:%.1f:%.2f", nd[k], nd[k] ? sd[k] / nd[k] : 0, nd[k] ? sa[k] / nd[k] : 0);
+              l0_extra += e;
+            }
           }
         }
         for (uint32_t l = 1; l < 14; l++) {

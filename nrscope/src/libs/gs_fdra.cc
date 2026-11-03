@@ -260,6 +260,37 @@ void gs_dmrs_rb_map(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb, uint3
   }
 }
 
+void gs_dmrs_rb_pairs(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb, uint32_t slot_idx, uint32_t l,
+                      uint32_t n_id, cf_t* p, float* coh2)
+{
+  static thread_local cf_t r[NRSCOPE_DMRS_MAX_PILOTS];
+  const uint32_t           m_max = (first_crb + nof_prb) * 6;
+  if (m_max > NRSCOPE_DMRS_MAX_PILOTS) {
+    return;
+  }
+  nrscope_dmrs_sequence(nrscope_dmrs_c_init(slot_idx, l, n_id, false), m_max, (float)M_SQRT1_2, r);
+  for (uint32_t c = 0; c < nof_prb; c++) {
+    for (uint32_t n = 0; n < 3; n++) {
+      const std::complex<float> a = std::complex<float>(sym[c * 12 + 4 * n]) *
+                                    std::conj(std::complex<float>(r[(first_crb + c) * 6 + 2 * n])) * 2.0f;
+      const std::complex<float> b = std::complex<float>(sym[c * 12 + 4 * n + 2]) *
+                                    std::conj(std::complex<float>(r[(first_crb + c) * 6 + 2 * n + 1])) * 2.0f;
+      const std::complex<float> v = 0.5f * (a + b);
+      __real__ p[3 * c + n]       = v.real();
+      __imag__ p[3 * c + n]       = v.imag();
+    }
+    // type 2, CDM group 0: k = 0, 1 (m = 4c, 4c + 1) and k = 6, 7 (m = 4c + 2, 4c + 3)
+    const uint32_t      k[4] = {0, 1, 6, 7};
+    std::complex<float> z[4];
+    for (uint32_t j = 0; j < 4; j++) {
+      z[j] = std::complex<float>(sym[c * 12 + k[j]]) * std::conj(std::complex<float>(r[(first_crb + c) * 4 + j])) * 2.0f;
+    }
+    const std::complex<float> s = z[0] * std::conj(z[2]) + z[1] * std::conj(z[3]);
+    const float d = 0.5f * (std::norm(z[0]) + std::norm(z[2]) + std::norm(z[1]) + std::norm(z[3]));
+    coh2[c]       = d > 0 ? std::abs(s) / d : 0;
+  }
+}
+
 void gs_dmrs_decide(const GsDmrsShape& s, uint16_t* ports, bool* cdm2, int* dci_ports)
 {
   // a second layer 11 dB under the first, or more, is left out (it is noise to a map)

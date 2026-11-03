@@ -80,6 +80,12 @@ void gs_dmrs_shape(const cf_t* sym, uint32_t first_crb, const bool* prb, uint32_
 void gs_dmrs_rb_map(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb, uint32_t slot_idx, uint32_t l, uint32_t n_id,
                     float* coh0, float* coh1, float* occ, float* p0, float* p1);
 
+/* Port 1000's channel per CDM pair of comb 0 (type 1: pairs at k = 4n, 4n + 2 of each CRB,
+   (z0 + z1) / 2 after the sequence), 3 per CRB into p[3 c + n]; and the type 2 DM-RS
+   coherence per CRB (CDM group 0 at k = 0, 1, 6, 7) into coh2, for telling the types apart. */
+void gs_dmrs_rb_pairs(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb, uint32_t slot_idx, uint32_t l,
+                      uint32_t n_id, cf_t* p, float* coh2);
+
 /* What the shape says: the ports seen on comb 0 (bit i = port 1000 + i; 0x1 when only
    1000 is, 0x2 only 1001, 0x3 both), CDM groups without data 2, and the antenna-ports
    value (TS 38.212 table 7.3.1.2.2-1) the grant is despread with: always ports 1000+1001
