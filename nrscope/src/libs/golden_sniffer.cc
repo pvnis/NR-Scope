@@ -1549,9 +1549,18 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
         std::string line = std::to_string(state->sfn) + "," + std::to_string(sl) + "," + std::to_string(n_dl) + "," +
                            std::to_string(n_ul);
         uint32_t cnt1[14] = {}, cnt8[14] = {};
+        static thread_local float sv_c0[14][SRSRAN_MAX_PRB_NR], sv_c1[SRSRAN_MAX_PRB_NR], sv_oc[SRSRAN_MAX_PRB_NR],
+            sv_q0[SRSRAN_MAX_PRB_NR], sv_q1[SRSRAN_MAX_PRB_NR];
         std::string bitmap, l0_extra, line_tail;
         for (uint32_t l = 1; l < 14; l++) {
           gs_dmrs_rb_map(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, np, sl, l, pci, c0, c1, oc, q0, q1);
+          memcpy(sv_c0[l], c0, np * sizeof(float));
+          if (l == dmrs_l0) { // what the DM-RS runs are read from, kept past the loop
+            memcpy(sv_c1, c1, np * sizeof(float));
+            memcpy(sv_oc, oc, np * sizeof(float));
+            memcpy(sv_q0, q0, np * sizeof(float));
+            memcpy(sv_q1, q1, np * sizeof(float));
+          }
           uint32_t k0 = 0;
           for (uint32_t c = 0; c < np; c++) {
             k0 += c0[c] > 0.5f;
@@ -1689,6 +1698,75 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
           line += e;
         }
         line += "," + line_tail;
+        /* the DM-RS runs of the first DM-RS symbol (>= 3 CRBs carrying DM-RS on comb 0 or 1),
+          each with its structure: R<lo>-<hi>/<comb 0|1|b>/<coherence comb 0>/<comb 1>/<CDM-pair
+          ratio>/<comb 1 power share>/<type 2 coherence>/<DM-RS symbols bitmap>/<extra phase step
+          at CRB%4 boundaries, deg> */
+        {
+          static thread_local cf_t  rp[3 * SRSRAN_MAX_PRB_NR];
+          static thread_local float rt2[SRSRAN_MAX_PRB_NR];
+          gs_dmrs_rb_pairs(ue_dl.sf_symbols[0] + dmrs_l0 * nof_sc, first_crb, np, sl, dmrs_l0, pci, rp, rt2);
+          std::string rs = "R";
+          for (uint32_t a = 0; a < np; a++) {
+            auto on = [&](uint32_t c) { return sv_c0[dmrs_l0][c] > 0.8f || sv_c1[c] > 0.8f; };
+            if (!on(a)) {
+              continue;
+            }
+            uint32_t z = a;
+            while (z + 1 < np && on(z + 1)) {
+              z++;
+            }
+            if (z - a + 1 >= 3) {
+              double   s0 = 0, s1 = 0, so = 0, sp = 0, st2 = 0;
+              std::vector<float> ocv;
+              uint32_t n0 = 0, n1 = 0;
+              for (uint32_t c = a; c <= z; c++) {
+                s0 += sv_c0[dmrs_l0][c];
+                s1 += sv_c1[c];
+                n0 += sv_c0[dmrs_l0][c] > 0.8f;
+                n1 += sv_c1[c] > 0.8f;
+                ocv.push_back(sv_oc[c]);
+                sp += sv_q0[c] > 0 ? sv_q1[c] / sv_q0[c] : 0;
+                st2 += rt2[c];
+              }
+              const double n = z - a + 1;
+              std::nth_element(ocv.begin(), ocv.begin() + ocv.size() / 2, ocv.end());
+              so = ocv[ocv.size() / 2] * n; // the median CDM-pair ratio (a few CRBs with no power blow up a mean)
+              uint32_t     syms = 0;
+              for (uint32_t l = 1; l < 14; l++) {
+                double m = 0;
+                for (uint32_t c = a; c <= z; c++) {
+                  m += sv_c0[l][c];
+                }
+                syms |= m / n > 0.6 ? (1u << l) : 0;
+              }
+              // precoding: phase steps inside the run, CRB%4 boundaries against the others
+              cf_t rho = 0;
+              for (uint32_t c = a; c <= z; c++) {
+                rho += rp[3 * c + 1] * gs_cj(rp[3 * c]) + rp[3 * c + 2] * gs_cj(rp[3 * c + 1]);
+              }
+              const float phi = gs_arg(rho);
+              double      d4 = 0, dx = 0;
+              uint32_t    m4 = 0, mx = 0;
+              for (uint32_t c = a; c < z; c++) {
+                float x = gs_arg(rp[3 * c + 3] * gs_cj(rp[3 * c + 2])) - phi;
+                x       = fabsf(x > (float)M_PI ? x - 2 * (float)M_PI : x < -(float)M_PI ? x + 2 * (float)M_PI : x) * 57.29578f;
+                if ((first_crb + c + 1) % 4 == 0) {
+                  d4 += x, m4++;
+                } else {
+                  dx += x, mx++;
+                }
+              }
+              const float ex = m4 >= 2 && mx >= 2 ? (float)(d4 / m4 - dx / mx) : -999.0f;
+              char        e[160];
+              snprintf(e, sizeof(e), "%s%u-%u/%c/%.2f/%.2f/%.2f/%.2f/%.2f/%x/%.0f", rs.size() > 1 ? ";" : "", a, z,
+                       n0 >= n1 * 2 ? '0' : n1 >= n0 * 2 ? '1' : 'b', s0 / n, s1 / n, so / n, sp / n, st2 / n, syms, ex);
+              rs += e;
+            }
+            a = z;
+          }
+          line += "," + rs;
+        }
         /* a neighbour cell's PDSCH DM-RS on the first DM-RS symbol: strict bitmap */
         if (nrscope_gs_args.survey_pci >= 0) {
           gs_dmrs_rb_map(ue_dl.sf_symbols[0] + dmrs_l0 * nof_sc, first_crb, np, sl, dmrs_l0,
