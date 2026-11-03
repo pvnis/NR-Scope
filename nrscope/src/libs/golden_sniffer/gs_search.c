@@ -979,6 +979,7 @@ int gs_search_slot(gs_t* q, const gs_slot_t* s, gs_dci_t* out, uint32_t max_out)
 
 #define GS_TRACK_GATE 0.6f
 #define GS_SOFT_MAX 8 /* soft decisions per group and slot, at most */ /* DM-RS correlation a candidate needs before it is decoded */
+#define GS_SOFT_SLOT 64 /* soft decisions per slot over every group, best DM-RS gate first */
 
 int gs_decode_tracked(gs_t* q, const gs_slot_t* s, const gs_track_t* t, gs_dci_t* out, uint32_t max_out)
 {
@@ -1213,8 +1214,25 @@ int gs_decode_tracked_multi(gs_t*             q,
   static __thread bool done[GS_MAX_TRACKS];
   const uint32_t nt = nof_tracks < GS_MAX_TRACKS ? nof_tracks : GS_MAX_TRACKS;
   memset(done, 0, sizeof(bool) * nt);
+  /* soft decisions are the dearest step: with hundreds of UEs (a commercial cell, each UE
+    its own DM-RS scrambling) a slot gets GS_SOFT_SLOT of them in all, and the groups take
+    turns from slot to slot at being served first */
+  const uint32_t rot = nt > 0 ? (uint32_t)(s->slot_idx * 7919u) % nt : 0;
+  /* soft candidates of every group, decoded after the hard pass best gate first, and the
+    CCEs of every DCI found (a CCE carries one DCI, whatever its UE) */
+  typedef struct {
+    uint32_t g;
+    int32_t  first;
+    int      Ll;
+    float    gate;
+  } gs_soft_t;
+  static __thread gs_soft_t soft_all[1024];
+  uint32_t                  nsoft_all = 0;
+  int32_t                   glo[GS_MAX_DCI_PER_SLOT], ghi[GS_MAX_DCI_PER_SLOT];
+  uint32_t                  ng = 0;
 
-  for (uint32_t g = 0; g < nt && nof < max_out; g++) {
+  for (uint32_t gi = 0; gi < nt && nof < max_out; gi++) {
+    const uint32_t    g  = (gi + rot) % nt;
     const gs_track_t* t0 = &tracks[g];
     if (done[g] || t0->duration < 1 || t0->duration > GS_MAX_DURATION) {
       continue;
@@ -1232,7 +1250,7 @@ int gs_decode_tracked_multi(gs_t*             q,
       the UEs whose sizes did not fit were never decoded) */
     uint32_t sizes[128], nsz = 0, al_mask = 0;
     int32_t  lo = t0->sc_lo, hi = t0->sc_hi;
-    for (uint32_t i = g; i < nt; i++) {
+    for (uint32_t i = 0; i < nt; i++) {
       const gs_track_t* t = &tracks[i];
       if (done[i] || !gs_track_same_group(t0, t, ref, cce)) {
         continue;
@@ -1292,6 +1310,28 @@ int gs_decode_tracked_multi(gs_t*             q,
         pw[l][r]  = p;
       }
     }
+    /* the gate of a candidate is a sum over its RBs, taken 2 at a time from its first one:
+      prefix sums of those 2-RB terms, for pairs starting on even and on odd RBs, and the
+      1-RB terms for a candidate of an odd number of RBs, make it O(1) per candidate (it was
+      a magnitude and a square root per pair, per position, per AL, per UE: most of the
+      slot in a cell of a few hundred UEs) */
+    static __thread double gnum[GS_MAX_DURATION][2][GS_MAX_SC / 24 + 2], gden[GS_MAX_DURATION][2][GS_MAX_SC / 24 + 2];
+    static __thread float  snum[GS_MAX_DURATION][GS_MAX_SC / 12], sden[GS_MAX_DURATION][GS_MAX_SC / 12];
+    for (uint32_t l = 0; l < dur; l++) {
+      for (uint32_t par = 0; par < 2; par++) {
+        gnum[l][par][0] = gden[l][par][0] = 0;
+        uint32_t i = 0;
+        for (uint32_t r = par; r + 1 < nrb_tot; r += 2, i++) {
+          const cf_t a    = acc[l][r] + acc[l][r + 1];
+          gnum[l][par][i + 1] = gnum[l][par][i] + sqrtf(crealf(a) * crealf(a) + cimagf(a) * cimagf(a));
+          gden[l][par][i + 1] = gden[l][par][i] + sqrtf((pw[l][r] + pw[l][r + 1]) * 6.0f);
+        }
+      }
+      for (uint32_t r = 0; r < nrb_tot; r++) {
+        snum[l][r] = sqrtf(crealf(acc[l][r]) * crealf(acc[l][r]) + cimagf(acc[l][r]) * cimagf(acc[l][r]));
+        sden[l][r] = sqrtf(pw[l][r] * 3.0f);
+      }
+    }
 
     int32_t used_lo[GS_MAX_DCI_PER_SLOT], used_hi[GS_MAX_DCI_PER_SLOT];
     uint32_t nused = 0;
@@ -1323,19 +1363,14 @@ int gs_decode_tracked_multi(gs_t*             q,
           continue;
         }
         /* coherent over 2 RBs (6 pilots) at a time, as gs_decode_tracked */
-        double num = 0, den = 0;
+        double         num = 0, den = 0;
+        const uint32_t par = r0 & 1U, i0 = (r0 - par) / 2, np2 = nrb / 2;
         for (uint32_t l = 0; l < dur; l++) {
-          for (uint32_t r = 0; r < nrb; r += 2) {
-            cf_t     a = acc[l][r0 + r];
-            double   p = pw[l][r0 + r];
-            uint32_t n = 3;
-            if (r + 1 < nrb) {
-              a += acc[l][r0 + r + 1];
-              p += pw[l][r0 + r + 1];
-              n = 6;
-            }
-            num += cabsf(a);
-            den += sqrt(p * n);
+          num += gnum[l][par][i0 + np2] - gnum[l][par][i0];
+          den += gden[l][par][i0 + np2] - gden[l][par][i0];
+          if (nrb & 1U) {
+            num += snum[l][r0 + nrb - 1];
+            den += sden[l][r0 + nrb - 1];
           }
         }
         if (den <= 0 || num / den < GS_TRACK_GATE) {
@@ -1354,13 +1389,13 @@ int gs_decode_tracked_multi(gs_t*             q,
             cf_t v       = yeq[l * nre + m];
             q->bits[E++] = crealf(v) < 0.0f;
             q->bits[E++] = cimagf(v) < 0.0f;
-            cf_t  d      = ((crealf(v) < 0 ? -1.0f : 1.0f) + I * (cimagf(v) < 0 ? -1.0f : 1.0f)) * (float)M_SQRT1_2;
-            float e      = cabsf(v - d);
-            err += e * e;
+            const float dr = crealf(v) - (crealf(v) < 0 ? -(float)M_SQRT1_2 : (float)M_SQRT1_2);
+            const float di = cimagf(v) - (cimagf(v) < 0 ? -(float)M_SQRT1_2 : (float)M_SQRT1_2);
+            err += dr * dr + di * di;
           }
           for (int32_t k = first; k < first + span; k++) {
-            float a = cabsf(s->grid[l * N + k]);
-            epre += a * a;
+            const cf_t x = s->grid[l * N + k];
+            epre += crealf(x) * crealf(x) + cimagf(x) * cimagf(x);
           }
         }
         if (E != (108U << Ll)) {
@@ -1427,36 +1462,97 @@ int gs_decode_tracked_multi(gs_t*             q,
         nof++;
       }
     }
-    /* soft pass: the candidates with the best DM-RS gate first, at most GS_SOFT_MAX, none
-      overlapping a DCI already found */
-    for (uint32_t done_soft = 0; done_soft < GS_SOFT_MAX && nof < max_out;) {
-      int bi = -1;
-      for (uint32_t i = 0; i < nsoft; i++) {
-        if (soft_cand[i].gate > 0 && (bi < 0 || soft_cand[i].gate > soft_cand[bi].gate)) {
-          bi = (int)i;
-        }
+    for (uint32_t i = 0; i < nused && ng < GS_MAX_DCI_PER_SLOT; i++) {
+      glo[ng] = used_lo[i], ghi[ng++] = used_hi[i];
+    }
+    for (uint32_t i = 0; i < nsoft && nsoft_all < 1024; i++) {
+      soft_all[nsoft_all++] = (gs_soft_t){g, soft_cand[i].first, soft_cand[i].Ll, soft_cand[i].gate};
+    }
+  }
+
+  /* soft pass over every group: best DM-RS gate first, GS_SOFT_SLOT of them at most, none on
+    CCEs a DCI already holds. Each one rebuilds its group (sizes, DM-RS) on the way. */
+  for (uint32_t tries = 0; tries < GS_SOFT_SLOT && nof < max_out;) {
+    int bi = -1;
+    for (uint32_t i = 0; i < nsoft_all; i++) {
+      if (soft_all[i].gate > 0 && (bi < 0 || soft_all[i].gate > soft_all[bi].gate)) {
+        bi = (int)i;
       }
-      if (bi < 0) {
-        break;
-      }
-      const int32_t first = soft_cand[bi].first, span = (1 << soft_cand[bi].Ll) * cce;
-      soft_cand[bi].gate  = 0;
-      bool overlap        = false;
-      for (uint32_t i = 0; i < nused && !overlap; i++) {
-        overlap = first <= used_hi[i] && first + span - 1 >= used_lo[i];
-      }
-      if (overlap) {
+    }
+    if (bi < 0) {
+      break;
+    }
+    gs_soft_t c          = soft_all[bi];
+    soft_all[bi].gate    = 0;
+    const gs_track_t* t0 = &tracks[c.g];
+    const int32_t     ref = t0->coreset0 ? s->ref_cs0 : s->ref_crb0;
+    const uint32_t    dur = t0->duration;
+    const int32_t     cce = GS_NSC_CCE / (int32_t)dur, span = (1 << c.Ll) * cce;
+    bool              overlap = false;
+    for (uint32_t i = 0; i < ng && !overlap; i++) {
+      overlap = c.first <= ghi[i] && c.first + span - 1 >= glo[i];
+    }
+    if (overlap) {
+      continue;
+    }
+    tries++;
+    uint32_t sizes[128], nsz = 0;
+    for (uint32_t i = 0; i < nt; i++) {
+      const gs_track_t* t = &tracks[i];
+      if (!gs_track_same_group(t0, t, ref, cce)) {
         continue;
       }
-      done_soft++;
-      if (gs_tracked_soft(q, s, tracks, nt, t0, ref, cce, first, soft_cand[bi].Ll, sizes, nsz, &out[nof])) {
-        tracked[nof] = 1;
-        if (nused < GS_MAX_DCI_PER_SLOT) {
-          used_lo[nused]   = first;
-          used_hi[nused++] = first + span - 1;
+      for (uint32_t z = 0; z < t->nof_sizes; z++) {
+        bool have = false;
+        for (uint32_t k = 0; k < nsz; k++) {
+          have = have || sizes[k] == t->sizes[z];
         }
-        nof++;
+        if (!have && nsz < 128) {
+          sizes[nsz++] = t->sizes[z];
+        }
       }
+    }
+    for (uint32_t x = 1; x < nsz; x++) {
+      for (uint32_t y = x; y > 0 && sizes[y - 1] > sizes[y]; y--) {
+        const uint32_t t = sizes[y];
+        sizes[y]         = sizes[y - 1];
+        sizes[y - 1]     = t;
+      }
+    }
+    const uint32_t npil = ((uint32_t)N - (uint32_t)ref) / 12 * 3;
+    for (uint32_t l = 0; l < dur; l++) {
+      srsran_sequence_state_t seq;
+      srsran_sequence_state_init(&seq, gs_pdcch_dmrs_cinit(s->slot_idx, l, t0->n_id));
+      srsran_sequence_state_gen_f(&seq, (float)M_SQRT1_2, (float*)q->cdm[l], 2 * npil);
+    }
+    if (gs_tracked_soft(q, s, tracks, nt, t0, ref, cce, c.first, c.Ll, sizes, nsz, &out[nof])) {
+      /* repetition: an AL window over a smaller-AL DCI holds that whole codeword in its first
+        half, and the soft decision reads it there too. The smallest window that still gives
+        the same DCI is the one sent. */
+      int     Ll  = c.Ll;
+      int32_t at  = c.first;
+      bool    sub_ok = true;
+      while (Ll > 0 && sub_ok) {
+        sub_ok = false;
+        for (int h = 0; h < 2 && !sub_ok; h++) { // either half of the window
+          const int32_t f = at + h * (1 << (Ll - 1)) * cce;
+          gs_dci_t      sub;
+          if (gs_tracked_soft(q, s, tracks, nt, t0, ref, cce, f, Ll - 1, sizes, nsz, &sub) &&
+              sub.rnti == out[nof].rnti && sub.nof_bits == out[nof].nof_bits &&
+              memcmp(sub.payload, out[nof].payload, sub.nof_bits) == 0) {
+            out[nof] = sub;
+            at       = f;
+            Ll--;
+            sub_ok = true;
+          }
+        }
+      }
+      const int32_t used = (1 << Ll) * cce;
+      tracked[nof]       = 1;
+      if (ng < GS_MAX_DCI_PER_SLOT) {
+        glo[ng] = at, ghi[ng++] = at + used - 1;
+      }
+      nof++;
     }
   }
   return (int)nof;
