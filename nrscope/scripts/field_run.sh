@@ -74,7 +74,26 @@ for try in 1 2 3 4 5; do
     sleep 2
     grep -qE "GoldenSniffer ready|Cell search: no cell" "$dir/nrscope.log" && break
     pgrep -x nrscope >/dev/null || break
+    # an NSA-only cell: k_SSB >= 24 in the MIB means no CORESET#0, so no SIB1 to start from
+    kssb=$(grep -m1 -oE "^MIB: .*ssb_offset=[0-9]+" "$dir/nrscope.log" | grep -oE "[0-9]+$")
+    if [ -n "$kssb" ] && [ "$kssb" -ge 24 ]; then
+      break
+    fi
   done
+  mib=$(grep -m1 -E "^MIB: " "$dir/nrscope.log")
+  kssb=$(echo "$mib" | grep -oE "ssb_offset=[0-9]+" | grep -oE "[0-9]+")
+  if [ -n "$kssb" ] && [ "$kssb" -ge 24 ]; then
+    echo "$mib"
+    echo "this cell broadcasts no SIB1 (k_SSB $kssb >= 24: no CORESET#0), most likely an NSA (EN-DC) cell;"
+    echo "NR-Scope needs SIB1 (carrier, TDD pattern, BWP): try another cell or band (an SA one)"
+    sudo -n pkill -INT -x nrscope; exit 3
+  fi
+  if [ -n "$mib" ] && ! grep -q "SIB 1 Decoded" "$dir/nrscope.log" && ! grep -q "GoldenSniffer ready" "$dir/nrscope.log"; then
+    echo "$mib"
+    echo "MIB decoded but no SIB1 in 80 s: barred/NSA cell, SIB1 too weak, or SIB1 not where the MIB says;"
+    echo "try more gain or another cell (barred=y in the MIB is typical of an NSA cell)"
+    sudo -n pkill -INT -x nrscope; exit 3
+  fi
   if grep -q "GoldenSniffer ready" "$dir/nrscope.log"; then
     echo "try $try: running ($(date -u +%T)); 'tmux attach -t field' to watch, Ctrl-C there to stop early"
     break
@@ -92,6 +111,7 @@ while pgrep -x nrscope >/dev/null; do sleep 5; done
 cp -f msg4_bytes.log "$dir/" 2>/dev/null
 {
   echo "ssb $ssb pci ${pci:-any} center $center gain $gain secs $secs"
+  grep -m1 -E "^MIB: " "$dir/nrscope.log"
   grep -m1 "GoldenSniffer: carrier" "$dir/nrscope.log"
   grep -oE "[0-9]+ slot\(s\) dropped so far" "$dir/nrscope.log" | tail -1
   grep -E "^\[status\]" "$dir/nrscope.log" | tail -1 | cut -c1-200
@@ -106,5 +126,8 @@ cp -f msg4_bytes.log "$dir/" 2>/dev/null
   grep -cE "GoldenSniffer: UE .*-> CONVERGED" "$dir/nrscope.log" | sed "s/^/  converged: /"
   grep -cE "GoldenSniffer: UE .* discovered blind" "$dir/nrscope.log" | sed "s/^/  discovered: /"
   grep -c "hooray" "$dir/nrscope.log" | sed "s/^/  RRCSetup decoded (RACH): /"
+  grep -E "GoldenSniffer: UE .* (FDRA|PDSCH DM-RS symbols)|^GoldenSniffer grants:" "$dir/nrscope.log" | head -40
+  sed -n "/^sensing join: [0-9]/,/steps at PRB/p" "$dir/nrscope.log"
+  grep -E "sensing join: the cell looks|sensing join: SSB on grid" "$dir/nrscope.log"
 } > "$dir/summary.txt"
 cat "$dir/summary.txt"

@@ -370,6 +370,35 @@ static void test_rows(void)
     }
   }
   nrscope_sensing_join_args.max_gap_prb = 0;
+
+  // 9. an SSB over PRBs 100..119 in this symbol: no DM-RS there, its REs instead
+  nrscope_sensing_join_set_ssb(j, 100 * 12 + 4, 120 * 12 + 3); // 240 subcarriers, not PRB aligned
+  for (int snr = 5; snr <= 30; snr += 25) {
+    for (int has_ssb = 0; has_ssb < 2; has_ssb++) {
+      nrscope_sensing_join_begin(j, 100, 3);
+      grant_rows(&c, 0, N_RB, 1.0f, snr, mask, 0);
+      if (has_ssb) {
+        for (int k = 100 * 12; k < 121 * 12; k += 2) {
+          gH[2 * N_SC + k] = gauss(); // the SSB's symbols against the PDSCH DM-RS sequence
+        }
+      }
+      add(j, 1, 1.0f, 0x4601, mask);
+      out.n = 0;
+      nrscope_sensing_join_flush_to(j, sink, NULL);
+      int lo, hi;
+      const int np2  = out.n ? row_pilots(0, 2, &lo, &hi) : 0;
+      const int np11 = out.n ? row_pilots(0, 11, &lo, &hi) : 0;
+      char      what[160];
+      if (has_ssb) {
+        snprintf(what, sizeof(what), "%d dB, SSB in symbol 2: its 21 PRBs cut, 152 PRB side kept (symbol 11 whole)", snr);
+        check(np2 == 152 * 6 && np11 == N_RB * 6, what, np2 / 6.0, 152);
+      } else {
+        snprintf(what, sizeof(what), "%d dB, no SSB: row kept whole", snr);
+        check(np2 == N_RB * 6, what, np2 / 6.0, N_RB);
+      }
+    }
+  }
+  nrscope_sensing_join_set_ssb(j, -1, -2);
   nrscope_sensing_join_free(j);
 }
 

@@ -331,6 +331,17 @@ struct BlindUe {
   uint32_t                     fdra_n           = 0;
   int16_t                      fdra_lock        = -1;
   bool                         fdra_gave_up     = false;
+  /* PDSCH DM-RS symbols past the first one (dmrs-AdditionalPosition, ciphered in its RRC),
+    found on air over its first grants: votes per pattern pos0..pos3, then the one kept */
+  uint16_t                     dmrs_votes[4]    = {};
+  uint16_t                     dmrs_n           = 0;
+  int8_t                       dmrs_add         = 0;
+};
+
+/* GoldenSniffer: the DM-RS symbols one grant of a tracked UE showed (pos0..pos3) */
+struct GsDmrsObs {
+  uint16_t rnti;
+  uint8_t  pattern;
 };
 
 /* GoldenSniffer FDRA learning, from the workers: one DL DCI of a tracked UE, scored under
@@ -349,6 +360,9 @@ struct GsGrant {
   float    coherence; // PDSCH DM-RS on those PRBs
   int16_t  hyp;
   bool     sensed;
+  uint8_t  ports;    // DM-RS ports found on air, bit i = port 1000 + i
+  uint8_t  cdm;      // CDM groups without data found on air
+  uint8_t  dmrs_add; // dmrs-AdditionalPosition used
 };
 
 /* An RRC PDU on an SRB, seen by the RACH decoder (headers only: the body is ciphered) */
@@ -476,6 +490,7 @@ struct SlotResult_ {
   std::vector<gs_dci_t> region_dcis;  // other C-RNTIs found by the tracked decode (sightings)
   std::vector<GsFdraObs> gs_fdra_obs; // FDRA learning
   std::vector<GsGrant>  gs_grants;    // DL grants of tracked UEs
+  std::vector<GsDmrsObs> gs_dmrs_obs; // their DM-RS symbols, while learning
   double                gs_t_submit = 0; // GoldenSniffer took the slot (steady clock, s)
 
   /* Define the compare operator between structure by sf_round,

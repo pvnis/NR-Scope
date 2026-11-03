@@ -199,6 +199,23 @@ int nrscope_sensing_process_grant_join(nrscope_sensing_t*             s,
                                        uint32_t                       sfn,
                                        uint32_t                       slot_idx);
 
+/* The same, estimating only the layers of layer_mask (bit j = layer j): GoldenSniffer
+   despreads every grant as ports 1000+1001, whose layer 0 is port 1000's channel whether
+   or not 1001 is there, and pushes layer 1 only when it is seen on air. */
+int nrscope_sensing_process_grant_layers(nrscope_sensing_t*             s,
+                                         nrscope_sensing_scratch_t*     sc,
+                                         struct nrscope_sensing_join_s* join,
+                                         uint32_t                       layer_mask,
+                                         uint32_t                       aarx,
+                                         const cf_t*                    grid,
+                                         uint32_t                       n_sc_grid,
+                                         const nr_dmrs_placement_t*     place,
+                                         const srsran_sch_cfg_nr_t*     cfg,
+                                         int                            dci_ports,
+                                         uint32_t                       pci,
+                                         uint32_t                       sfn,
+                                         uint32_t                       slot_idx);
+
 /* nrscope_sensing_push_estimates() plus sensing.record_estimates, the path every grant
    (or joined slot) takes into the history. */
 int nrscope_sensing_push_recorded(nrscope_sensing_t* s,

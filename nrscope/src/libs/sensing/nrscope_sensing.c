@@ -1763,14 +1763,32 @@ int nrscope_sensing_process_grant_join(nrscope_sensing_t*          s,
                                        nrscope_sensing_scratch_t*  sc,
                                        nrscope_sensing_join_t*     join,
                                        uint32_t                    aarx,
-                                  const cf_t*                 grid,
-                                  uint32_t                    n_sc_grid,
-                                  const nr_dmrs_placement_t*  place,
-                                  const srsran_sch_cfg_nr_t*  cfg,
-                                  int                         dci_ports,
-                                  uint32_t                    pci,
-                                  uint32_t                    sfn,
-                                  uint32_t                    slot_idx)
+                                       const cf_t*                 grid,
+                                       uint32_t                    n_sc_grid,
+                                       const nr_dmrs_placement_t*  place,
+                                       const srsran_sch_cfg_nr_t*  cfg,
+                                       int                         dci_ports,
+                                       uint32_t                    pci,
+                                       uint32_t                    sfn,
+                                       uint32_t                    slot_idx)
+{
+  return nrscope_sensing_process_grant_layers(s, sc, join, 0x3, aarx, grid, n_sc_grid, place, cfg, dci_ports, pci, sfn,
+                                              slot_idx);
+}
+
+int nrscope_sensing_process_grant_layers(nrscope_sensing_t*          s,
+                                         nrscope_sensing_scratch_t*  sc,
+                                         nrscope_sensing_join_t*     join,
+                                         uint32_t                    layer_mask,
+                                         uint32_t                    aarx,
+                                         const cf_t*                 grid,
+                                         uint32_t                    n_sc_grid,
+                                         const nr_dmrs_placement_t*  place,
+                                         const srsran_sch_cfg_nr_t*  cfg,
+                                         int                         dci_ports,
+                                         uint32_t                    pci,
+                                         uint32_t                    sfn,
+                                         uint32_t                    slot_idx)
 {
   if (s == NULL || sc == NULL || grid == NULL || cfg == NULL || place == NULL || n_sc_grid != sc->n_sc) {
     return s == NULL ? 0 : -1;
@@ -1808,6 +1826,9 @@ int nrscope_sensing_process_grant_join(nrscope_sensing_t*          s,
 
   int n_pushed = 0;
   for (int layer = 0; layer < lay.n_ports && layer < 2; layer++) {
+    if (!(layer_mask & (1u << layer))) {
+      continue; // a layer the caller knows is not there
+    }
     memset(sc->valid, 0, (size_t)NSYMB * n_sc_grid * sizeof(bool));
     for (int i = 0; i < n_dmrs; i++) {
       const uint32_t l     = dmrs_symbols[i];

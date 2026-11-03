@@ -424,6 +424,25 @@ void NRScopeWorker::Run()
       const auto& c =
           worker_state.sib1.serving_cell_cfg_common.dl_cfg_common.freq_info_dl.scs_specific_carrier_list[0];
       sensing_join = nrscope_sensing_join_alloc(c.offset_to_carrier, c.carrier_bw * NRSCOPE_NSC_PER_RB_NR);
+      /* the SSB on that grid (point A as DCIDecoder places it), for the rows it holes */
+      const auto&  freq_dl = worker_state.sib1.serving_cell_cfg_common.dl_cfg_common.freq_info_dl;
+      const auto&  cell    = worker_state.cell;
+      const double scs     = cell.abs_pdcch_scs;
+      const double ssb_lo  = worker_state.srsran_searcher_cfg_t.ssb_freq_hz - (SRSRAN_SSB_BW_SUBC / 2) * cell.abs_ssb_scs;
+      const double point_a = ssb_lo - cell.k_ssb * SRSRAN_SUBC_SPACING_NR(srsran_subcarrier_spacing_15kHz) -
+                             freq_dl.offset_to_point_a * SRSRAN_SUBC_SPACING_NR(srsran_subcarrier_spacing_15kHz) *
+                                 NRSCOPE_NSC_PER_RB_NR;
+      const double f_lo    = point_a + c.offset_to_carrier * NRSCOPE_NSC_PER_RB_NR * scs;
+      if (sensing_join != nullptr && scs > 0) {
+        const int k0 = (int)std::lround((ssb_lo - f_lo) / scs);
+        const int kn = (int)std::lround(SRSRAN_SSB_BW_SUBC * cell.abs_ssb_scs / scs);
+        nrscope_sensing_join_set_ssb(sensing_join, k0, k0 + kn - 1);
+        static std::atomic<bool> told{false};
+        if (!told.exchange(true)) {
+          printf("sensing join: SSB on grid subcarriers %d..%d (PRB %d..%d)\n", k0, k0 + kn - 1, k0 / 12,
+                 (k0 + kn - 1) / 12);
+        }
+      }
     }
     const bool join_slot = sensing_join != nullptr && !uplink_only;
     if (join_slot) {

@@ -53,4 +53,27 @@ void gs_fdra_rb_coherence(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb,
 float gs_fdra_score(const GsFdraHyp& h, const uint8_t* payload, uint32_t nof_bits, uint32_t first_crb,
                     uint32_t nof_grid_prb, const cf_t* s, const float* d, float* coherence);
 
+/* The DM-RS of one grant as it is on air (type 1, single symbol), for a UE whose
+   antenna-ports field cannot be read (its RRC is ciphered). On symbol l, over its PRBs
+   (prb[c], c from first_crb on the grid):
+   occ   : |z0 - z1|^2 / |z0 + z1|^2 over the CDM pairs (k' = 0, 1) of comb 0, after the
+           PCI sequence: ~0 for port 1000 alone, >> 1 for port 1001 alone, in between for
+           both (rank 2 on one CDM group), the case a port-1000 estimate gets wrong;
+   e1    : power on comb 1 against comb 0: ~0 when comb 1 is left empty (CDM groups
+           without data 2: DM-RS boosted 3 dB), ~1 when it carries PDSCH;
+   coh1  : DM-RS coherence of comb 1 (ports 1002/1003: rank 3-4, CDM groups 2);
+   coh0  : DM-RS coherence of comb 0, the same as gs_fdra_score's. */
+struct GsDmrsShape {
+  float occ, e1, coh1, coh0;
+};
+void gs_dmrs_shape(const cf_t* sym, uint32_t first_crb, const bool* prb, uint32_t nof_grid_prb, uint32_t slot_idx,
+                   uint32_t l, uint32_t n_id, GsDmrsShape* out);
+
+/* What the shape says: the ports seen on comb 0 (bit i = port 1000 + i; 0x1 when only
+   1000 is, 0x2 only 1001, 0x3 both), CDM groups without data 2, and the antenna-ports
+   value (TS 38.212 table 7.3.1.2.2-1) the grant is despread with: always ports 1000+1001
+   on CDM group 0, so that layer 0 is port 1000's channel whatever the rank and every
+   grant of a UE lands in the same stream. */
+void gs_dmrs_decide(const GsDmrsShape& s, uint16_t* ports, bool* cdm2, int* dci_ports);
+
 #endif

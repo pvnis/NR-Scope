@@ -72,6 +72,7 @@ struct nrscope_sensing_join_s {
   bool                      open;
   uint32_t                  sfn, slot_idx;
   struct nrscope_sensing_s* s; // the context the grants came with
+  int                       ssb_lo, ssb_hi; // the SSB's subcarriers on the grid, -1 when unknown
   jkey_t                    key[JOIN_MAX_KEYS];
   cf_t*                     oH; // flush output, [NSYMB][n_sc]
   bool*                     oV;
@@ -93,6 +94,7 @@ static struct {
   double          learn_n, learn_pass; // informative junctions between UEs, and how many passed
   int             cell;                // 0 undecided, 1 coherent (joined), 2 precoded per UE (not joined)
   uint64_t        cell_changes;
+  uint64_t        ssb_rows, ssb_cut; // rows over the SSB's PRBs, and those its block was cut from
 } st = {.lock = PTHREAD_MUTEX_INITIALIZER};
 
 static const char* cell_name(int c)
@@ -107,6 +109,7 @@ nrscope_sensing_join_t* nrscope_sensing_join_alloc(uint32_t grid_crb0, uint32_t 
     return NULL;
   }
   pthread_mutex_init(&j->lock, NULL);
+  j->ssb_lo = j->ssb_hi = -1;
   j->crb0 = grid_crb0;
   j->n_sc = n_sc_grid;
   bool ok = true;
@@ -137,6 +140,14 @@ void nrscope_sensing_join_free(nrscope_sensing_join_t* j)
   free(j->oV);
   pthread_mutex_destroy(&j->lock);
   free(j);
+}
+
+void nrscope_sensing_join_set_ssb(nrscope_sensing_join_t* j, int k_lo, int k_hi)
+{
+  if (j != NULL && k_hi >= k_lo && k_hi >= 0 && k_lo < (int)j->n_sc) {
+    j->ssb_lo = k_lo < 0 ? 0 : k_lo;
+    j->ssb_hi = k_hi >= (int)j->n_sc ? (int)j->n_sc - 1 : k_hi;
+  }
 }
 
 void nrscope_sensing_join_begin(nrscope_sensing_join_t* j, uint32_t sfn, uint32_t slot_idx)
@@ -694,6 +705,94 @@ static void prg_stats(const nrscope_sensing_join_t* j, const jkey_t* k, int l)
   pthread_mutex_unlock(&st.lock);
 }
 
+/* DM-RS coherence of the pilots in [a, b]: pairs 4 subcarriers apart (the same cover
+   weight on comb 0, neighbours once despread). Returns the pairs used. */
+static int coh_range(const cf_t* H, const bool* V, int a, int b, int n_sc, double* c)
+{
+  cf_t   acc = 0;
+  double den = 0;
+  int    n   = 0;
+  for (int k = a < 0 ? 0 : a; k + 4 <= b && k + 4 < n_sc; k++) {
+    if (V[k] && V[k + 4]) {
+      acc += H[k + 4] * conjf(H[k]);
+      den += 0.5 * (crealf(H[k] * conjf(H[k])) + crealf(H[k + 4] * conjf(H[k + 4])));
+      n++;
+    }
+  }
+  *c = den > 0 ? cabsf(acc) / den : 0;
+  return n;
+}
+
+/* An SSB in this symbol: its PRBs are not available to the PDSCH (38.214 5.1.4), so the
+   grants carry no DM-RS there and the estimates are the SSB's own REs. Seen on air rather
+   than predicted from the burst, half frame and periodicity: the pilots over the SSB's
+   PRBs lose their coherence while the rest of the row keeps it. They are taken out, which
+   splits the runs there. Returns true when cut. */
+static bool ssb_cut(nrscope_sensing_join_t* j, jkey_t* k, int l)
+{
+  if (j->ssb_lo < 0 || k->n_seg[l] == 0) {
+    return false;
+  }
+  const int n_sc = (int)j->n_sc;
+  cf_t*     kh   = k->H + (size_t)l * n_sc;
+  bool*     kv   = k->V + (size_t)l * n_sc;
+  const int a    = (j->ssb_lo / 12) * 12, b = (j->ssb_hi / 12) * 12 + 11; // whole PRBs
+  double    c_in = 0, c_lo = 0, c_hi = 0;
+  const int n_in = coh_range(kh, kv, a, b, n_sc, &c_in);
+  if (n_in < 8) {
+    return false; // no grant over the SSB
+  }
+  const int    n_lo = coh_range(kh, kv, 0, a - 13, n_sc, &c_lo);
+  const int    n_hi = coh_range(kh, kv, b + 13, n_sc - 1, n_sc, &c_hi);
+  const double c_out = (n_lo * c_lo + n_hi * c_hi) / (n_lo + n_hi > 0 ? n_lo + n_hi : 1);
+  bool         cut   = n_lo + n_hi >= 24 && c_out > 0.6 && c_in < 0.5 * c_out;
+  if (k->aarx == 0) {
+    pthread_mutex_lock(&st.lock);
+    st.ssb_rows++;
+    st.ssb_cut += cut;
+    pthread_mutex_unlock(&st.lock);
+  }
+  if (!cut) {
+    return false;
+  }
+  for (int q = a; q <= b && q < n_sc; q++) {
+    kv[q] = false;
+  }
+  // split the runs at the hole
+  seg_t     keep[JOIN_MAX_SEGS];
+  int       n = 0;
+  const int ns = k->n_seg[l];
+  for (int i = 0; i < ns && n < JOIN_MAX_SEGS; i++) {
+    seg_t sg = k->seg[l][i];
+    if (sg.hi < a || sg.lo > b) {
+      keep[n++] = sg;
+      continue;
+    }
+    if (sg.lo < a) {
+      int hi = a - 1;
+      while (hi > sg.lo && !kv[hi]) {
+        hi--;
+      }
+      if (kv[hi]) {
+        keep[n++] = (seg_t){sg.rnti, sg.lo, hi};
+      }
+    }
+    if (sg.hi > b && n < JOIN_MAX_SEGS) {
+      int lo = b + 1;
+      while (lo < sg.hi && !kv[lo]) {
+        lo++;
+      }
+      if (kv[lo]) {
+        keep[n++] = (seg_t){sg.rnti, lo, sg.hi};
+      }
+    }
+  }
+  memcpy(k->seg[l], keep, n * sizeof(seg_t));
+  k->n_seg[l] = n;
+  (void)kh;
+  return true;
+}
+
 typedef void (*emit_t)(void* ctx, const jkey_t* k, uint16_t mask, const cf_t* H, const bool* V, uint32_t n_sc);
 
 static int flush_impl(nrscope_sensing_join_t* j, emit_t emit, void* ctx)
@@ -734,6 +833,7 @@ static int flush_impl(nrscope_sensing_join_t* j, emit_t emit, void* ctx)
         continue;
       }
       const bool stats_row = k->aarx == 0;
+      ssb_cut(j, k, l);
       if (stats_row && k->layer == 0 && first) {
         prg_stats(j, k, l);
       }
@@ -876,6 +976,10 @@ void nrscope_sensing_join_report(void)
          (unsigned long)st.gaps, (unsigned long)st.gaps_wide, nrscope_sensing_join_args.max_gap_prb,
          (unsigned long)st.gaps_cut, (unsigned long)st.gaps_filled, (unsigned long)st.overlap,
          st.seg_full ? ", segment table full" : "", st.key_full ? ", key table full" : "");
+  if (st.ssb_rows > 0) {
+    printf("  rows over the SSB's PRBs %lu: its block cut from %lu (no DM-RS there: an SSB in that symbol)\n",
+           (unsigned long)st.ssb_rows, (unsigned long)st.ssb_cut);
+  }
   static const char* cls[3] = {"CRB%4==0", "CRB%4==2", "odd CRB"};
   printf("  steps at PRB boundaries inside one grant (precoder granularity):");
   for (int c = 0; c < 3; c++) {

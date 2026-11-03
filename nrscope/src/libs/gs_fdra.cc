@@ -171,6 +171,56 @@ void gs_fdra_rb_coherence(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb,
   }
 }
 
+void gs_dmrs_shape(const cf_t* sym, uint32_t first_crb, const bool* prb, uint32_t nof_grid_prb, uint32_t slot_idx,
+                   uint32_t l, uint32_t n_id, GsDmrsShape* out)
+{
+  *out = {0, 1, 0, 0};
+  static thread_local cf_t r[NRSCOPE_DMRS_MAX_PILOTS];
+  const uint32_t           m_max = (first_crb + nof_grid_prb) * 6;
+  if (m_max > NRSCOPE_DMRS_MAX_PILOTS) {
+    return;
+  }
+  nrscope_dmrs_sequence(nrscope_dmrs_c_init(slot_idx, l, n_id, false), m_max, (float)M_SQRT1_2, r);
+  double              pp = 0, pm = 0, e0 = 0, e1 = 0, d0 = 0, d1 = 0;
+  std::complex<float> s0 = 0, s1 = 0;
+  for (uint32_t c = 0; c < nof_grid_prb; c++) {
+    if (!prb[c]) {
+      continue;
+    }
+    std::complex<float> z0[6], z1[6];
+    for (uint32_t j = 0; j < 6; j++) {
+      const uint32_t            m  = (first_crb + c) * 6 + j; // the same index on both combs
+      const std::complex<float> rr = std::conj(std::complex<float>(r[m])) * 2.0f;
+      z0[j]                        = std::complex<float>(sym[c * 12 + 2 * j]) * rr;
+      z1[j]                        = std::complex<float>(sym[c * 12 + 2 * j + 1]) * rr;
+      e0 += std::norm(z0[j]);
+      e1 += std::norm(z1[j]);
+    }
+    for (uint32_t n = 0; n < 3; n++) { // CDM pairs: k = 4n (k' = 0) and 4n + 2 (k' = 1)
+      pp += std::norm(z0[2 * n] + z0[2 * n + 1]);
+      pm += std::norm(z0[2 * n] - z0[2 * n + 1]);
+    }
+    for (uint32_t j = 0; j + 2 < 6; j++) { // 4 subcarriers apart: the same cover weight
+      s0 += z0[j] * std::conj(z0[j + 2]);
+      s1 += z1[j] * std::conj(z1[j + 2]);
+      d0 += 0.5 * (std::norm(z0[j]) + std::norm(z0[j + 2]));
+      d1 += 0.5 * (std::norm(z1[j]) + std::norm(z1[j + 2]));
+    }
+  }
+  out->occ  = pp > 0 ? (float)(pm / pp) : 0.0f;
+  out->e1   = e0 > 0 ? (float)(e1 / e0) : 1.0f;
+  out->coh0 = d0 > 0 ? (float)(std::abs(s0) / d0) : 0.0f;
+  out->coh1 = d1 > 0 ? (float)(std::abs(s1) / d1) : 0.0f;
+}
+
+void gs_dmrs_decide(const GsDmrsShape& s, uint16_t* ports, bool* cdm2, int* dci_ports)
+{
+  // a second layer 11 dB under the first, or more, is left out (it is noise to a map)
+  *ports     = s.occ < 0.08f ? 0x1 : s.occ > 12.0f ? 0x2 : 0x3;
+  *cdm2      = s.e1 < 0.3f || s.coh1 > 0.5f;
+  *dci_ports = *cdm2 ? 7 : 2;
+}
+
 float gs_fdra_score(const GsFdraHyp& h, const uint8_t* payload, uint32_t nof_bits, uint32_t first_crb,
                     uint32_t nof_grid_prb, const cf_t* s, const float* d, float* coherence)
 {

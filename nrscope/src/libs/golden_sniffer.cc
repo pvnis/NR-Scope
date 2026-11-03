@@ -192,6 +192,8 @@ static GsFdraHyp      gs_fdra_h[GS_FDRA_MAX_HYP];
 static std::atomic<uint32_t> gs_fdra_nh{0};
 static std::once_flag gs_fdra_once;
 static FILE*          gs_grants_csv = nullptr;
+/* grants of tracked UEs: DM-RS ports (bit i = port 1000 + i), CDM groups 2, extra symbols */
+static uint64_t gs_grant_ports[4] = {}, gs_grant_cdm2 = 0, gs_grant_add[4] = {};
 /* Replay (lossless file input) runs at any speed: GoldenSniffer's timers (startup, sweeps,
   arming, quiet, keep, convergence) then run on air time, from the SFN and slot */
 static double  gs_air_ready = -1;
@@ -427,7 +429,8 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
       }
       gs_grants_csv = fopen(gp.c_str(), "w");
       if (gs_grants_csv != nullptr) {
-        fprintf(gs_grants_csv, "timestamp,sfn,slot,rnti,bwp_start_crb,rb_start,nof_rb,dmrs_coherence,hyp,sensed\n");
+        fprintf(gs_grants_csv,
+                "timestamp,sfn,slot,rnti,bwp_start_crb,rb_start,nof_rb,dmrs_coherence,hyp,sensed,ports,cdm,dmrs_add\n");
       }
     }
     if (gs_csv == nullptr) {
@@ -447,6 +450,14 @@ void golden_sniffer_report()
   }
   std::lock_guard<std::mutex> lock(gs_log_mutex);
   print_report_locked(true);
+  const uint64_t ng = gs_grant_ports[1] + gs_grant_ports[2] + gs_grant_ports[3];
+  if (ng > 0) {
+    printf("GoldenSniffer grants: %lu; DM-RS ports on air: 1000 %lu, 1001 %lu, 1000+1001 %lu; CDM groups without data 2: "
+           "%lu; extra DM-RS symbols pos1 %lu, pos2 %lu, pos3 %lu\n",
+           (unsigned long)ng, (unsigned long)gs_grant_ports[1], (unsigned long)gs_grant_ports[2],
+           (unsigned long)gs_grant_ports[3], (unsigned long)gs_grant_cdm2, (unsigned long)gs_grant_add[1],
+           (unsigned long)gs_grant_add[2], (unsigned long)gs_grant_add[3]);
+  }
   if (gs_csv != nullptr) {
     fflush(gs_csv);
   }
@@ -889,10 +900,34 @@ void golden_sniffer_update(WorkState&                   state,
       }
     }
   }
+  /* PDSCH DM-RS symbols of tracked UEs: the most symbols a fair share of their grants
+    showed (fewer in a special slot or a short PDSCH, never more by chance) */
+  for (const GsDmrsObs& o : result.gs_dmrs_obs) {
+    auto it = ues.find(o.rnti);
+    if (it == ues.end() || it->second.dmrs_n >= 24) {
+      continue;
+    }
+    BlindUe& e = it->second;
+    e.dmrs_votes[o.pattern & 3]++;
+    if (++e.dmrs_n == 24) {
+      int p = 0;
+      for (int q = 3; q > 0 && p == 0; q--) {
+        p = e.dmrs_votes[q] >= 6 ? q : 0;
+      }
+      e.dmrs_add = (int8_t)p;
+      static const char* sym[4] = {"first only", "+11", "+7,11", "+5,8,11"};
+      printf("GoldenSniffer: UE 0x%04x PDSCH DM-RS symbols: %s (dmrs-AdditionalPosition pos%d; over 24 grants %u/%u/%u/%u "
+             "for pos0..3)\n",
+             o.rnti, sym[p], p, e.dmrs_votes[0], e.dmrs_votes[1], e.dmrs_votes[2], e.dmrs_votes[3]);
+    }
+  }
   for (const GsGrant& g : result.gs_grants) {
+    gs_grant_ports[g.ports & 3]++;
+    gs_grant_cdm2 += g.cdm == 2;
+    gs_grant_add[g.dmrs_add & 3]++;
     if (gs_grants_csv != nullptr) {
-      fprintf(gs_grants_csv, "%.6f,%u,%u,0x%04x,%u,%u,%u,%.3f,%d,%d\n", now_wall, g.sfn, g.slot, g.rnti, g.bwp_start,
-              g.rb_start, g.nof_rb, g.coherence, g.hyp, g.sensed ? 1 : 0);
+      fprintf(gs_grants_csv, "%.6f,%u,%u,0x%04x,%u,%u,%u,%.3f,%d,%d,%u,%u,%u\n", now_wall, g.sfn, g.slot, g.rnti,
+              g.bwp_start, g.rb_start, g.nof_rb, g.coherence, g.hyp, g.sensed ? 1 : 0, g.ports, g.cdm, g.dmrs_add);
     }
   }
   for (const gs_dci_t& d : result.tracked_dcis) {
@@ -1445,6 +1480,54 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
           /* sensing: the grant as a single-layer PDSCH on port 1000 (its antenna-ports field
             is not known), the DM-RS symbol from the MIB, scrambled with the PCI */
           if (sensing != nullptr && sensing_scratch != nullptr && coh > 0.5f) {
+            /* What its antenna-ports field and its RRC would have said, read on air: the
+              ports on comb 0, whether comb 1 is left empty (CDM groups without data 2,
+              DM-RS 3 dB up), and the DM-RS symbols past the first one */
+            static thread_local bool gprb[SRSRAN_MAX_PRB_NR];
+            memset(gprb, 0, sizeof(gprb));
+            for (uint32_t k = 0; k < hy.nbwp && k < SRSRAN_MAX_PRB_NR; k++) {
+              const int32_t c = (int32_t)(hy.bwp_start + k) - (int32_t)first_crb;
+              if (prb[k] && c >= 0 && c < (int32_t)nprb) {
+                gprb[c] = true;
+              }
+            }
+            GsDmrsShape sh;
+            gs_dmrs_shape(ue_dl.sf_symbols[0] + dmrs_l0 * nof_sc, first_crb, gprb, nprb, g.slot, dmrs_l0, pci, &sh);
+            uint16_t ports     = 0x1;
+            bool     cdm2      = false;
+            int      dci_ports = 0;
+            gs_dmrs_decide(sh, &ports, &cdm2, &dci_ports);
+            int        add      = 0;
+            const bool     learning  = b.dmrs_n < 24;
+            if (learning || b.dmrs_add > 0) {
+              // while learning every candidate symbol, then only the UE's own pattern
+              const uint32_t cand = learning ? (1u << 5) | (1u << 7) | (1u << 8) | (1u << 11)
+                                    : b.dmrs_add == 3 ? (1u << 5) | (1u << 8) | (1u << 11)
+                                    : b.dmrs_add == 2 ? (1u << 7) | (1u << 11)
+                                                      : (1u << 11);
+              uint32_t mask3[SRSRAN_MAX_PORTS] = {cand};
+              srsran_ue_dl_nr_estimate_fft_nrscope_symbols(&ue_dl, slot, arg_scs_grid, mask3, done);
+              bool on[14] = {};
+              for (uint32_t l : {5u, 7u, 8u, 11u}) {
+                if (!(cand & (1u << l))) {
+                  continue;
+                }
+                GsDmrsShape sl;
+                gs_dmrs_shape(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, gprb, nprb, g.slot, l, pci, &sl);
+                on[l] = sl.coh0 > 0.5f;
+              }
+              const int seen = (on[5] && on[8] && on[11]) ? 3 : (on[7] && on[11]) ? 2 : on[11] ? 1 : 0;
+              if (learning) {
+                result->gs_dmrs_obs.push_back(GsDmrsObs{dd.rnti, (uint8_t)seen});
+                add = seen;
+              } else { // the UE's pattern, when this slot's PDSCH is long enough to hold it
+                const bool ok = b.dmrs_add == 3 ? (on[5] && on[8] && on[11]) : b.dmrs_add == 2 ? (on[7] && on[11]) : on[11];
+                add           = ok ? b.dmrs_add : 0;
+              }
+            }
+            g.ports    = (uint8_t)ports;
+            g.cdm      = cdm2 ? 2 : 1;
+            g.dmrs_add = (uint8_t)add;
             srsran_sch_cfg_nr_t cfg = {};
             for (uint32_t k = 0; k < hy.nbwp && k < SRSRAN_MAX_PRB_NR; k++) {
               cfg.grant.prb_idx[k] = prb[k];
@@ -1457,16 +1540,20 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
             cfg.grant.rnti                             = dd.rnti;
             cfg.grant.rnti_type                        = srsran_rnti_type_c;
             cfg.grant.dci_format                       = srsran_dci_format_nr_1_1;
-            cfg.grant.nof_layers                       = 1;
-            cfg.grant.nof_dmrs_cdm_groups_without_data = 1;
+            cfg.grant.nof_layers                       = 2; // despread as 1000+1001 (gs_dmrs_decide)
+            cfg.grant.nof_dmrs_cdm_groups_without_data = cdm2 ? 2 : 1;
+            cfg.grant.beta_dmrs                        = cdm2 ? (float)M_SQRT2 : 1.0f;
             cfg.dmrs.type                              = srsran_dmrs_sch_type_1;
             cfg.dmrs.typeA_pos      = dmrs_l0 == 3 ? srsran_dmrs_sch_typeA_pos_3 : srsran_dmrs_sch_typeA_pos_2;
-            cfg.dmrs.additional_pos = srsran_dmrs_sch_add_pos_0;
+            cfg.dmrs.additional_pos = add == 3   ? srsran_dmrs_sch_add_pos_3
+                                      : add == 2 ? srsran_dmrs_sch_add_pos_2
+                                      : add == 1 ? srsran_dmrs_sch_add_pos_1
+                                                 : srsran_dmrs_sch_add_pos_0;
             cfg.dmrs.length         = srsran_dmrs_sch_len_1;
             const nr_dmrs_placement_t place = {first_crb, hy.bwp_start, 0};
-            g.sensed = nrscope_sensing_process_grant_join(sensing, sensing_scratch, sensing_join, 0, ue_dl.sf_symbols[0],
-                                                     nprb * NRSCOPE_NSC_PER_RB_NR, &place, &cfg, -1, pci, state->sfn,
-                                                     g.slot) > 0;
+            g.sensed = nrscope_sensing_process_grant_layers(sensing, sensing_scratch, sensing_join, ports, 0,
+                                                       ue_dl.sf_symbols[0], nprb * NRSCOPE_NSC_PER_RB_NR, &place, &cfg,
+                                                       dci_ports, pci, state->sfn, g.slot) > 0;
           }
           result->gs_grants.push_back(g);
         }

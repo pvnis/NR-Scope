@@ -311,3 +311,30 @@ DCIs on the 100-UE synthetic cell). Keep the `[status]` RX peak below about -10 
 (`--gain`). The X410's reference is about -4 ppm off (`freq_offset_ppm: -4.02`).
 
 Please refer to this [wiki page](https://github.com/PrincetonUniversity/NR-Scope/wiki/1.-Introduction#output-format) for the description of log output and [FAQ](https://github.com/PrincetonUniversity/NR-Scope/wiki/7.-Usage-Recommendations-and-FAQ).
+
+### Sensing with several UEs per slot (sensing.join_grants)
+
+Every grant of a slot (regular DCI decoders and GoldenSniffer's tracked UEs) goes into one
+buffer per (chain, DM-RS ports, layer, DM-RS power) and DM-RS symbol; the worker pushes one
+snapshot per stream once the slot is decoded. Grants of different UEs are joined where they
+touch and the channel is continuous across the junction (a line through one PRB on each
+side, within its noise plus `join_max_step` of |H|). The widest run is used when it covers
+half the carrier. A cell that beamforms each UE fails that test at most junctions: it is then
+judged "precoded per UE" and UEs are no longer joined (`join_learn`). Gaps are not filled
+unless `join_max_gap_prb` > 0. In a symbol holding an SSB, the SSB's PRBs carry no PDSCH
+DM-RS: they are found by their lost coherence and taken out.
+
+Keys (sensing block): `join_grants` (true), `join_check` (true), `join_max_step` (0.3),
+`join_learn` (true), `join_max_gap_prb` (0).
+
+Read after a run: the "sensing join" lines of the log (rows kept alone / only by joining,
+junctions and the cell's verdict, gaps, SSB cuts, and the phase steps at PRB boundaries
+inside grants by CRB class: equal classes = wideband or no precoding, larger at CRB%2 or
+CRB%4 = a precoder per PRG), and `<dump>.join.csv` (one line per row: grants, coverage, used
+width, junctions, cuts, gaps, steps, segments as rnti:prb_lo-prb_hi).
+
+GoldenSniffer grants have no readable antenna-ports field: each is despread as ports
+1000+1001 (layer 0 is port 1000's channel at any rank), layer 1 pushed when seen on air,
+CDM groups without data (DM-RS power) read from comb 1, and the UE's extra DM-RS symbols
+(dmrs-AdditionalPosition) learned over its first 24 grants. `golden_sniffer_grants.csv` has
+`ports,cdm,dmrs_add` per grant.

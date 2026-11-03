@@ -65,6 +65,11 @@ extern nrscope_sensing_join_args_t nrscope_sensing_join_args;
 nrscope_sensing_join_t* nrscope_sensing_join_alloc(uint32_t grid_crb0, uint32_t n_sc_grid);
 void                    nrscope_sensing_join_free(nrscope_sensing_join_t* j);
 
+/* Where the cell's SSB sits on the grid (subcarriers k_lo..k_hi). In a symbol that holds
+   an SSB its PRBs carry no PDSCH DM-RS: those pilots are taken out of the row when they
+   are seen to have lost their coherence (no burst timing needed). */
+void nrscope_sensing_join_set_ssb(nrscope_sensing_join_t* j, int k_lo, int k_hi);
+
 /* Start a slot: forget the previous one's rows. */
 void nrscope_sensing_join_begin(nrscope_sensing_join_t* j, uint32_t sfn, uint32_t slot_idx);
 

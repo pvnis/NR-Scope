@@ -107,6 +107,12 @@ target_link_libraries(sensing_join_test srsue_phy srsran_common srsran_phy srsra
                       ${SRSUE_SOURCES} ${SRSRAN_SOURCES} ${CMAKE_THREAD_LIBS_INIT} m)
 add_test(nrscope_sensing_join sensing_join_test)
 
+# GoldenSniffer: DM-RS ports and CDM groups of a ciphered UE, read on air
+add_executable(gs_dmrs_shape_test gs_dmrs_shape_test.cc)
+target_link_libraries(gs_dmrs_shape_test srsue_phy srsran_common srsran_phy srsran_radio rrc_nr_asn1 nrscope_libs
+                      ${SRSUE_SOURCES} ${SRSRAN_SOURCES} ${CMAKE_THREAD_LIBS_INIT} m)
+add_test(nrscope_gs_dmrs_shape gs_dmrs_shape_test)
+
 # Replays a sensing.record_estimates file through the sensing pipeline, offline: the
 # recorded run's channel estimates, impairments included, through the live code.
 add_executable(sensing_offline sensing_offline.cc)
