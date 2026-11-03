@@ -447,7 +447,8 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
     a.survey_pci = g["survey_pci"].as<int32_t>();
   }
   if (g["dump_rnti"]) {
-    a.dump_rnti = (int32_t)std::stoul(g["dump_rnti"].as<std::string>(), nullptr, 0);
+    const std::string v = g["dump_rnti"].as<std::string>();
+    a.dump_rnti         = v == "all" ? -2 : (int32_t)std::stoul(v, nullptr, 0); // all: every UE
   }
   if (g["dump_file"]) {
     a.dump_file = g["dump_file"].as<std::string>();
@@ -464,7 +465,7 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
       gs_gf2_prebuild_start(a.size_min, a.size_max, first.data(), (uint32_t)first.size());
     }
     gs_csv = fopen(a.csv.c_str(), "w");
-    if (a.dump_rnti >= 0 && !a.dump_file.empty()) {
+    if (a.dump_rnti != -1 && !a.dump_file.empty()) {
       gs_dump_bin = fopen(a.dump_file.c_str(), "wb");
     }
     if (!a.survey_csv.empty()) {
@@ -1941,7 +1942,7 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
             /* dump: this UE's grant, port-1000 DM-RS per CDM pair on every DM-RS symbol it shows.
               Record: "GSD1", sfn u16, slot u8, n_sym u8, rnti u16, nprb u16, occ f32, coherence f32,
               prb mask (nprb bytes), then per symbol: l u8 and 3 * nprb complex floats. */
-            if (gs_dump_bin != nullptr && (int32_t)dd.rnti == nrscope_gs_args.dump_rnti) {
+            if (gs_dump_bin != nullptr && (nrscope_gs_args.dump_rnti == -2 || (int32_t)dd.rnti == nrscope_gs_args.dump_rnti)) {
               static thread_local cf_t  dp[14][3 * SRSRAN_MAX_PRB_NR];
               static thread_local float dt2[SRSRAN_MAX_PRB_NR];
               uint8_t                   syms[14], ns = 0;
