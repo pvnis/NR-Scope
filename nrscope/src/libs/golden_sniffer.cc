@@ -221,6 +221,8 @@ static inline float gs_re(cf_t a)
   return __real__ a;
 }
 static FILE*          gs_survey_csv = nullptr; // golden_sniffer.survey_csv
+static FILE*          gs_dump_bin   = nullptr; // golden_sniffer.dump_file (one UE's grant DM-RS)
+static std::mutex     gs_dump_mutex;
 static std::mutex     gs_survey_mutex;
 /* grants of tracked UEs: DM-RS ports (bit i = port 1000 + i), CDM groups 2, extra symbols */
 static uint64_t gs_grant_ports[4] = {}, gs_grant_cdm2 = 0, gs_grant_add[4] = {};
@@ -444,6 +446,12 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
   if (g["survey_pci"]) {
     a.survey_pci = g["survey_pci"].as<int32_t>();
   }
+  if (g["dump_rnti"]) {
+    a.dump_rnti = (int32_t)std::stoul(g["dump_rnti"].as<std::string>(), nullptr, 0);
+  }
+  if (g["dump_file"]) {
+    a.dump_file = g["dump_file"].as<std::string>();
+  }
   if (g["quiet_s"]) {
     a.quiet_s = g["quiet_s"].as<double>();
   }
@@ -456,6 +464,9 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
       gs_gf2_prebuild_start(a.size_min, a.size_max, first.data(), (uint32_t)first.size());
     }
     gs_csv = fopen(a.csv.c_str(), "w");
+    if (a.dump_rnti >= 0 && !a.dump_file.empty()) {
+      gs_dump_bin = fopen(a.dump_file.c_str(), "wb");
+    }
     if (!a.survey_csv.empty()) {
       gs_survey_csv = fopen(a.survey_csv.c_str(), "w");
       if (gs_survey_csv != nullptr) {
@@ -499,6 +510,10 @@ void golden_sniffer_report()
   if (gs_survey_csv != nullptr) {
     std::lock_guard<std::mutex> lk(gs_survey_mutex);
     fflush(gs_survey_csv);
+  }
+  if (gs_dump_bin != nullptr) {
+    std::lock_guard<std::mutex> lk(gs_dump_mutex);
+    fflush(gs_dump_bin);
   }
   const uint64_t ng = gs_grant_ports[1] + gs_grant_ports[2] + gs_grant_ports[3]; // grants with DM-RS seen
   if (ng > 0) {
@@ -1923,6 +1938,42 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
             std::nth_element(srt.begin(), srt.begin() + nprb / 10, srt.end());
             const double floor_e = srt[nprb / 10];
             g.pwr_db = ng > 0 && floor_e > 0 ? (float)(10 * log10(pg / ng / floor_e)) : 0;
+            /* dump: this UE's grant, port-1000 DM-RS per CDM pair on every DM-RS symbol it shows.
+              Record: "GSD1", sfn u16, slot u8, n_sym u8, rnti u16, nprb u16, occ f32, coherence f32,
+              prb mask (nprb bytes), then per symbol: l u8 and 3 * nprb complex floats. */
+            if (gs_dump_bin != nullptr && (int32_t)dd.rnti == nrscope_gs_args.dump_rnti) {
+              static thread_local cf_t  dp[14][3 * SRSRAN_MAX_PRB_NR];
+              static thread_local float dt2[SRSRAN_MAX_PRB_NR];
+              uint8_t                   syms[14], ns = 0;
+              for (uint32_t l = 1; l < 13; l++) {
+                GsDmrsShape sx;
+                gs_dmrs_shape(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, gp, nprb, g.slot, l, dm_nid, &sx, false);
+                if (l == dmrs_l0 || sx.coh0 > 0.5f) {
+                  gs_dmrs_rb_pairs(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, nprb, g.slot, l, dm_nid, dp[ns], dt2);
+                  syms[ns++] = (uint8_t)l;
+                }
+              }
+              const uint16_t sfn16 = (uint16_t)state->sfn, rn = dd.rnti, np16 = (uint16_t)nprb;
+              const uint8_t  sl8   = (uint8_t)g.slot;
+              const float    occf = s0.occ, cohf = s0.coh0;
+              std::lock_guard<std::mutex> lk(gs_dump_mutex);
+              fwrite("GSD1", 1, 4, gs_dump_bin);
+              fwrite(&sfn16, 2, 1, gs_dump_bin);
+              fwrite(&sl8, 1, 1, gs_dump_bin);
+              fwrite(&ns, 1, 1, gs_dump_bin);
+              fwrite(&rn, 2, 1, gs_dump_bin);
+              fwrite(&np16, 2, 1, gs_dump_bin);
+              fwrite(&occf, 4, 1, gs_dump_bin);
+              fwrite(&cohf, 4, 1, gs_dump_bin);
+              for (uint32_t c = 0; c < nprb; c++) {
+                const uint8_t v = gp[c] ? 1 : 0;
+                fwrite(&v, 1, 1, gs_dump_bin);
+              }
+              for (uint8_t i = 0; i < ns; i++) {
+                fwrite(&syms[i], 1, 1, gs_dump_bin);
+                fwrite(dp[i], sizeof(cf_t), 3 * nprb, gs_dump_bin);
+              }
+            }
             if (gs_survey_csv != nullptr) {
               static thread_local cf_t  pp[3 * SRSRAN_MAX_PRB_NR];
               static thread_local float t2x[SRSRAN_MAX_PRB_NR];

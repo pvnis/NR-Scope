@@ -103,6 +103,8 @@ struct GoldenSnifferArgs {
   std::string grants_csv;            // default: csv with _grants
   std::string survey_csv;            // per DL slot: PDSCH DM-RS seen on every symbol (offline: costs FFTs)
   int32_t     survey_pci = -1;       // and a neighbour cell's PDSCH DM-RS (its PCI), on the first DM-RS symbol
+  int32_t     dump_rnti = -1;        // survey: every grant of this UE, its port-1000 DM-RS per CDM pair, to dump_file
+  std::string dump_file;
   double   quiet_s        = 1.0;   // a blind-tracked UE silent this long starts a sweep (gone or new RNTI?)
 };
 
