@@ -876,7 +876,8 @@ int Radio::SyncandDownlinkInit()
     one thread whose delay overflows the radio. */
   ue_sync_nr_args.nof_cfo_channels = 1;
   ue_sync_nr_args.disable_cfo     = disable_cfo;
-  ue_sync_nr_args.pbch_dmrs_thr   = 0.5;
+  /* NRSCOPE_PBCH_DMRS_THR: the PBCH DM-RS correlation a decode is tried from (the CRC decides) */
+  ue_sync_nr_args.pbch_dmrs_thr   = getenv("NRSCOPE_PBCH_DMRS_THR") ? (float)atof(getenv("NRSCOPE_PBCH_DMRS_THR")) : 0.5f;
   ue_sync_nr_args.cfo_alpha       = 0.1;
   ue_sync_nr_args.recv_obj        = radio.get();
   ue_sync_nr_args.recv_callback   = slot_sync_recv_callback;

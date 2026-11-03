@@ -327,7 +327,7 @@ struct BlindUe {
   double                       shadow_since     = 0;
   /* FDRA of its DCI 1_1, found on air (gs_fdra.h): per hypothesis, the sum of the scores
     over its DL DCIs; the hypothesis kept, once it stands out */
-  float                        fdra_sum[64]     = {};
+  float                        fdra_sum[128]    = {};
   uint32_t                     fdra_n           = 0;
   int16_t                      fdra_lock        = -1;
   bool                         fdra_gave_up     = false;
@@ -349,7 +349,7 @@ struct GsDmrsObs {
 struct GsFdraObs {
   uint16_t rnti;
   uint8_t  nof;
-  float    score[64];
+  float    score[128];
 };
 
 /* A DL grant of a tracked UE, from its DCI 1_1 under the FDRA hypothesis kept */
@@ -363,6 +363,8 @@ struct GsGrant {
   uint8_t  ports;    // DM-RS ports found on air, bit i = port 1000 + i
   uint8_t  cdm;      // CDM groups without data found on air
   uint8_t  dmrs_add; // dmrs-AdditionalPosition used
+  float    occ = 0, e1 = 0, coh1 = 0; // gs_dmrs_shape: CDM-pair ratio, comb 1 power, comb 1 coherence
+  uint16_t sym_seen = 0;              // OFDM symbols where its PRBs showed DM-RS (of those tested)
 };
 
 /* An RRC PDU on an SRB, seen by the RACH decoder (headers only: the body is ciphered) */

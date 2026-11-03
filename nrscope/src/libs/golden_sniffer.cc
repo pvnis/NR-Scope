@@ -192,6 +192,8 @@ static GsFdraHyp      gs_fdra_h[GS_FDRA_MAX_HYP];
 static std::atomic<uint32_t> gs_fdra_nh{0};
 static std::once_flag gs_fdra_once;
 static FILE*          gs_grants_csv = nullptr;
+static FILE*          gs_survey_csv = nullptr; // golden_sniffer.survey_csv
+static std::mutex     gs_survey_mutex;
 /* grants of tracked UEs: DM-RS ports (bit i = port 1000 + i), CDM groups 2, extra symbols */
 static uint64_t gs_grant_ports[4] = {}, gs_grant_cdm2 = 0, gs_grant_add[4] = {};
 /* Replay (lossless file input) runs at any speed: GoldenSniffer's timers (startup, sweeps,
@@ -408,6 +410,9 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
   if (g["grants_csv"]) {
     a.grants_csv = g["grants_csv"].as<std::string>();
   }
+  if (g["survey_csv"]) {
+    a.survey_csv = g["survey_csv"].as<std::string>();
+  }
   if (g["quiet_s"]) {
     a.quiet_s = g["quiet_s"].as<double>();
   }
@@ -420,6 +425,14 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
       gs_gf2_prebuild_start(a.size_min, a.size_max, first.data(), (uint32_t)first.size());
     }
     gs_csv = fopen(a.csv.c_str(), "w");
+    if (!a.survey_csv.empty()) {
+      gs_survey_csv = fopen(a.survey_csv.c_str(), "w");
+      if (gs_survey_csv != nullptr) {
+        setvbuf(gs_survey_csv, nullptr, _IOFBF, 1 << 22);
+        fprintf(gs_survey_csv, "sfn,slot,n_dl,n_ul,rbs_comb0_sym1..13,rbs_comb1_sym1..13,l0_bitmap,l0_occ_median,"
+                               "l0_comb1_power_median,ue_nid_tests\n");
+      }
+    }
     if (a.fdra) {
       std::string gp = a.grants_csv;
       if (gp.empty()) {
@@ -430,7 +443,8 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
       gs_grants_csv = fopen(gp.c_str(), "w");
       if (gs_grants_csv != nullptr) {
         fprintf(gs_grants_csv,
-                "timestamp,sfn,slot,rnti,bwp_start_crb,rb_start,nof_rb,dmrs_coherence,hyp,sensed,ports,cdm,dmrs_add\n");
+                "timestamp,sfn,slot,rnti,bwp_start_crb,rb_start,nof_rb,dmrs_coherence,hyp,sensed,ports,cdm,dmrs_add,"
+                "occ,comb1_power,comb1_coherence,dmrs_symbols\n");
       }
     }
     if (gs_csv == nullptr) {
@@ -450,7 +464,11 @@ void golden_sniffer_report()
   }
   std::lock_guard<std::mutex> lock(gs_log_mutex);
   print_report_locked(true);
-  const uint64_t ng = gs_grant_ports[1] + gs_grant_ports[2] + gs_grant_ports[3];
+  if (gs_survey_csv != nullptr) {
+    std::lock_guard<std::mutex> lk(gs_survey_mutex);
+    fflush(gs_survey_csv);
+  }
+  const uint64_t ng = gs_grant_ports[1] + gs_grant_ports[2] + gs_grant_ports[3]; // grants with DM-RS seen
   if (ng > 0) {
     printf("GoldenSniffer grants: %lu; DM-RS ports on air: 1000 %lu, 1001 %lu, 1000+1001 %lu; CDM groups without data 2: "
            "%lu; extra DM-RS symbols pos1 %lu, pos2 %lu, pos3 %lu\n",
@@ -867,7 +885,7 @@ void golden_sniffer_update(WorkState&                   state,
       continue;
     }
     BlindUe& e = it->second;
-    for (uint32_t k = 0; k < o.nof && k < 64; k++) {
+    for (uint32_t k = 0; k < o.nof && k < GS_FDRA_MAX_HYP; k++) {
       e.fdra_sum[k] += o.score[k] > 0 ? o.score[k] : 0.0f;
     }
     e.fdra_n++;
@@ -887,11 +905,11 @@ void golden_sniffer_update(WorkState&                   state,
       if (best >= 0 && b1 >= 0.85f && b1 - b2 >= 0.1f) {
         e.fdra_lock         = (int16_t)best;
         const GsFdraHyp& hy = gs_fdra_h[best];
-        printf("GoldenSniffer: UE 0x%04x FDRA: %s%s, BWP %u PRBs at CRB %u, field at bit %u (%u bits); "
-               "%.2f of its PRBs carry DM-RS over %u DL DCIs, next hypothesis %.2f\n",
+        printf("GoldenSniffer: UE 0x%04x FDRA: %s%s, BWP %u PRBs at CRB %u, field at bit %u (%u bits), PDSCH DM-RS "
+               "N_ID %s; %.2f of its PRBs carry DM-RS over %u DL DCIs, next hypothesis %.2f\n",
                o.rnti, hy.type == 1 ? "type 1" : hy.type == 0 ? "type 0" : "dynamic",
                hy.type == 1 ? "" : (hy.rbg_cfg == 1 ? " rbg config 1" : " rbg config 2"), hy.nbwp, hy.bwp_start,
-               hy.off, hy.width, b1, e.fdra_n, b2);
+               hy.off, hy.width, hy.nid_ue ? "= its PDCCH DM-RS N_ID" : "= PCI", b1, e.fdra_n, b2);
       } else if (e.fdra_n >= 400) {
         e.fdra_gave_up = true;
         printf("GoldenSniffer: UE 0x%04x FDRA not found over %u DL DCIs (best %.2f, next %.2f): a loaded cell, or "
@@ -922,12 +940,13 @@ void golden_sniffer_update(WorkState&                   state,
     }
   }
   for (const GsGrant& g : result.gs_grants) {
-    gs_grant_ports[g.ports & 3]++;
+    gs_grant_ports[g.ports & 3]++; // 0: no DM-RS seen on its PRBs
     gs_grant_cdm2 += g.cdm == 2;
     gs_grant_add[g.dmrs_add & 3]++;
     if (gs_grants_csv != nullptr) {
-      fprintf(gs_grants_csv, "%.6f,%u,%u,0x%04x,%u,%u,%u,%.3f,%d,%d,%u,%u,%u\n", now_wall, g.sfn, g.slot, g.rnti,
-              g.bwp_start, g.rb_start, g.nof_rb, g.coherence, g.hyp, g.sensed ? 1 : 0, g.ports, g.cdm, g.dmrs_add);
+      fprintf(gs_grants_csv, "%.6f,%u,%u,0x%04x,%u,%u,%u,%.3f,%d,%d,%u,%u,%u,%.3f,%.3f,%.3f,%u\n", now_wall, g.sfn,
+              g.slot, g.rnti, g.bwp_start, g.rb_start, g.nof_rb, g.coherence, g.hyp, g.sensed ? 1 : 0, g.ports, g.cdm,
+              g.dmrs_add, g.occ, g.e1, g.coh1, g.sym_seen);
     }
   }
   for (const gs_dci_t& d : result.tracked_dcis) {
@@ -1418,12 +1437,93 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
         (trk[i] ? result->tracked_dcis : result->region_dcis).push_back(out[i]);
       }
       gs_t_track.add(1e3 * (gs_steady_s() - t_tr0));
+      /* survey: the PDSCH DM-RS on every symbol of this slot, PCI-scrambled, and each DL
+        DCI's own N_ID on the first DM-RS symbol (cell statistics, offline) */
+      if (gs_survey_csv != nullptr) {
+        uint32_t all[SRSRAN_MAX_PORTS] = {0x3ffe};
+        srsran_ue_dl_nr_estimate_fft_nrscope_symbols(&ue_dl, slot, arg_scs_grid, all, done);
+        const uint32_t           np = grid_carrier.nof_prb, sl = slot->idx % slots_per_frame;
+        static thread_local float c0[SRSRAN_MAX_PRB_NR], c1[SRSRAN_MAX_PRB_NR], oc[SRSRAN_MAX_PRB_NR],
+            q0[SRSRAN_MAX_PRB_NR], q1[SRSRAN_MAX_PRB_NR];
+        int n_dl = 0, n_ul = 0;
+        for (int i = 0; i < n; i++) {
+          (out[i].nof_bits > 0 && out[i].payload[0] == 1 ? n_dl : n_ul)++;
+        }
+        std::string line = std::to_string(state->sfn) + "," + std::to_string(sl) + "," + std::to_string(n_dl) + "," +
+                           std::to_string(n_ul);
+        uint32_t cnt1[14] = {};
+        std::string bitmap, l0_extra;
+        for (uint32_t l = 1; l < 14; l++) {
+          gs_dmrs_rb_map(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, np, sl, l, pci, c0, c1, oc, q0, q1);
+          uint32_t k0 = 0;
+          for (uint32_t c = 0; c < np; c++) {
+            k0 += c0[c] > 0.5f;
+            cnt1[l] += c1[c] > 0.5f;
+          }
+          line += "," + std::to_string(k0);
+          if (l == dmrs_l0) {
+            std::vector<float> o, p;
+            char               hx[8];
+            for (uint32_t c = 0; c < np; c += 4) {
+              uint32_t v = 0;
+              for (uint32_t b = 0; b < 4 && c + b < np; b++) {
+                v |= (c0[c + b] > 0.5f ? 1u : 0u) << (3 - b);
+              }
+              snprintf(hx, sizeof(hx), "%x", v);
+              bitmap += hx;
+            }
+            for (uint32_t c = 0; c < np; c++) {
+              if (c0[c] > 0.5f) {
+                o.push_back(oc[c]);
+                p.push_back(q0[c] > 0 ? q1[c] / q0[c] : 0);
+              }
+            }
+            auto med = [](std::vector<float>& v) {
+              if (v.empty()) {
+                return -1.0f;
+              }
+              std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+              return v[v.size() / 2];
+            };
+            char m[64];
+            snprintf(m, sizeof(m), ",%.3f,%.3f", med(o), med(p));
+            l0_extra = m;
+          }
+        }
+        for (uint32_t l = 1; l < 14; l++) {
+          line += "," + std::to_string(cnt1[l]);
+        }
+        line += "," + bitmap + l0_extra + ",";
+        for (int i = 0; i < n; i++) { // every DL DCI's own N_ID on the first DM-RS symbol
+          if (out[i].nof_bits == 0 || out[i].payload[0] != 1 || out[i].n_id == pci) {
+            continue;
+          }
+          gs_dmrs_rb_map(ue_dl.sf_symbols[0] + dmrs_l0 * nof_sc, first_crb, np, sl, dmrs_l0, out[i].n_id, c0, c1, oc,
+                         q0, q1);
+          int k = 0, lo = -1, hi = -1;
+          for (uint32_t c = 0; c < np; c++) {
+            if (c0[c] > 0.5f) {
+              k++;
+              lo = lo < 0 ? (int)c : lo;
+              hi = (int)c;
+            }
+          }
+          char e[64];
+          snprintf(e, sizeof(e), "%x:%u:%d:%d-%d;", out[i].rnti, out[i].n_id, k, lo, hi);
+          line += e;
+        }
+        std::lock_guard<std::mutex> lk(gs_survey_mutex);
+        fprintf(gs_survey_csv, "%s\n", line.c_str());
+      }
       /* FDRA and grants of the tracked UEs' DL DCIs (format identifier 1) */
       const uint32_t nh = gs_fdra_nh.load(std::memory_order_relaxed);
       if (nrscope_gs_args.fdra && nh > 0) {
         bool                            have_map = false;
         static thread_local cf_t        rb_s[SRSRAN_MAX_PRB_NR];
         static thread_local float       rb_d[SRSRAN_MAX_PRB_NR];
+        static thread_local cf_t        ue_s[SRSRAN_MAX_PRB_NR]; // the same with a UE's own N_ID
+        static thread_local float       ue_d[SRSRAN_MAX_PRB_NR];
+        uint32_t                        ue_map_nid = UINT32_MAX;
         const uint32_t                  nprb = grid_carrier.nof_prb;
         for (int i = 0; i < n; i++) {
           const gs_dci_t& dd = out[i];
@@ -1446,12 +1546,22 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
                                  slot->idx % slots_per_frame, dmrs_l0, pci, rb_s, rb_d);
             have_map = true;
           }
+          /* and the map under this UE's own PDCCH DM-RS N_ID, when it has one */
+          const bool own_nid = dd.n_id != pci;
+          if (own_nid && ue_map_nid != dd.n_id) {
+            gs_fdra_rb_coherence(ue_dl.sf_symbols[0] + dmrs_l0 * nof_sc, first_crb, nprb,
+                                 slot->idx % slots_per_frame, dmrs_l0, dd.n_id, ue_s, ue_d);
+            ue_map_nid = dd.n_id;
+          }
           if (b.fdra_lock < 0) {
             GsFdraObs o;
             o.rnti = dd.rnti;
             o.nof  = (uint8_t)nh;
             for (uint32_t k = 0; k < nh; k++) {
-              o.score[k] = gs_fdra_score(gs_fdra_h[k], dd.payload, dd.nof_bits, first_crb, nprb, rb_s, rb_d, nullptr);
+              const bool u = gs_fdra_h[k].nid_ue != 0;
+              o.score[k]   = u && !own_nid ? -1.0f // the same as its PCI twin
+                                           : gs_fdra_score(gs_fdra_h[k], dd.payload, dd.nof_bits, first_crb, nprb,
+                                                           u ? ue_s : rb_s, u ? ue_d : rb_d, nullptr);
             }
             result->gs_fdra_obs.push_back(o);
             continue;
@@ -1462,8 +1572,10 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
           if (!gs_fdra_parse(hy, dd.payload, dd.nof_bits, prb, &nof) || nof == 0) {
             continue;
           }
-          float coh = 0;
-          gs_fdra_score(hy, dd.payload, dd.nof_bits, first_crb, nprb, rb_s, rb_d, &coh);
+          float          coh    = 0;
+          const bool     use_ue = hy.nid_ue != 0 && own_nid;
+          const uint32_t dm_nid = use_ue ? dd.n_id : pci; // the PDSCH DM-RS N_ID of this UE
+          gs_fdra_score(hy, dd.payload, dd.nof_bits, first_crb, nprb, use_ue ? ue_s : rb_s, use_ue ? ue_d : rb_d, &coh);
           GsGrant g = {};
           g.rnti      = dd.rnti;
           g.sfn       = state->sfn;
@@ -1479,7 +1591,8 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
           g.nof_rb   = (uint16_t)nof;
           /* sensing: the grant as a single-layer PDSCH on port 1000 (its antenna-ports field
             is not known), the DM-RS symbol from the MIB, scrambled with the PCI */
-          if (sensing != nullptr && sensing_scratch != nullptr && coh > 0.5f) {
+          /* The DM-RS read on air for every grant with DM-RS, sensing or not (cell statistics) */
+          if (coh > 0.5f) {
             /* What its antenna-ports field and its RRC would have said, read on air: the
               ports on comb 0, whether comb 1 is left empty (CDM groups without data 2,
               DM-RS 3 dB up), and the DM-RS symbols past the first one */
@@ -1492,7 +1605,7 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
               }
             }
             GsDmrsShape sh;
-            gs_dmrs_shape(ue_dl.sf_symbols[0] + dmrs_l0 * nof_sc, first_crb, gprb, nprb, g.slot, dmrs_l0, pci, &sh);
+            gs_dmrs_shape(ue_dl.sf_symbols[0] + dmrs_l0 * nof_sc, first_crb, gprb, nprb, g.slot, dmrs_l0, dm_nid, &sh);
             uint16_t ports     = 0x1;
             bool     cdm2      = false;
             int      dci_ports = 0;
@@ -1513,7 +1626,7 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
                   continue;
                 }
                 GsDmrsShape sl;
-                gs_dmrs_shape(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, gprb, nprb, g.slot, l, pci, &sl);
+                gs_dmrs_shape(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, gprb, nprb, g.slot, l, dm_nid, &sl);
                 on[l] = sl.coh0 > 0.5f;
               }
               const int seen = (on[5] && on[8] && on[11]) ? 3 : (on[7] && on[11]) ? 2 : on[11] ? 1 : 0;
@@ -1528,6 +1641,19 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
             g.ports    = (uint8_t)ports;
             g.cdm      = cdm2 ? 2 : 1;
             g.dmrs_add = (uint8_t)add;
+            g.occ      = sh.occ;
+            g.e1       = sh.e1;
+            g.coh1     = sh.coh1;
+            g.sym_seen = (uint16_t)(1u << dmrs_l0);
+            if (learning || b.dmrs_add > 0) {
+              for (uint32_t l : {5u, 7u, 8u, 11u}) {
+                GsDmrsShape sl;
+                if (done[0] & (1u << l)) {
+                  gs_dmrs_shape(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, gprb, nprb, g.slot, l, dm_nid, &sl);
+                  g.sym_seen |= sl.coh0 > 0.5f ? (uint16_t)(1u << l) : 0;
+                }
+              }
+            }
             srsran_sch_cfg_nr_t cfg = {};
             for (uint32_t k = 0; k < hy.nbwp && k < SRSRAN_MAX_PRB_NR; k++) {
               cfg.grant.prb_idx[k] = prb[k];
@@ -1550,10 +1676,14 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
                                       : add == 1 ? srsran_dmrs_sch_add_pos_1
                                                  : srsran_dmrs_sch_add_pos_0;
             cfg.dmrs.length         = srsran_dmrs_sch_len_1;
+            cfg.dmrs.scrambling_id0_present = use_ue;
+            cfg.dmrs.scrambling_id0         = dm_nid;
             const nr_dmrs_placement_t place = {first_crb, hy.bwp_start, 0};
-            g.sensed = nrscope_sensing_process_grant_layers(sensing, sensing_scratch, sensing_join, ports, 0,
-                                                       ue_dl.sf_symbols[0], nprb * NRSCOPE_NSC_PER_RB_NR, &place, &cfg,
-                                                       dci_ports, pci, state->sfn, g.slot) > 0;
+            if (sensing != nullptr && sensing_scratch != nullptr) {
+              g.sensed = nrscope_sensing_process_grant_layers(sensing, sensing_scratch, sensing_join, ports, 0,
+                                                         ue_dl.sf_symbols[0], nprb * NRSCOPE_NSC_PER_RB_NR, &place,
+                                                         &cfg, dci_ports, pci, state->sfn, g.slot) > 0;
+            }
           }
           result->gs_grants.push_back(g);
         }

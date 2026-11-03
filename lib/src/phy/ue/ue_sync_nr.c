@@ -1,3 +1,4 @@
+#include <stdlib.h>
 /**
  * Copyright 2013-2023 Software Radio Systems Limited
  *
@@ -218,6 +219,20 @@ static int ue_sync_nr_run_find(srsran_ue_sync_nr_t* q, cf_t* buffer)
   //   return SRSRAN_ERROR;
   // }
   // printf("N_id: %u\n", test_ret.N_id);
+
+  /* NRSCOPE_SYNC_DEBUG=1: what FIND sees, for a cell found by the search that never locks */
+  {
+    static int dbg = -1, n = 0;
+    if (dbg < 0) {
+      const char* e = getenv("NRSCOPE_SYNC_DEBUG");
+      dbg           = e != NULL && e[0] == '1';
+    }
+    if (dbg && (measurements.rsrp_dB != 0.0f || (++n % 2000) == 0)) {
+      printf("SYNC_DEBUG find: snr %.1f dB cfo %.1f Hz rsrp %.1f dB delay %.2f us pbch crc %d ssb_idx %u hrf %d\n",
+             measurements.snr_dB, measurements.cfo_hz, measurements.rsrp_dB, measurements.delay_us, pbch_msg.crc,
+             pbch_msg.ssb_idx, pbch_msg.hrf);
+    }
+  }
 
   // If the PBCH message was NOT decoded, early return
   if (!pbch_msg.crc) {

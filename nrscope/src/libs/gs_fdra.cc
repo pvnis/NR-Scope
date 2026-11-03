@@ -68,6 +68,13 @@ uint32_t gs_fdra_hypotheses(uint32_t carrier_start_crb, uint32_t carrier_nprb, u
       }
     }
   }
+  // the same again with the UE's own DM-RS scrambling
+  const uint32_t n_pci = n;
+  for (uint32_t i = 0; i < n_pci && n < max_out; i++) {
+    out[n]        = out[i];
+    out[n].nid_ue = 1;
+    n++;
+  }
   return n;
 }
 
@@ -211,6 +218,46 @@ void gs_dmrs_shape(const cf_t* sym, uint32_t first_crb, const bool* prb, uint32_
   out->e1   = e0 > 0 ? (float)(e1 / e0) : 1.0f;
   out->coh0 = d0 > 0 ? (float)(std::abs(s0) / d0) : 0.0f;
   out->coh1 = d1 > 0 ? (float)(std::abs(s1) / d1) : 0.0f;
+}
+
+void gs_dmrs_rb_map(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb, uint32_t slot_idx, uint32_t l, uint32_t n_id,
+                    float* coh0, float* coh1, float* occ, float* p0, float* p1)
+{
+  static thread_local cf_t r[NRSCOPE_DMRS_MAX_PILOTS];
+  const uint32_t           m_max = (first_crb + nof_prb) * 6;
+  if (m_max > NRSCOPE_DMRS_MAX_PILOTS) {
+    return;
+  }
+  nrscope_dmrs_sequence(nrscope_dmrs_c_init(slot_idx, l, n_id, false), m_max, (float)M_SQRT1_2, r);
+  for (uint32_t c = 0; c < nof_prb; c++) {
+    std::complex<float> z0[6], z1[6];
+    double              e0 = 0, e1 = 0;
+    for (uint32_t j = 0; j < 6; j++) {
+      const std::complex<float> rr = std::conj(std::complex<float>(r[(first_crb + c) * 6 + j])) * 2.0f;
+      const std::complex<float> y0(sym[c * 12 + 2 * j]), y1(sym[c * 12 + 2 * j + 1]);
+      z0[j] = y0 * rr;
+      z1[j] = y1 * rr;
+      e0 += std::norm(y0);
+      e1 += std::norm(y1);
+    }
+    std::complex<float> s0 = 0, s1 = 0;
+    double              d0 = 0, d1 = 0, pp = 0, pm = 0;
+    for (uint32_t j = 0; j + 2 < 6; j++) {
+      s0 += z0[j] * std::conj(z0[j + 2]);
+      s1 += z1[j] * std::conj(z1[j + 2]);
+      d0 += 0.5 * (std::norm(z0[j]) + std::norm(z0[j + 2]));
+      d1 += 0.5 * (std::norm(z1[j]) + std::norm(z1[j + 2]));
+    }
+    for (uint32_t n = 0; n < 3; n++) {
+      pp += std::norm(z0[2 * n] + z0[2 * n + 1]);
+      pm += std::norm(z0[2 * n] - z0[2 * n + 1]);
+    }
+    coh0[c] = d0 > 0 ? (float)(std::abs(s0) / d0) : 0;
+    coh1[c] = d1 > 0 ? (float)(std::abs(s1) / d1) : 0;
+    occ[c]  = pp > 0 ? (float)(pm / pp) : 0;
+    p0[c]   = (float)e0;
+    p1[c]   = (float)e1;
+  }
 }
 
 void gs_dmrs_decide(const GsDmrsShape& s, uint16_t* ports, bool* cdm2, int* dci_ports)

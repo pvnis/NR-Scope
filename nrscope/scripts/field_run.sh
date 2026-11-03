@@ -9,13 +9,14 @@
 #             rx_center_freq the "GoldenSniffer: carrier ..." line suggests.
 #   --gain    rx gain (default 35); keep the "RX peak" of the [status] lines below ~-10 dBFS
 #   --secs    run length (default 300)
+#   --ppm     the X410 reference error (freq_offset_ppm; default the config's): field_scan.py prints it
 #   --sensing sensing on: the tracked UEs' grants (FDRA found on air) feed it; maps in the run dir
 # Output: <out>/<UTC date-time>_<tag>/{config.yaml, nrscope.log, golden_sniffer.csv,
 #         msg4_bytes.log, summary.txt}
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
-ssb="" pci="" center="" gain=35 secs=300 tag=cell out=$HOME/field sets=() sensing=0
+ssb="" pci="" center="" gain=35 secs=300 tag=cell out=$HOME/field sets=() sensing=0 ppm=""
 while [ $# -gt 0 ]; do
   case $1 in
     --ssb) ssb=$2; shift 2 ;;
@@ -27,6 +28,7 @@ while [ $# -gt 0 ]; do
     --out) out=$2; shift 2 ;;
     --set) sets+=("$2"); shift 2 ;;
     --sensing) sensing=1; shift ;;
+    --ppm) ppm=$2; shift 2 ;;
     *) echo "unknown option $1"; exit 1 ;;
   esac
 done
@@ -36,11 +38,13 @@ dir=$out/$(date -u +%Y%m%d_%H%M%S)_$tag
 mkdir -p "$dir"
 bin=$root/build/nrscope/src
 cfg=$dir/config.yaml
-python3 - "$root/nrscope/config/config_gs_field_x410.yaml" "$cfg" "$ssb" "$center" "$pci" "$gain" "$dir" "$sensing" "${sets[@]+"${sets[@]}"}" <<'EOF'
+python3 - "$root/nrscope/config/config_gs_field_x410.yaml" "$cfg" "$ssb" "$center" "$pci" "$gain" "$dir" "$sensing" "$ppm" "${sets[@]+"${sets[@]}"}" <<'EOF'
 import re, sys
-src, dst, ssb, center, pci, gain, d, sensing = sys.argv[1:9]
-extra = sys.argv[9:]
+src, dst, ssb, center, pci, gain, d, sensing, ppm = sys.argv[1:10]
+extra = sys.argv[10:]
 s = open(src).read()
+if ppm:
+    s = re.sub(r"(?m)^  freq_offset_ppm: [^ #\n]*", "  freq_offset_ppm: %s" % ppm, s)
 s = re.sub(r"(?m)^  ssb_freq: .*$", "  ssb_freq: %s" % ssb, s)
 s = re.sub(r"(?m)^  rx_center_freq: .*$", "  rx_center_freq: %s" % center, s)
 s = re.sub(r"(?m)^  rx_gain: .*$", "  rx_gain: %s" % gain, s)
@@ -110,7 +114,7 @@ grep -m1 "GoldenSniffer: carrier" "$dir/nrscope.log"
 while pgrep -x nrscope >/dev/null; do sleep 5; done
 cp -f msg4_bytes.log "$dir/" 2>/dev/null
 {
-  echo "ssb $ssb pci ${pci:-any} center $center gain $gain secs $secs"
+  echo "ssb $ssb pci ${pci:-any} center $center gain $gain secs $secs ppm ${ppm:-config}"
   grep -m1 -E "^MIB: " "$dir/nrscope.log"
   grep -m1 "GoldenSniffer: carrier" "$dir/nrscope.log"
   grep -oE "[0-9]+ slot\(s\) dropped so far" "$dir/nrscope.log" | tail -1

@@ -101,6 +101,7 @@ struct GoldenSnifferArgs {
   bool     soft              = true; // soft-decision error correction in the tracked decode
   bool     fdra              = true; // find the FDRA of tracked UEs on air; their grants (and sensing)
   std::string grants_csv;            // default: csv with _grants
+  std::string survey_csv;            // per DL slot: PDSCH DM-RS seen on every symbol (offline: costs FFTs)
   double   quiet_s        = 1.0;   // a blind-tracked UE silent this long starts a sweep (gone or new RNTI?)
 };
 

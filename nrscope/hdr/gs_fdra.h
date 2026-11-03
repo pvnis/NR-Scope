@@ -12,9 +12,13 @@
  * puts the allocation where DM-RS is, every time; a wrong one lands on empty PRBs some of
  * the time. The hypothesis with the best mean is kept once it stands out.
  *
- * Limits: in a fully loaded cell every PRB carries some UE's DM-RS and the hypotheses
- * cannot be told apart this way (they then never lock); PDSCH in a later slot (k0 > 0)
- * is not where it is checked; DM-RS scrambled with a scramblingID0 is not seen.
+ * Each hypothesis is tried with the PDSCH DM-RS scrambled by the PCI and by the UE's own
+ * PDCCH DM-RS N_ID (a cell that gives every UE a pdcch-DMRS-ScramblingID often gives it
+ * the same scramblingID0): then only the UE's own PRBs carry that DM-RS, loaded cell or not.
+ *
+ * Limits: in a fully loaded cell with PCI-scrambled DM-RS every PRB carries some UE's
+ * DM-RS and the hypotheses cannot be told apart this way (they then never lock); PDSCH in
+ * a later slot (k0 > 0) is not where it is checked; any other scramblingID0 is not seen.
  */
 #ifndef NRSCOPE_GS_FDRA_H
 #define NRSCOPE_GS_FDRA_H
@@ -22,7 +26,7 @@
 #include "srsran/phy/common/phy_common_nr.h"
 #include <cstdint>
 
-#define GS_FDRA_MAX_HYP 64
+#define GS_FDRA_MAX_HYP 128
 
 struct GsFdraHyp {
   uint8_t  off;       // first bit of the field (after identifier, carrier and BWP indicators)
@@ -31,6 +35,7 @@ struct GsFdraHyp {
   uint8_t  width;     // bits of the field
   uint16_t nbwp;      // BWP size, PRBs
   uint16_t bwp_start; // BWP start, CRB
+  uint8_t  nid_ue;    // PDSCH DM-RS N_ID: 0 the PCI, 1 the UE's PDCCH DM-RS N_ID (a scramblingID0)
 };
 
 /* The hypotheses of a cell: the carrier and the initial BWP (SIB1) as BWP candidates */
@@ -68,6 +73,12 @@ struct GsDmrsShape {
 };
 void gs_dmrs_shape(const cf_t* sym, uint32_t first_crb, const bool* prb, uint32_t nof_grid_prb, uint32_t slot_idx,
                    uint32_t l, uint32_t n_id, GsDmrsShape* out);
+
+/* Per CRB of one symbol (CRB first_crb + c at grid subcarrier 12 c), DM-RS type 1 with
+   N_ID n_id: coherence of comb 0 and comb 1 (|sum z_j z*_j+2| / power, ~1 where that DM-RS
+   is), the CDM-pair ratio of comb 0 (gs_dmrs_shape's occ) and the power of each comb. */
+void gs_dmrs_rb_map(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb, uint32_t slot_idx, uint32_t l, uint32_t n_id,
+                    float* coh0, float* coh1, float* occ, float* p0, float* p1);
 
 /* What the shape says: the ports seen on comb 0 (bit i = port 1000 + i; 0x1 when only
    1000 is, 0x2 only 1001, 0x3 both), CDM groups without data 2, and the antenna-ports
