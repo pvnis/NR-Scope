@@ -25,6 +25,8 @@
 
 #include "srsran/phy/common/phy_common_nr.h"
 #include <cstdint>
+#include <algorithm>
+#include <cstring>
 
 #define GS_FDRA_MAX_HYP 128
 
@@ -97,6 +99,18 @@ void gs_dmrs_rb_map(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb, uint3
    coherence per CRB (CDM group 0 at k = 0, 1, 6, 7) into coh2, for telling the types apart. */
 void gs_dmrs_rb_pairs(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb, uint32_t slot_idx, uint32_t l,
                       uint32_t n_id, cf_t* p, float* coh2);
+
+/* NZP CSI-RS on one symbol, any configuration (TS 38.211 7.4.1.5): its sequence, c_init =
+   (2^10 (14 n_s + l + 1)(2 n_ID + 1) + n_ID) mod 2^31, indexed from CRB 0 by
+   m' = floor(n alpha) + k' + floor(kbar rho / 12). For every subcarrier c of the PRB and
+   every mapping that puts a CSI-RS RE there, the coherence across neighbouring PRBs of
+   y conj(r): coh[c][0] one port density 1 (m = n), [1] a frequency-CDM pair starting on
+   an even subcarrier (m = 2n + k'), [2] on an odd one, [3] density 3 as the TRS
+   (m = 3n + c / 4, 4 subcarriers apart). Noise gives ~1/sqrt(PRBs).
+   pr[c]: power of subcarrier c against the rest of its PRB, over the PRBs that carry
+   anything: ~0 on REs left empty inside the PDSCH (zero-power CSI-RS, CSI-IM). */
+void gs_csirs_scan(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb, uint32_t slot_idx, uint32_t l, uint32_t n_id,
+                   float coh[12][4], float pr[12]);
 
 /* What the shape says: the ports seen on comb 0 (bit i = port 1000 + i; 0x1 when only
    1000 is, 0x2 only 1001, 0x3 both), CDM groups without data 2, and the antenna-ports

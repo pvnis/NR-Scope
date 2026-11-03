@@ -60,3 +60,28 @@ D={"n_prb":N,"slots":slots,"grants":grants,"ues":ues,"sym":M,
    "n_slots":len(slots),"span":max(s[0] for s in slots)+1}
 json.dump(D,open(O+"/viz.json","w"),separators=(",",":"))
 print("slots",len(slots),"grants",len(grants),"ues",len(ues),"gaps",len(gaps),"bytes",len(json.dumps(D,separators=(",",":"))))
+
+# CSI-RS per slot: TRS (sym 4/8 from sc 2), NZP CSI-RS on sym 13 sc 0-7, CSI-IM (empty 8-11 on 12/13)
+csi_rows={}
+for r in rows:
+    if len(r)<40: continue
+    k=(int(r[0]),int(r[1])); trs=0; csi=0; zp=0
+    for e in r[39].split(";"):
+        f=e.split(":")
+        if len(f)<4: continue
+        if f[0]=="z":
+            if f[1] in ("12","13") and 8<=int(f[2])<=11 and float(f[3])<0.2: zp+=1
+        elif float(f[3])>0.6:
+            if f[0] in ("4","8") and f[1]=="2" and f[2]=="3": trs=1
+            if f[0]=="13" and int(f[1])<=7 and f[2]=="1": csi+=1
+    csi_rows[k]=(trs,int(csi>=4),int(zp>=3))
+for s in D["slots"]:
+    t=csi_rows.get((s[1],s[2]),(0,0,0)); s[6]=t[0]; s+= [t[1],t[2]]
+D["csi_table"]=[
+ ["TRS (tracking CSI-RS)","4 and 8","2, 6, 10 (every 4th)","1 port, density 3","slots 5 and 6 of every 40 (20 ms)"],
+ ["NZP CSI-RS for CSI","13","0 to 7 (4 CDM pairs)","8 ports, frequency CDM2","mostly every 20 slots, offsets 1, 10, 11"],
+ ["CSI-IM","12","8 to 11","4 empty REs","every 10 slots, offsets 1 and 2"],
+ ["CSI-IM","13","8 to 11","4 empty REs","every 80 slots, offsets 0, 10, 20"],
+ ["Empty REs beside the TRS","4 and 8","1, 5, 9","rate matching","with the TRS, slots 5 and 6 of every 40"]]
+json.dump(D,open(O+"/viz.json","w"),separators=(",",":"))
+print("csi flags: trs %d csi %d zp %d"%tuple(sum(s[i] for s in D["slots"]) for i in (6,7,8)))

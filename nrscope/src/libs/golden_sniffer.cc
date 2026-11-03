@@ -459,7 +459,7 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
         setvbuf(gs_survey_csv, nullptr, _IOFBF, 1 << 22);
         fprintf(gs_survey_csv, "sfn,slot,n_dl,n_ul,rbs_comb0_sym1..13,rbs_comb1_sym1..13,l0_bitmap,l0_occ_median,"
                                "l0_comb1_power_median,l0_bitmap08,l0_type2_rbs,step_inside,step_crb4,step_crb2,"
-                               "step_odd (n:deg:dB),ue_nid_tests\n");
+                               "step_odd (n:deg:dB),csi_rs,ue_nid_tests\n");
       }
     }
     if (a.fdra) {
@@ -1638,7 +1638,27 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
         for (uint32_t l = 1; l < 14; l++) {
           line += "," + std::to_string(cnt1[l]);
         }
-        line += "," + bitmap + l0_extra + ",";
+        /* CSI-RS: every symbol and subcarrier, the mappings over 0.3 coherence (l:c:mapping:coh),
+          and the REs left empty inside the PDSCH (z:l:c:power share) */
+        std::string csi;
+        for (uint32_t l = 1; l < 14; l++) {
+          float co[12][4], pz[12];
+          gs_csirs_scan(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, np, sl, l, pci, co, pz);
+          char e[48];
+          for (uint32_t c = 0; c < 12; c++) {
+            for (uint32_t h = 0; h < 4; h++) {
+              if (co[c][h] > 0.3f) {
+                snprintf(e, sizeof(e), "%s%u:%u:%u:%.2f", csi.empty() ? "" : ";", l, c, h, co[c][h]);
+                csi += e;
+              }
+            }
+            if (pz[c] < 0.25f) {
+              snprintf(e, sizeof(e), "%sz:%u:%u:%.2f", csi.empty() ? "" : ";", l, c, pz[c]);
+              csi += e;
+            }
+          }
+        }
+        line += "," + bitmap + l0_extra + "," + csi + ",";
         for (int i = 0; i < n; i++) { // every DL DCI's own N_ID on the first DM-RS symbol
           if (out[i].nof_bits == 0 || out[i].payload[0] != 1 || out[i].n_id == pci) {
             continue;

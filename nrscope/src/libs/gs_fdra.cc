@@ -297,6 +297,78 @@ void gs_dmrs_rb_pairs(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb, uin
   }
 }
 
+void gs_csirs_scan(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb, uint32_t slot_idx, uint32_t l, uint32_t n_id,
+                   float coh[12][4], float pr[12])
+{
+  static thread_local cf_t r[3 * 276 + 8];
+  const uint32_t           nm = 3 * (first_crb + nof_prb) + 4;
+  for (uint32_t c = 0; c < 12; c++) {
+    for (uint32_t h = 0; h < 4; h++) {
+      coh[c][h] = 0;
+    }
+    pr[c] = 1;
+  }
+  if (nm > sizeof(r) / sizeof(r[0])) {
+    return;
+  }
+  const uint64_t cinit = ((1ULL << 10) * (14ULL * slot_idx + l + 1) * (2ULL * n_id + 1) + n_id) % (1ULL << 31);
+  nrscope_dmrs_sequence((uint32_t)cinit, nm, (float)M_SQRT1_2, r);
+  for (uint32_t c = 0; c < 12; c++) {
+    for (uint32_t h = 0; h < 4; h++) {
+      if (h == 3 && c >= 4) {
+        continue; // the TRS from its first RE: c, c + 4, c + 8
+      }
+      std::complex<float> s = 0, prev = 0;
+      double              d = 0, pp = 0;
+      bool                have = false;
+      for (uint32_t q = 0; q < nof_prb; q++) {
+        const uint32_t n = first_crb + q;
+        for (uint32_t j = 0; j < (h == 3 ? 3u : 1u); j++) {
+          const uint32_t k = h == 3 ? c + 4 * j : c;
+          uint32_t       m = h == 0 ? n : h == 1 ? 2 * n + (c & 1) : h == 2 ? 2 * n + ((c + 1) & 1) : 3 * n + j;
+          const std::complex<float> z =
+              std::complex<float>(sym[q * 12 + k]) * std::conj(std::complex<float>(r[m])) * 2.0f;
+          const double p = std::norm(z);
+          if (have) {
+            s += z * std::conj(prev);
+            d += 0.5 * (p + pp);
+          }
+          prev = z, pp = p, have = true;
+        }
+      }
+      coh[c][h] = d > 0 ? (float)(std::abs(s) / d) : 0;
+    }
+  }
+  // empty REs inside what is transmitted
+  double ec[12] = {}, er = 0;
+  uint32_t nrb = 0;
+  for (uint32_t q = 0; q < nof_prb; q++) {
+    double e[12], tot = 0;
+    for (uint32_t c = 0; c < 12; c++) {
+      e[c] = std::norm(std::complex<float>(sym[q * 12 + c]));
+      tot += e[c];
+    }
+    if (tot <= 0) {
+      continue;
+    }
+    // a PRB counts when most of its REs carry power (its median above a tenth of its mean)
+    double srt[12];
+    memcpy(srt, e, sizeof(srt));
+    std::nth_element(srt, srt + 6, srt + 12);
+    if (srt[6] < 0.1 * tot / 12) {
+      continue;
+    }
+    for (uint32_t c = 0; c < 12; c++) {
+      ec[c] += e[c];
+    }
+    er += tot / 12;
+    nrb++;
+  }
+  for (uint32_t c = 0; c < 12; c++) {
+    pr[c] = nrb > 0 && er > 0 ? (float)(ec[c] / er) : 1;
+  }
+}
+
 void gs_dmrs_decide(const GsDmrsShape& s, uint16_t* ports, bool* cdm2, int* dci_ports)
 {
   // a second layer 11 dB under the first, or more, is left out (it is noise to a map)
