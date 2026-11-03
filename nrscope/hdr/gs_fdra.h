@@ -74,7 +74,7 @@ struct GsDmrsShape {
   float occ, e1, coh1, coh0;
 };
 void gs_dmrs_shape(const cf_t* sym, uint32_t first_crb, const bool* prb, uint32_t nof_grid_prb, uint32_t slot_idx,
-                   uint32_t l, uint32_t n_id, GsDmrsShape* out);
+                   uint32_t l, uint32_t n_id, GsDmrsShape* out, bool n_scid = false);
 
 /* Lift of one hypothesis for one DCI: how much more often its PRBs carry DM-RS than the
    slot's PRBs do, (precision - f) / (1 - f), with occ[c] the strict per-CRB DM-RS map of

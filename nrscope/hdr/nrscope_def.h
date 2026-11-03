@@ -368,6 +368,10 @@ struct GsGrant {
   uint8_t  cdm;      // CDM groups without data found on air
   uint8_t  dmrs_add; // dmrs-AdditionalPosition used
   float    occ = 0, e1 = 0, coh1 = 0; // gs_dmrs_shape: CDM-pair ratio, comb 1 power, comb 1 coherence
+  float    coh0_s1 = 0, coh1_s1 = 0;  // the same DM-RS with n_SCID = 1, comb 0 and comb 1
+  float    pwr_db = 0;                // power on its PRBs (DM-RS symbol) over the slot's quietest PRBs, dB
+  int32_t  blind_nid = -1;            // survey only: for a grant with energy but no DM-RS of ours, the
+  float    blind_coh = 0;             //   PCI (0-1007) whose DM-RS fits its PRBs best, and how well
   uint16_t sym_seen = 0;              // OFDM symbols where its PRBs showed DM-RS (of those tested)
   uint8_t  nruns    = 0;              // its PRBs as runs (BWP-relative): type 0 need not be contiguous
   uint16_t runs[2 * 18] = {};         // first, last of each

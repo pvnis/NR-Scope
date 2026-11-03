@@ -441,6 +441,9 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
   if (g["survey_csv"]) {
     a.survey_csv = g["survey_csv"].as<std::string>();
   }
+  if (g["survey_pci"]) {
+    a.survey_pci = g["survey_pci"].as<int32_t>();
+  }
   if (g["quiet_s"]) {
     a.quiet_s = g["quiet_s"].as<double>();
   }
@@ -473,7 +476,7 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
       if (gs_grants_csv != nullptr) {
         fprintf(gs_grants_csv,
                 "timestamp,sfn,slot,rnti,bwp_start_crb,rb_start,nof_rb,dmrs_coherence,hyp,sensed,ports,cdm,dmrs_add,"
-                "occ,comb1_power,comb1_coherence,dmrs_symbols,prb_runs\n");
+                "occ,comb1_power,comb1_coherence,dmrs_symbols,prb_runs,coh_comb0_scid1,coh_comb1_scid1,power_over_floor_db,blind_pci,blind_pci_coh\n");
       }
     }
     if (gs_csv == nullptr) {
@@ -1037,6 +1040,8 @@ void golden_sniffer_update(WorkState&                   state,
       fprintf(gs_grants_csv, "%.6f,%u,%u,0x%04x,%u,%u,%u,%.3f,%d,%d,%u,%u,%u,%.3f,%.3f,%.3f,%u,%s\n", now_wall, g.sfn,
               g.slot, g.rnti, g.bwp_start, g.rb_start, g.nof_rb, g.coherence, g.hyp, g.sensed ? 1 : 0, g.ports, g.cdm,
               g.dmrs_add, g.occ, g.e1, g.coh1, g.sym_seen, rs.c_str());
+      fseek(gs_grants_csv, -1, SEEK_CUR);
+      fprintf(gs_grants_csv, ",%.3f,%.3f,%.1f,%d,%.3f\n", g.coh0_s1, g.coh1_s1, g.pwr_db, g.blind_nid, g.blind_coh);
     }
   }
   for (const gs_dci_t& d : result.tracked_dcis) {
@@ -1682,6 +1687,22 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
           line += e;
         }
         line += "," + line_tail;
+        /* a neighbour cell's PDSCH DM-RS on the first DM-RS symbol: strict bitmap */
+        if (nrscope_gs_args.survey_pci >= 0) {
+          gs_dmrs_rb_map(ue_dl.sf_symbols[0] + dmrs_l0 * nof_sc, first_crb, np, sl, dmrs_l0,
+                         (uint32_t)nrscope_gs_args.survey_pci, c0, c1, oc, q0, q1);
+          std::string bmn;
+          char        hx2[8];
+          for (uint32_t c = 0; c < np; c += 4) {
+            uint32_t v = 0;
+            for (uint32_t b = 0; b < 4 && c + b < np; b++) {
+              v |= (c0[c + b] > 0.8f ? 1u : 0u) << (3 - b);
+            }
+            snprintf(hx2, sizeof(hx2), "%x", v);
+            bmn += hx2;
+          }
+          line += "," + bmn;
+        }
         std::lock_guard<std::mutex> lk(gs_survey_mutex);
         fprintf(gs_survey_csv, "%s\n", line.c_str());
       }
@@ -1785,6 +1806,57 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
           }
           /* sensing: the grant as a single-layer PDSCH on port 1000 (its antenna-ports field
             is not known), the DM-RS symbol from the MIB, scrambled with the PCI */
+          /* every grant, on its PRBs: the DM-RS with n_SCID = 1 too (MU-MIMO pairs are told apart by
+            it) on both combs, to see what a grant whose n_SCID 0 comb 0 DM-RS does not show carries */
+          {
+            static thread_local bool gp[SRSRAN_MAX_PRB_NR];
+            memset(gp, 0, sizeof(gp));
+            for (uint32_t k = 0; k < hy.nbwp && k < SRSRAN_MAX_PRB_NR; k++) {
+              const int32_t c = (int32_t)(hy.bwp_start + k) - (int32_t)first_crb;
+              if (prb[k] && c >= 0 && c < (int32_t)nprb) {
+                gp[c] = true;
+              }
+            }
+            GsDmrsShape s0, s1;
+            gs_dmrs_shape(ue_dl.sf_symbols[0] + dmrs_l0 * nof_sc, first_crb, gp, nprb, g.slot, dmrs_l0, dm_nid, &s0, false);
+            gs_dmrs_shape(ue_dl.sf_symbols[0] + dmrs_l0 * nof_sc, first_crb, gp, nprb, g.slot, dmrs_l0, dm_nid, &s1, true);
+            g.coh1    = s0.coh1;
+            g.coh0_s1 = s1.coh0;
+            g.coh1_s1 = s1.coh1;
+            /* power: its PRBs against the 10% quietest PRBs of the slot (the floor) */
+            static thread_local float pr[SRSRAN_MAX_PRB_NR];
+            const cf_t*               y = ue_dl.sf_symbols[0] + dmrs_l0 * nof_sc;
+            double                    pg = 0;
+            uint32_t                  ng = 0;
+            for (uint32_t c = 0; c < nprb; c++) {
+              double e = 0;
+              for (uint32_t k = 0; k < 12; k++) {
+                e += (double)(__real__ y[12 * c + k] * __real__ y[12 * c + k] + __imag__ y[12 * c + k] * __imag__ y[12 * c + k]);
+              }
+              pr[c] = (float)e;
+              if (gp[c]) {
+                pg += e;
+                ng++;
+              }
+            }
+            std::vector<float> srt(pr, pr + nprb);
+            std::nth_element(srt.begin(), srt.begin() + nprb / 10, srt.end());
+            const double floor_e = srt[nprb / 10];
+            g.pwr_db = ng > 0 && floor_e > 0 ? (float)(10 * log10(pg / ng / floor_e)) : 0;
+            /* survey: energy there but none of our DM-RS: whose is it? every PCI tried */
+            static std::atomic<int> blind_left{600};
+            if (gs_survey_csv != nullptr && g.pwr_db > 6 && s0.coh0 < 0.4f && blind_left.load() > 0) {
+              blind_left--;
+              for (uint32_t nid = 0; nid < 1008; nid++) {
+                GsDmrsShape sb;
+                gs_dmrs_shape(y, first_crb, gp, nprb, g.slot, dmrs_l0, nid, &sb, false);
+                if (sb.coh0 > g.blind_coh) {
+                  g.blind_coh = sb.coh0;
+                  g.blind_nid = (int32_t)nid;
+                }
+              }
+            }
+          }
           /* The DM-RS read on air for every grant with DM-RS, sensing or not (cell statistics) */
           if (coh > 0.5f) {
             /* What its antenna-ports field and its RRC would have said, read on air: the

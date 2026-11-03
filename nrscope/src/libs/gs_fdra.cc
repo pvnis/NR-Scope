@@ -185,7 +185,7 @@ void gs_fdra_rb_coherence(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb,
 }
 
 void gs_dmrs_shape(const cf_t* sym, uint32_t first_crb, const bool* prb, uint32_t nof_grid_prb, uint32_t slot_idx,
-                   uint32_t l, uint32_t n_id, GsDmrsShape* out)
+                   uint32_t l, uint32_t n_id, GsDmrsShape* out, bool n_scid)
 {
   *out = {0, 1, 0, 0};
   static thread_local cf_t r[NRSCOPE_DMRS_MAX_PILOTS];
@@ -193,7 +193,7 @@ void gs_dmrs_shape(const cf_t* sym, uint32_t first_crb, const bool* prb, uint32_
   if (m_max > NRSCOPE_DMRS_MAX_PILOTS) {
     return;
   }
-  nrscope_dmrs_sequence(nrscope_dmrs_c_init(slot_idx, l, n_id, false), m_max, (float)M_SQRT1_2, r);
+  nrscope_dmrs_sequence(nrscope_dmrs_c_init(slot_idx, l, n_id, n_scid), m_max, (float)M_SQRT1_2, r);
   double              pp = 0, pm = 0, e0 = 0, e1 = 0, d0 = 0, d1 = 0;
   std::complex<float> s0 = 0, s1 = 0;
   for (uint32_t c = 0; c < nof_grid_prb; c++) {
