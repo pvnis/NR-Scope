@@ -1462,7 +1462,7 @@ int DCIDecoder::DecodeandParseDCIfromSlot(srsran_slot_cfg_t*                   s
                 is triggered by the last one, and the alignment hands the others the
                 correction chain 0's symbols got (nrscope_sensing_process_grant). */
               for (uint32_t a = 0; a < ue_dl_grid.nof_rx_antennas; a++) {
-                nrscope_sensing_process_grant(sensing, sensing_scratch, a, ue_dl_grid.sf_symbols[a],
+                nrscope_sensing_process_grant_join(sensing, sensing_scratch, sensing_join, a, ue_dl_grid.sf_symbols[a],
                                               grid_carrier.nof_prb * SRSRAN_NRE, &place, &pdsch_cfg, (int)d.ports,
                                               state->cs_ret.ssb_res.N_id, state->sfn,
                                               SRSRAN_SLOT_NR_MOD(carrier_dl.scs, slot->idx));

@@ -1464,7 +1464,7 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
             cfg.dmrs.additional_pos = srsran_dmrs_sch_add_pos_0;
             cfg.dmrs.length         = srsran_dmrs_sch_len_1;
             const nr_dmrs_placement_t place = {first_crb, hy.bwp_start, 0};
-            g.sensed = nrscope_sensing_process_grant(sensing, sensing_scratch, 0, ue_dl.sf_symbols[0],
+            g.sensed = nrscope_sensing_process_grant_join(sensing, sensing_scratch, sensing_join, 0, ue_dl.sf_symbols[0],
                                                      nprb * NRSCOPE_NSC_PER_RB_NR, &place, &cfg, -1, pci, state->sfn,
                                                      g.slot) > 0;
           }

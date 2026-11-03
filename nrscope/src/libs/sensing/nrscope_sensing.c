@@ -17,6 +17,7 @@
 #include "nrscope/hdr/sensing/nr_ue_sensing.h"
 #include "nrscope/hdr/sensing/nr_ue_sensing_align.h"
 #include "nrscope/hdr/sensing/nrscope_sensing_record.h"
+#include "nrscope/hdr/sensing/nrscope_sensing_join.h"
 #include "nrscope/hdr/sensing/nr_ue_tdd_detect.h"
 #include "srsran/phy/ch_estimation/dmrs_sch.h"
 #include "srsran/phy/utils/vector.h"
@@ -1719,9 +1720,49 @@ int nrscope_sensing_push_estimates(nrscope_sensing_t* s,
   return __builtin_popcount(used);
 }
 
+int nrscope_sensing_push_recorded(nrscope_sensing_t* s,
+                                  uint32_t           aarx,
+                                  uint16_t           ports,
+                                  int                layer,
+                                  int                n_layers,
+                                  uint32_t           sfn,
+                                  uint32_t           slot_idx,
+                                  uint64_t           slot_abs,
+                                  uint16_t           dmrs_mask,
+                                  const cf_t*        H,
+                                  const bool*        valid,
+                                  uint32_t           n_sc_grid)
+{
+  if (s == NULL) {
+    return 0;
+  }
+  if (s->args.record_estimates[0] != 0) {
+    rec_grant(s, aarx, ports, layer, n_layers, sfn, slot_idx, slot_abs, dmrs_mask, H, valid, n_sc_grid);
+  }
+  return nrscope_sensing_push_estimates(s, aarx, ports, layer, n_layers, sfn, slot_idx, slot_abs, dmrs_mask, H, valid,
+                                        n_sc_grid);
+}
+
 int nrscope_sensing_process_grant(nrscope_sensing_t*          s,
                                   nrscope_sensing_scratch_t*  sc,
                                   uint32_t                    aarx,
+                                  const cf_t*                 grid,
+                                  uint32_t                    n_sc_grid,
+                                  const nr_dmrs_placement_t*  place,
+                                  const srsran_sch_cfg_nr_t*  cfg,
+                                  int                         dci_ports,
+                                  uint32_t                    pci,
+                                  uint32_t                    sfn,
+                                  uint32_t                    slot_idx)
+{
+  return nrscope_sensing_process_grant_join(s, sc, NULL, aarx, grid, n_sc_grid, place, cfg, dci_ports, pci, sfn,
+                                            slot_idx);
+}
+
+int nrscope_sensing_process_grant_join(nrscope_sensing_t*          s,
+                                       nrscope_sensing_scratch_t*  sc,
+                                       nrscope_sensing_join_t*     join,
+                                       uint32_t                    aarx,
                                   const cf_t*                 grid,
                                   uint32_t                    n_sc_grid,
                                   const nr_dmrs_placement_t*  place,
@@ -1774,11 +1815,19 @@ int nrscope_sensing_process_grant(nrscope_sensing_t*          s,
       nr_ue_dmrs_estimate_symbol(&lay, layer, cinit, &cfg->grant, place, &grid[(size_t)l * n_sc_grid], (int)n_sc_grid,
                                  &sc->H[(size_t)l * n_sc_grid], &sc->valid[(size_t)l * n_sc_grid]);
     }
-    if (s->args.record_estimates[0] != 0) {
-      rec_grant(s, aarx, ports, layer, lay.n_ports, sfn, slot_idx, slot_abs, dmrs_mask, sc->H, sc->valid, n_sc_grid);
+    /* sensing.join_grants: into this slot's buffer, pushed with the slot's other grants
+      once all of them are decoded (nrscope_sensing_join.h) */
+    if (join != NULL) {
+      nrscope_sensing_join_set_context(join, s);
+      if (nrscope_sensing_join_add(join, aarx, ports, layer, lay.n_ports, cfg->grant.beta_dmrs, (uint16_t)cfg->grant.rnti,
+                                   dmrs_mask, sc->H, sc->valid, n_sc_grid, place->grid_crb0, sfn, slot_idx,
+                                   slot_abs)) {
+        n_pushed++;
+        continue;
+      }
     }
-    n_pushed += nrscope_sensing_push_estimates(s, aarx, ports, layer, lay.n_ports, sfn, slot_idx, slot_abs, dmrs_mask,
-                                               sc->H, sc->valid, n_sc_grid);
+    n_pushed += nrscope_sensing_push_recorded(s, aarx, ports, layer, lay.n_ports, sfn, slot_idx, slot_abs, dmrs_mask,
+                                              sc->H, sc->valid, n_sc_grid);
   }
 
   return n_pushed;

@@ -69,6 +69,7 @@ public:
   // Sensing on the same grid, when the yaml's sensing block enables it
   struct nrscope_sensing_s*         sensing         = nullptr;
   struct nrscope_sensing_scratch_s* sensing_scratch = nullptr;
+  struct nrscope_sensing_join_s*    sensing_join    = nullptr; // the worker's slot buffer, or none
 
   srsran_dci_dl_nr_t* dci_dl;
   /* Which PDCCH DM-RS scrambling ID the CORESET channel estimates currently hold,

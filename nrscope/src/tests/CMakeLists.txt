@@ -100,6 +100,13 @@ target_link_libraries(tdd_detect_test nrscope_libs
 add_test(nrscope_tdd_detect tdd_detect_test)
 add_test(nrscope_sensing_selftest sensing_selftest)
 
+# sensing.join_grants: every grant of a slot into one snapshot per stream (rows bit exact,
+# continuity check statistics, and end to end through the maps)
+add_executable(sensing_join_test sensing_join_test.c)
+target_link_libraries(sensing_join_test srsue_phy srsran_common srsran_phy srsran_radio rrc_nr_asn1 nrscope_libs
+                      ${SRSUE_SOURCES} ${SRSRAN_SOURCES} ${CMAKE_THREAD_LIBS_INIT} m)
+add_test(nrscope_sensing_join sensing_join_test)
+
 # Replays a sensing.record_estimates file through the sensing pipeline, offline: the
 # recorded run's channel estimates, impairments included, through the live code.
 add_executable(sensing_offline sensing_offline.cc)

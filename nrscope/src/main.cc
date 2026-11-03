@@ -11,6 +11,7 @@
 #include "nrscope/hdr/load_config.h"
 #include "nrscope/hdr/golden_sniffer.h"
 #include "nrscope/hdr/sensing/nrscope_sensing.h"
+#include "nrscope/hdr/sensing/nrscope_sensing_join.h"
 
 #include "srsran/common/band_helper.h"
 #include "srsran/phy/common/phy_common_nr.h"
@@ -73,6 +74,7 @@ int main(int argc, char** argv){
     }
     // the estimates still queued for sensing.record_estimates, before _exit drops them
     nrscope_sensing_record_close();
+    nrscope_sensing_join_report();
     golden_sniffer_report();
     /* _exit skips the library destructors, srsRAN's FFTW wisdom export among them: every
       run then measured every FFT plan again, GoldenSniffer's full-carrier ones inside the

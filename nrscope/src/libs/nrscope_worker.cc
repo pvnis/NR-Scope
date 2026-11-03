@@ -417,6 +417,25 @@ void NRScopeWorker::Run()
           std::thread{&RachDecoder::DecodeandParseMS4fromSlot, &rach_decoder, &slot, &worker_state, &slot_result};
     }
 
+    /* sensing.join_grants: the grants of this slot, from GoldenSniffer and every DCI
+      thread, go into one buffer, pushed once all of them are in (after the joins below) */
+    if (nrscope_sensing_args.enable && nrscope_sensing_join_args.enable && sensing_join == nullptr &&
+        worker_state.sib1_found) {
+      const auto& c =
+          worker_state.sib1.serving_cell_cfg_common.dl_cfg_common.freq_info_dl.scs_specific_carrier_list[0];
+      sensing_join = nrscope_sensing_join_alloc(c.offset_to_carrier, c.carrier_bw * NRSCOPE_NSC_PER_RB_NR);
+    }
+    const bool join_slot = sensing_join != nullptr && !uplink_only;
+    if (join_slot) {
+      gs_decoder.sensing_join = sensing_join;
+      for (auto& d : dci_decoders) {
+        if (d) {
+          d->sensing_join = sensing_join;
+        }
+      }
+      nrscope_sensing_join_begin(sensing_join, outcome.sfn, slot.idx);
+    }
+
     /* GoldenSniffer: demodulate and queue for its own searcher threads, never waited for */
     if (gs_decoder.ready && !uplink_only) {
       gs_decoder.Submit(&slot, &worker_state, &slot_result);
@@ -460,6 +479,10 @@ void NRScopeWorker::Run()
 
     if (rach_thread.joinable()) {
       rach_thread.join();
+    }
+
+    if (join_slot) {
+      nrscope_sensing_join_flush(sensing_join, nullptr);
     }
 
     if (worker_state.dci_inited && !uplink_only) {

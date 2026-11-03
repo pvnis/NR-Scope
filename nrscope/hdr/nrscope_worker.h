@@ -6,6 +6,8 @@
 #include "nrscope/hdr/sibs_decoder.h"
 #include "nrscope/hdr/dci_decoder.h"
 #include "nrscope/hdr/golden_sniffer.h"
+#include "nrscope/hdr/sensing/nrscope_sensing.h"
+#include "nrscope/hdr/sensing/nrscope_sensing_join.h"
 
 namespace NRScopeTask{
 
@@ -26,6 +28,9 @@ public:
   GoldenSnifferDecoder gs_decoder;
   bool                 gs_inited = false;
   bool                 dci_init_failed = false; // InitDCIDecoders failed: do not retry every slot
+  /* sensing.join_grants: this worker's slot buffer, every grant of a slot into one
+    snapshot per stream (nrscope_sensing_join.h). Made once SIB1 places the carrier. */
+  nrscope_sensing_join_t* sensing_join = nullptr;
   std::vector<std::unique_ptr <DCIDecoder> > dci_decoders;
   bool initializing;
 

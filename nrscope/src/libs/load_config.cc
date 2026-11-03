@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "nrscope/hdr/sensing/nrscope_sensing.h"
+#include "nrscope/hdr/sensing/nrscope_sensing_join.h"
 #include "nrscope/hdr/ul_dmrs.h"
 #include "nrscope/hdr/golden_sniffer.h"
 #include "srsran/common/band_helper.h"
@@ -130,6 +131,19 @@ void load_sensing_config(const YAML::Node& config_yaml)
       nr_sensing_los_margin_bins = sn["los_margin_bins"].as<int>();
       std::cout << "    sensing.los_margin_bins: " << nr_sensing_los_margin_bins << std::endl;
     }
+    // every grant of a slot into one snapshot per stream (nrscope_sensing_join.h)
+    flag("join_grants", &nrscope_sensing_join_args.enable);
+    flag("join_check", &nrscope_sensing_join_args.check);
+    if (sn["join_max_gap_prb"])
+      nrscope_sensing_join_args.max_gap_prb = sn["join_max_gap_prb"].as<int>();
+    if (sn["join_max_step"])
+      nrscope_sensing_join_args.max_step = sn["join_max_step"].as<float>();
+    flag("join_learn", &nrscope_sensing_join_args.learn);
+    std::cout << "    sensing.join_grants: " << (nrscope_sensing_join_args.enable ? "true" : "false")
+              << " (max gap " << nrscope_sensing_join_args.max_gap_prb << " PRB, check "
+              << (nrscope_sensing_join_args.check ? "on" : "off") << ", step <= noise + "
+              << nrscope_sensing_join_args.max_step << " |H|, learn "
+              << (nrscope_sensing_join_args.learn ? "on" : "off") << ")" << std::endl;
     if (sn["record_estimates"])
       snprintf(nrscope_sensing_args.record_estimates, sizeof(nrscope_sensing_args.record_estimates), "%s",
                sn["record_estimates"].as<std::string>().c_str());

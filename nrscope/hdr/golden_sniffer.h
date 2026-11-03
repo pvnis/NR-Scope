@@ -133,6 +133,7 @@ public:
   void Submit(srsran_slot_cfg_t* slot, WorkState* state, SlotResult* result);
 
   bool ready = false;
+  struct nrscope_sensing_join_s* sensing_join = nullptr; // the worker's slot buffer (sensing.join_grants)
 
 private:
   srsran_ue_dl_nr_t             ue_dl = {};

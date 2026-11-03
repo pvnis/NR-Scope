@@ -182,6 +182,38 @@ int nrscope_sensing_process_grant(nrscope_sensing_t*          s,
                                   uint32_t                    sfn,
                                   uint32_t                    slot_idx);
 
+/* nrscope_sensing_process_grant() into a slot's join buffer (nrscope_sensing_join.h)
+   instead of straight into the history: the worker flushes the slot once every grant of
+   it is in. join NULL is nrscope_sensing_process_grant(). Returns the layers taken. */
+struct nrscope_sensing_join_s;
+int nrscope_sensing_process_grant_join(nrscope_sensing_t*             s,
+                                       nrscope_sensing_scratch_t*     sc,
+                                       struct nrscope_sensing_join_s* join,
+                                       uint32_t                       aarx,
+                                       const cf_t*                    grid,
+                                       uint32_t                       n_sc_grid,
+                                       const nr_dmrs_placement_t*     place,
+                                       const srsran_sch_cfg_nr_t*     cfg,
+                                       int                            dci_ports,
+                                       uint32_t                       pci,
+                                       uint32_t                       sfn,
+                                       uint32_t                       slot_idx);
+
+/* nrscope_sensing_push_estimates() plus sensing.record_estimates, the path every grant
+   (or joined slot) takes into the history. */
+int nrscope_sensing_push_recorded(nrscope_sensing_t* s,
+                                  uint32_t           aarx,
+                                  uint16_t           ports,
+                                  int                layer,
+                                  int                n_layers,
+                                  uint32_t           sfn,
+                                  uint32_t           slot_idx,
+                                  uint64_t           slot_abs,
+                                  uint16_t           dmrs_mask,
+                                  const cf_t*        H,
+                                  const bool*        valid,
+                                  uint32_t           n_sc_grid);
+
 /* The sensing half of nrscope_sensing_process_grant(): one layer's DM-RS channel
    estimates of one grant on one chain, from the per-slot stage (random drop,
    alignment, taper, delay transform, history) to the map trigger. The live receiver
