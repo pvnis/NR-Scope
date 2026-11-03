@@ -1541,14 +1541,15 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
         }
         std::string line = std::to_string(state->sfn) + "," + std::to_string(sl) + "," + std::to_string(n_dl) + "," +
                            std::to_string(n_ul);
-        uint32_t cnt1[14] = {};
-        std::string bitmap, l0_extra;
+        uint32_t cnt1[14] = {}, cnt8[14] = {};
+        std::string bitmap, l0_extra, line_tail;
         for (uint32_t l = 1; l < 14; l++) {
           gs_dmrs_rb_map(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, np, sl, l, pci, c0, c1, oc, q0, q1);
           uint32_t k0 = 0;
           for (uint32_t c = 0; c < np; c++) {
             k0 += c0[c] > 0.5f;
             cnt1[l] += c1[c] > 0.5f;
+            cnt8[l] += c0[c] > 0.8f;
           }
           line += "," + std::to_string(k0);
           if (l == dmrs_l0) {
@@ -1659,6 +1660,9 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
           }
         }
         line += "," + bitmap + l0_extra + "," + csi + ",";
+        for (uint32_t l = 1; l < 14; l++) { // CRBs over the strict threshold per symbol, appended last
+          line_tail += (l > 1 ? ":" : "") + std::to_string(cnt8[l]);
+        }
         for (int i = 0; i < n; i++) { // every DL DCI's own N_ID on the first DM-RS symbol
           if (out[i].nof_bits == 0 || out[i].payload[0] != 1 || out[i].n_id == pci) {
             continue;
@@ -1677,6 +1681,7 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
           snprintf(e, sizeof(e), "%x:%u:%d:%d-%d;", out[i].rnti, out[i].n_id, k, lo, hi);
           line += e;
         }
+        line += "," + line_tail;
         std::lock_guard<std::mutex> lk(gs_survey_mutex);
         fprintf(gs_survey_csv, "%s\n", line.c_str());
       }
