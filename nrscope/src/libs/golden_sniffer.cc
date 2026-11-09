@@ -446,6 +446,9 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
   if (g["survey_pci"]) {
     a.survey_pci = g["survey_pci"].as<int32_t>();
   }
+  if (g["dump_blind"]) {
+    a.dump_blind = g["dump_blind"].as<bool>();
+  }
   if (g["dump_rnti"]) {
     const std::string v = g["dump_rnti"].as<std::string>();
     a.dump_rnti         = v == "all" ? -2 : (int32_t)std::stoul(v, nullptr, 0); // all: every UE
@@ -465,7 +468,7 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
       gs_gf2_prebuild_start(a.size_min, a.size_max, first.data(), (uint32_t)first.size());
     }
     gs_csv = fopen(a.csv.c_str(), "w");
-    if (a.dump_rnti != -1 && !a.dump_file.empty()) {
+    if ((a.dump_rnti != -1 || a.dump_blind) && !a.dump_file.empty()) {
       gs_dump_bin = fopen(a.dump_file.c_str(), "wb");
     }
     if (!a.survey_csv.empty()) {
@@ -1500,7 +1503,7 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
   }
   const bool search  = gs_pool_active.load(std::memory_order_relaxed);
   const bool tracked = gs_any_converged.load(std::memory_order_relaxed);
-  if (!search && !tracked && getenv("GS_DUMP") == nullptr) {
+  if (!search && !tracked && getenv("GS_DUMP") == nullptr && gs_survey_csv == nullptr) {
     return; // nothing to do in this slot: not even the FFT
   }
   struct SubTimer {
@@ -1523,7 +1526,8 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
   /* Converged UEs: decoded right here, from what was learned of their PDCCH */
   static thread_local std::vector<gs_track_t> tracked_now; /* keeps its capacity */
   tracked_now.clear();
-  if (tracked && track_gs != nullptr) {
+  /* the survey (and its blind DM-RS dump) runs in every slot, a converged UE or not */
+  if ((tracked || gs_survey_csv != nullptr) && track_gs != nullptr) {
     gs_slot_t s  = {};
     s.grid       = ue_dl.sf_symbols[0];
     s.nof_sc     = nof_sc;
@@ -1537,15 +1541,18 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
         tracked_now.push_back(u.second.track);
       }
     }
-    if (!tracked_now.empty()) {
+    if (!tracked_now.empty() || gs_survey_csv != nullptr) {
       /* all converged UEs at once; while the search is off, the other C-RNTIs found in
         their CORESETs are sightings (the search reports them while it is on) */
       const double t_tr0 = gs_steady_s();
       gs_dci_t     out[GS_MAX_DCI_PER_SLOT];
       uint8_t      trk[GS_MAX_DCI_PER_SLOT];
       const bool   want_other = nrscope_gs_args.discover_in_track && !search;
-      int          n = gs_decode_tracked_multi(track_gs, &s, tracked_now.data(), (uint32_t)tracked_now.size(),
-                                      nrscope_gs_args.track_full_band, want_other, out, trk, GS_MAX_DCI_PER_SLOT);
+      int          n = tracked_now.empty() ? 0
+                                               : gs_decode_tracked_multi(track_gs, &s, tracked_now.data(), (uint32_t)tracked_now.size(),
+                                                                         nrscope_gs_args.track_full_band, want_other, out, trk,
+                                                                         GS_MAX_DCI_PER_SLOT);
+      n                = n < 0 ? 0 : n;
       for (int i = 0; i < n; i++) {
         (trk[i] ? result->tracked_dcis : result->region_dcis).push_back(out[i]);
       }
@@ -1708,14 +1715,21 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
         for (uint32_t l = 1; l < 14; l++) {
           float co[12][4], pz[12];
           gs_csirs_scan(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, np, sl, l, pci, co, pz);
-          /* dump: the 8-port CSI-RS symbol (CDM pairs on subcarriers 0-7) as raw REs.
+          /* dump: the 8-port CSI-RS symbol (CDM pairs on subcarriers 0-7) as raw REs, and the TRS symbols.
             Record: "GSC1", sfn u16, slot u8, l u8, first_crb u16, nprb u16, then 12 * nprb complex floats. */
-          if (gs_dump_bin != nullptr && l == 13) {
+          /* also the TRS symbols (4 and 8 here): density 3 from its first RE c, kept when the best
+            offset c < 4 is over 0.5 (golden_sniffer.dump_blind) */
+          float tm = 0;
+          for (uint32_t c = 0; c < 4; c++) {
+            tm = co[c][3] > tm ? co[c][3] : tm;
+          }
+          const bool trs = nrscope_gs_args.dump_blind && tm > 0.5f && l != 13;
+          if (gs_dump_bin != nullptr && (l == 13 || trs)) {
             float cm = 0;
             for (uint32_t c = 0; c < 8; c++) {
               cm += co[c][1] / 8;
             }
-            if (cm > 0.5f) {
+            if (cm > 0.5f || trs) {
               const uint16_t sfn16 = (uint16_t)state->sfn, fc16 = (uint16_t)first_crb, np16 = (uint16_t)np;
               const uint8_t  sl8 = (uint8_t)sl, l8 = (uint8_t)l;
               std::lock_guard<std::mutex> lk(gs_dump_mutex);
@@ -1739,6 +1753,66 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
             if (pz[c] < 0.25f) {
               snprintf(e, sizeof(e), "%sz:%u:%u:%.2f", csi.empty() ? "" : ";", l, c, pz[c]);
               csi += e;
+            }
+          }
+        }
+        /* dump (golden_sniffer.dump_blind): the PDSCH DM-RS of this slot whoever it belongs to. Only
+          DM-RS scrambled with N_ID = PCI and n_SCID = 0 is UE-independent; UEs with their own
+          scramblingID0/1 or n_SCID = 1 are not in it. Same record as a grant ("GSD1", "GSD2" with
+          NRSCOPE_GS_DUMP_P1001) with rnti 0, occ 0, the mean coherence of the masked PRBs, and as
+          PRB mask the strict map (coherence > 0.8) of the first DM-RS symbol; the additional type-A
+          positions (5, 7, 8, 11) whose strict map shares at least half of those PRBs. Decoded grants are in it too:
+          the analysis removes their PRBs. */
+        if (gs_dump_bin != nullptr && nrscope_gs_args.dump_blind && cnt8[dmrs_l0] >= 4) {
+          static thread_local cf_t  bp[14][3 * SRSRAN_MAX_PRB_NR], bq[14][3 * SRSRAN_MAX_PRB_NR];
+          static thread_local float bt[SRSRAN_MAX_PRB_NR];
+          static const bool         p1001 = getenv("NRSCOPE_GS_DUMP_P1001") != nullptr;
+          uint8_t                   syms[14], ns = 0;
+          for (uint32_t l = 1; l < 13; l++) {
+            if (l != dmrs_l0) { // additional positions of type A (5, 7, 8, 11), on the same PRBs as the first symbol
+              uint32_t both = 0;
+              for (uint32_t c = 0; c < np; c++) {
+                both += sv_c0[l][c] > 0.8f && sv_c0[dmrs_l0][c] > 0.8f;
+              }
+              if ((l != 5 && l != 7 && l != 8 && l != 11) || both < 4 || 2 * both < cnt8[dmrs_l0]) {
+                continue;
+              }
+            }
+            gs_dmrs_rb_pairs(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, np, sl, l, pci, bp[ns], bt);
+            if (p1001) {
+              gs_dmrs_rb_pairs_1001(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, np, sl, l, pci, bq[ns]);
+            }
+            syms[ns++] = (uint8_t)l;
+          }
+          double   cs = 0;
+          uint32_t cn = 0;
+          for (uint32_t c = 0; c < np; c++) {
+            if (sv_c0[dmrs_l0][c] > 0.8f) {
+              cs += sv_c0[dmrs_l0][c];
+              cn++;
+            }
+          }
+          const uint16_t sfn16 = (uint16_t)state->sfn, rn = 0, np16 = (uint16_t)np;
+          const uint8_t  sl8 = (uint8_t)sl;
+          const float    occf = 0, cohf = cn > 0 ? (float)(cs / cn) : 0;
+          std::lock_guard<std::mutex> lk(gs_dump_mutex);
+          fwrite(p1001 ? "GSD2" : "GSD1", 1, 4, gs_dump_bin);
+          fwrite(&sfn16, 2, 1, gs_dump_bin);
+          fwrite(&sl8, 1, 1, gs_dump_bin);
+          fwrite(&ns, 1, 1, gs_dump_bin);
+          fwrite(&rn, 2, 1, gs_dump_bin);
+          fwrite(&np16, 2, 1, gs_dump_bin);
+          fwrite(&occf, 4, 1, gs_dump_bin);
+          fwrite(&cohf, 4, 1, gs_dump_bin);
+          for (uint32_t c = 0; c < np; c++) {
+            const uint8_t v = sv_c0[dmrs_l0][c] > 0.8f ? 1 : 0;
+            fwrite(&v, 1, 1, gs_dump_bin);
+          }
+          for (uint8_t i = 0; i < ns; i++) {
+            fwrite(&syms[i], 1, 1, gs_dump_bin);
+            fwrite(bp[i], sizeof(cf_t), 3 * np, gs_dump_bin);
+            if (p1001) {
+              fwrite(bq[i], sizeof(cf_t), 3 * np, gs_dump_bin);
             }
           }
         }

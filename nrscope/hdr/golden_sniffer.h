@@ -105,6 +105,7 @@ struct GoldenSnifferArgs {
   int32_t     survey_pci = -1;       // and a neighbour cell's PDSCH DM-RS (its PCI), on the first DM-RS symbol
   int32_t     dump_rnti = -1;        // survey: every grant of this UE, its port-1000 DM-RS per CDM pair, to dump_file
   std::string dump_file;
+  bool        dump_blind = false;    // survey: the PCI-scrambled PDSCH DM-RS of every slot (rnti 0) to dump_file
   double   quiet_s        = 1.0;   // a blind-tracked UE silent this long starts a sweep (gone or new RNTI?)
 };
 
