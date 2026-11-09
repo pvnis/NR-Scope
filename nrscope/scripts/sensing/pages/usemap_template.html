@@ -1,0 +1,347 @@
+<title>PCI 632 sensing usage map</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  --bg: #f6f7f8; --panel: #ffffff; --fg: #1b2026; --muted: #5d6874; --line: #dde2e7; --grid: #eef1f4; --slotbg: #e9edf1;
+  --accent: #2563a6;
+  --c0: #2563a6; --c1: #d08a1e; --c2: #93b9e3; --c3: #3f9a5f; --c4: #2aa3a0; --c5: #c8453b; --c6: #9c6b8e; --c7: #b4bcc4; --c8: #23874a; --c9: #8ccf9f;
+  --before: #b4bcc4; --after: #2563a6; --after6e: #7a52c7; --inc: #e0a63a; --trs: #b0558f; --csi: #c69a2e; --ep: rgba(27,32,38,.32); --winl: rgba(27,32,38,.55); --bar: #2563a6; --bar2: #b4bcc4;
+  --sans: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif; --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #12161b; --panel: #1a2027; --fg: #e3e8ed; --muted: #97a3af; --line: #2c343d; --grid: #20272f; --slotbg: #1f262e;
+  --accent: #6aa7e6;
+  --c0: #5b9de0; --c1: #e3a344; --c2: #2f4f74; --c3: #5fbf7f; --c4: #45c2bf; --c5: #e2665c; --c6: #b98bac; --c7: #4a535d; --c8: #3fb26a; --c9: #a4e3b7;
+  --before: #5a646e; --after: #5b9de0; --after6e: #a98be8; --inc: #d6a24a; --trs: #d07ab0; --csi: #d8b04e; --ep: rgba(227,232,237,.30); --winl: rgba(227,232,237,.55); --bar: #5b9de0; --bar2: #5a646e; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #12161b; --panel: #1a2027; --fg: #e3e8ed; --muted: #97a3af; --line: #2c343d; --grid: #20272f; --slotbg: #1f262e;
+  --accent: #6aa7e6;
+  --c0: #5b9de0; --c1: #e3a344; --c2: #2f4f74; --c3: #5fbf7f; --c4: #45c2bf; --c5: #e2665c; --c6: #b98bac; --c7: #4a535d; --c8: #3fb26a; --c9: #a4e3b7;
+  --before: #5a646e; --after: #5b9de0; --after6e: #a98be8; --inc: #d6a24a; --trs: #d07ab0; --csi: #d8b04e; --ep: rgba(227,232,237,.30); --winl: rgba(227,232,237,.55); --bar: #5b9de0; --bar2: #5a646e; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font-family: var(--sans); font-size: 14px; }
+.wrap { padding-block: 20px 48px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: flex; flex-direction: column; gap: 16px; max-width: 1400px; margin: 0 auto; }
+h1 { font-size: 1.45rem; font-weight: 600; margin: 0; text-wrap: balance; }
+h2 { font-size: 1rem; font-weight: 600; margin: 0; text-wrap: balance; }
+.sub { color: var(--muted); margin: 4px 0 0; max-width: 85ch; line-height: 1.5; }
+.ctl { display: flex; flex-wrap: wrap; gap: 12px 18px; align-items: end; }
+.ctl label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); letter-spacing: .02em; }
+.ctl label.chk { flex-direction: row; align-items: center; gap: 6px; padding-bottom: 6px; }
+select, input[type=range] { font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+input[type=range] { padding: 0; width: min(420px, 80vw); accent-color: var(--accent); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.seg button { font: inherit; font-size: 13px; color: var(--fg); background: var(--panel); border: 0; padding: 6px 12px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--panel); }
+select:focus-visible, input:focus-visible, button:focus-visible, canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.main { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; }
+@media (max-width: 860px) { .main { grid-template-columns: minmax(0, 1fr); } }
+.mapbox { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-width: 0; display: flex; flex-direction: column; gap: 8px; position: relative; }
+canvas { display: block; width: 100%; height: 600px; cursor: crosshair; }
+.panelnote { font-size: 12.5px; color: var(--muted); margin: 0; line-height: 1.45; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--muted); }
+.legend i { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.tip { position: absolute; pointer-events: none; background: var(--fg); color: var(--bg); font: 12px/1.35 var(--mono); padding: 5px 8px; border-radius: 5px; white-space: nowrap; z-index: 2; }
+.side { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.side dl { display: grid; grid-template-columns: auto 1fr; gap: 5px 12px; margin: 0; font-size: 13px; }
+.side dt { color: var(--muted); }
+.side dd { margin: 0; font-family: var(--mono); font-size: 12.5px; overflow-wrap: anywhere; }
+.side .empty { color: var(--muted); line-height: 1.45; margin: 0; }
+.side h3 { font-size: 12px; font-weight: 500; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; margin: 6px 0 0; }
+.pill { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 12px; font-family: var(--sans); color: #fff; }
+.status { font-size: 12.5px; color: var(--muted); }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr)); gap: 12px; }
+.kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.kpi b { font-size: 1.5rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.kpi span { color: var(--muted); font-size: 12.5px; line-height: 1.4; }
+.sums { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 12px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.card p { margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; }
+td, th { padding: 4px 6px; border-bottom: 1px solid var(--grid); text-align: right; vertical-align: top; }
+td:first-child, th:first-child { text-align: left; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+.tblwrap { overflow-x: auto; }
+.cmp td, .cmp th { text-align: left; line-height: 1.4; }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.defs { color: var(--muted); font-size: 12.5px; line-height: 1.55; max-width: 92ch; display: flex; flex-direction: column; gap: 6px; }
+.defs p { margin: 0; }
+.mono { font-family: var(--mono); }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>PCI 632 sensing usage map, 5 November</h1>
+    <p class="sub">Every 4-PRB group of PDSCH DM-RS in the 26-burst recording, now including the <b>blind DM-RS</b> (item 6e: the channel of every PCI-scrambled DM-RS, whether or not we decoded its DCI) and the <b>TRS</b> (item 6f: the cell's tracking reference, full band every 20 ms, also used as an anchor), coloured by what the sensing pipeline does with it after all the processing we have: epoch stitching of the reference UE, the gated anchor merge of other UEs, edge matching as a fallback. The default view shows the band <b>before</b> (all DM-RS on air) and <b>after</b> processing (what sensing uses), slot by slot; <b>All categories</b> shows why each group is kept or dropped. Switch to <b>without the tablet</b> to see what a light network leaves. Each column is one slot (DM-RS symbols 2 and 11). Thin lines are precoder epoch changes (phase coherence breaks); thick lines cut the 150 ms range-Doppler windows.</p>
+  </header>
+
+  <div class="kpis" id="kpis"></div>
+
+  <div class="ctl">
+    <label>Scenario<span class="seg" role="group" aria-label="Scenario"><button id="sc_tab" aria-pressed="true">With the tablet</button><button id="sc_notab" aria-pressed="false">Without the tablet</button></span></label>
+    <label>View<span class="seg" role="group" aria-label="View"><button id="v_ba" aria-pressed="true">Before / after</button><button id="v_cat" aria-pressed="false">All categories</button></span></label>
+    <label for="burst">Burst<select id="burst"></select></label>
+    <label for="win">Slots shown<select id="win"><option value="300">300 (one 150 ms map)</option><option value="600" selected>600 (0.3 s)</option><option value="2000">2000 (1 s)</option><option value="0">whole burst</option></select></label>
+    <label for="pos">Position in the burst <span id="posv" class="mono"></span><input type="range" id="pos" min="0" max="100" value="0"></label>
+    <label class="chk"><input type="checkbox" id="showep" checked> epoch lines</label>
+    <label class="chk"><input type="checkbox" id="showinc" checked> show incoherent-only (amber)</label>
+    <span class="status" id="status"></span>
+  </div>
+
+  <div class="main">
+    <div class="mapbox">
+      <canvas id="map" tabindex="0" aria-label="Sensing usage map: time in slots across, PRB up; lanes below for TRS, CSI-RS and band used per window"></canvas>
+      <div class="legend" id="legend"></div>
+      <p class="panelnote" id="panelnote"></p>
+      <div class="tip" id="tip" hidden></div>
+    </div>
+    <aside class="side" aria-live="polite">
+      <h2>Selection</h2>
+      <p class="empty" id="sideempty">Click the map to see the 4-PRB group's decision, its UE, and the 150 ms window it belongs to (reference UE, band used, epochs).</p>
+      <dl id="sidedl" hidden></dl>
+      <h3 id="winh" hidden>150 ms window</h3>
+      <dl id="windl" hidden></dl>
+    </aside>
+  </div>
+
+  <section class="sums">
+    <div class="card"><h2>Where the DM-RS goes (all 23 bursts, PRB-slots)</h2><div class="tblwrap"><table id="tcat"></table></div>
+      <p>Used coherently = reference stitched + epoch fill + merged (anchor or edge). Usable incoherently = split by a hole + rejected by gate + not joinable. "On air, UE not placed": PCI DM-RS seen on antenna 0 that has no channel values on both antennas, even with the blind dump.</p></div>
+    <div class="card"><h2>150 ms windows (one range-Doppler map each)</h2><div class="tblwrap"><table id="twin"></table></div>
+      <p>Band used = used PRB-slots over 273 PRBs times the DL slots of the window. LaSen counts all occupied REs with their own known data; 7.1% is the occupancy their best 5% of time exceeds.</p></div>
+  </section>
+
+  <section class="card">
+    <h2>Per burst</h2>
+    <div class="tblwrap"><table id="tb"></table></div>
+  </section>
+
+  <section class="card">
+    <h2>LaSen (SenSys '26) and this work</h2>
+    <div class="tblwrap"><table class="cmp" id="tcmp"></table></div>
+  </section>
+
+  <section class="defs">
+    <p>Recording: Sunrise SA n78, PCI 632, 273 PRBs at 30 kHz, TDD DDDSU, 5 November 2026 outdoors, 26 bursts of 2.45 s on 4 antennas, tablet 0x7304 downloading; bursts 6, 17 and 19 skipped (antenna 0 replay incomplete). Antennas 0 and 3 used (antennas 1 and 2 decode only the tablet that day).</p>
+    <p>Per 150 ms window the reference UE is the one with the most 4-PRB snapshots (the tablet whenever it is there). Reference: epoch templates and joint 4-antenna PRG stitching; groups cut off from the template's main run by a hole have an unknown phase ("split by a hole"); groups missing inside a snapshot but present in its epoch template are filled from other slots ("epoch fill"). Other UEs: self-stitched, then one number from the nearest reference snapshot within 10 ms sharing at least 4 groups; kept if the anchor fit residual is under 30%, else "rejected by gate"; no anchor but touching the reference in the slot: edge matching; otherwise "not joinable". Periodic lanes: TRS (symbols 4 and 8) and CSI-RS on symbol 13 as detected by the survey (score at least 0.6).</p>
+  </section>
+</div>
+
+<script>
+const DATA = __DATA__;
+const $ = (id) => document.getElementById(id);
+const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const CAT = ["reference, stitched", "reference, split by a hole", "reference, epoch fill", "merged (anchor, gate passed)", "merged (edge only)", "rejected by gate", "not joinable", "on air, UE not placed", "TRS, full band", "joined via TRS anchor"];
+const USED = [1, 0, 1, 1, 1, 0, 0, 0, 0, 0];
+const INCO = [0, 1, 0, 0, 0, 1, 1, 0, 0, 0];
+const TRSU = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1]; // coherent only thanks to the TRS (6f) // has channel values but cannot be joined coherently: split by a hole, rejected, not joinable
+const isBlind = (u) => u >= 0 && J && J.rnti[u] && J.rnti[u][1] === "blind";
+const pct = (x, d = 1) => (100 * x).toFixed(d) + "%";
+let MODE = "ba", SC = "tab", B = 0, J = null, view = { start: 0, n: 600 }, sel = null, idx = null;
+const cache = new Map();
+
+DATA.bursts.forEach((b, i) => { const o = document.createElement("option"); o.value = i; o.textContent = "Burst " + b.b + " (" + b.ues + " UE" + (b.ues > 1 ? "s" : "") + ")"; $("burst").appendChild(o); });
+
+function kpis() {
+  const K = $("kpis"); K.textContent = "";
+  const a = DATA.agg, used = (sc) => a[sc].reduce((s, v, i) => s + (USED[i] ? v : 0), 0), tot = (sc) => a[sc].reduce((s, v) => s + v, 0);
+  const items = [
+    [pct(DATA.win.tab.dens.med, 0), "median band used per 150 ms window with the tablet"],
+    [pct(DATA.win.notab.dens.med, 1) + " → " + pct(DATA.win.notab.trs.med, 1), "median band per window without the tablet: DM-RS alone → with the TRS (symbols + DM-RS joined through it)"],
+    [pct(DATA.onair.med, 1), "median band of DM-RS on air from UEs we do not place (light-network potential, " + pct(DATA.onair.ge71, 0) + " of windows above 7.1%)"],
+    [DATA.win.tab.ne + " / " + DATA.win.tab.lo.toFixed(0) + " ms", "precoder epochs per window / longest epoch (median): phase coherence for Doppler breaks this often"]];
+  for (const [v, t] of items) { const d = document.createElement("div"); d.className = "kpi"; const b = document.createElement("b"); b.textContent = v; const s = document.createElement("span"); s.textContent = t; d.appendChild(b); d.appendChild(s); K.appendChild(d); }
+}
+
+async function loadBurst(i) {
+  B = i; const b = DATA.bursts[i]; $("status").textContent = "loading burst " + b.b + "…";
+  try {
+    if (!cache.has(b.b)) { const r = await fetch("um_b" + b.b + ".json"); if (!r.ok) throw new Error(r.status); cache.set(b.b, await r.json()); }
+    J = cache.get(b.b); $("status").textContent = ""; sel = null; $("sidedl").hidden = $("windl").hidden = $("winh").hidden = true; $("sideempty").hidden = false;
+    buildIndex(); setView();
+  } catch (e) { $("status").textContent = "could not load burst " + b.b + " (" + e.message + ")"; }
+}
+function buildIndex() {
+  idx = new Map(); const s = J.seg[SC];
+  for (let k = 0; k < s.length; k += 5) { const a = s[k]; if (!idx.has(a)) idx.set(a, []); idx.get(a).push(k); }
+}
+
+const cv = $("map"), ctx = cv.getContext("2d");
+const PAD = { l: 44, r: 8, t: 8, b: 86 }; let PANELS = [];
+function geom() { PAD.t = MODE === "ba" ? 22 : 8; const w = cv.clientWidth, h = cv.clientHeight; return { w, h, pw: w - PAD.l - PAD.r, ph: h - PAD.t - PAD.b }; }
+function draw() {
+  if (!J) return;
+  const dpr = window.devicePixelRatio || 1, g = geom();
+  cv.width = Math.round(g.w * dpr); cv.height = Math.round(g.h * dpr); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = css("--panel"); ctx.fillRect(0, 0, g.w, g.h);
+  const s0 = view.start, n = view.n, xs = g.pw / n;
+  const cols = CAT.map((_, i) => css("--c" + i)), S = J.seg[SC];
+  const panels = MODE === "ba"
+    ? [{ top: PAD.t, h: (g.ph - 22) / 2, keep: (c) => c !== 2 && c < 8, col: () => css("--before"), label: "Before: all PDSCH DM-RS on air" },
+       { top: PAD.t + (g.ph - 22) / 2 + 22, h: (g.ph - 22) / 2, keep: (c) => USED[c] === 1 || (INCO[c] === 1 && $("showinc").checked) || TRSU[c] === 1,
+         col: (c, u) => c >= 8 ? css("--c" + c) : USED[c] ? (isBlind(u) ? css("--after6e") : css("--after")) : css("--inc"), label: "After processing: used coherently, or usable incoherently" }]
+    : [{ top: PAD.t, h: g.ph, keep: (c) => INCO[c] !== 1 || $("showinc").checked, col: (c) => cols[c], label: "" }];
+  PANELS = panels;
+  const X = (a) => PAD.l + (a - s0) * xs;
+  for (const P of panels) {
+    const ys = P.h / 273, Y = (p) => P.top + P.h - p * ys;
+    ctx.fillStyle = css("--slotbg");
+    for (const s of J.slots) if (s[0] >= s0 && s[0] < s0 + n) ctx.fillRect(X(s[0]), P.top, Math.max(xs, 0.6), P.h);
+    for (let k = 0; k < S.length; k += 5) {
+      const a = S[k]; if (a < s0 || a >= s0 + n || !P.keep(S[k + 3])) continue;
+      ctx.fillStyle = P.col(S[k + 3], S[k + 4]); ctx.fillRect(X(a), Y(S[k + 2] + 1), Math.max(xs * 0.92, 0.6), (S[k + 2] - S[k + 1] + 1) * ys);
+    }
+    if ($("showep").checked && (MODE !== "ba" || P === panels[1])) {
+      ctx.fillStyle = css("--ep");
+      for (const a of J.ep[SC]) if (a >= s0 && a < s0 + n) ctx.fillRect(X(a) - 0.5, P.top, 1, P.h);
+    }
+    if (sel && P.keep(S[sel.k + 3])) { ctx.strokeStyle = css("--fg"); ctx.lineWidth = 1.5; ctx.strokeRect(X(sel.a) - 1, Y(S[sel.k + 2] + 1) - 1, Math.max(xs, 2) + 2, (S[sel.k + 2] - S[sel.k + 1] + 1) * ys + 2); }
+    ctx.fillStyle = css("--muted"); ctx.font = "11px " + css("--mono"); ctx.textAlign = "right"; ctx.textBaseline = "middle";
+    for (const p of (MODE === "ba" ? [0, 136, 272] : [0, 48, 96, 144, 192, 240, 272])) { ctx.fillText(p, PAD.l - 6, Y(p + 0.5)); ctx.fillStyle = css("--grid"); ctx.fillRect(PAD.l, Y(p), g.pw, 1); ctx.fillStyle = css("--muted"); }
+    if (P.label) { ctx.fillStyle = css("--fg"); ctx.font = "600 12px " + css("--sans"); ctx.textAlign = "left"; ctx.textBaseline = "bottom"; ctx.fillText(P.label, PAD.l, P.top - 3 + (P === panels[0] ? 0 : 0)); }
+  }
+  ctx.fillStyle = css("--winl");
+  for (let a = Math.ceil(s0 / 300) * 300; a < s0 + n; a += 300) ctx.fillRect(X(a) - 1, PAD.t, 2, g.ph + 74);
+  ctx.fillStyle = css("--muted"); ctx.font = "11px " + css("--mono");
+  ctx.save(); ctx.translate(11, PAD.t + g.ph / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.fillText("PRB", 0, 0); ctx.restore();
+  // lanes
+  const yT = PAD.t + g.ph + 6, yC = yT + 12, yW = yC + 14, hW = 34;
+  ctx.textAlign = "right"; ctx.textBaseline = "middle"; ctx.fillStyle = css("--muted"); ctx.font = "10px " + css("--mono");
+  ctx.fillText("TRS", PAD.l - 6, yT + 4); ctx.fillText("CSI", PAD.l - 6, yC + 4); ctx.fillText("band", PAD.l - 6, yW + hW / 2);
+  for (const s of J.slots) {
+    if (s[0] < s0 || s[0] >= s0 + n) continue;
+    if (s[1]) { ctx.fillStyle = css("--trs"); ctx.fillRect(X(s[0]), yT, Math.max(xs, 1.5), 8); }
+    if (s[2]) { ctx.fillStyle = css("--csi"); ctx.fillRect(X(s[0]), yC, Math.max(xs, 1.5), 8); }
+  }
+  ctx.fillStyle = css("--grid"); ctx.fillRect(PAD.l, yW, g.pw, hW);
+  for (const w of J.win[SC]) {
+    const a = w[0], e = a + 300; if (e <= s0 || a >= s0 + n || w[3] < 1) continue;
+    const xa = X(Math.max(a, s0)), xb = X(Math.min(e, s0 + n)), d = w[2] / (273 * w[3]), dr = w[6] / (273 * w[3]);
+    ctx.fillStyle = css("--bar2"); ctx.fillRect(xa + 1, yW + hW * (1 - Math.min(1, d)), xb - xa - 2, hW * Math.min(1, d));
+    ctx.fillStyle = css("--bar"); ctx.fillRect(xa + 1, yW + hW * (1 - Math.min(1, dr)), xb - xa - 2, hW * Math.min(1, dr));
+    if (xb - xa > 34) { ctx.fillStyle = css("--fg"); ctx.textAlign = "center"; ctx.textBaseline = "bottom"; ctx.fillText(pct(d, 0), (xa + xb) / 2, yW + hW - 1); }
+  }
+  ctx.fillStyle = css("--muted"); ctx.textAlign = "center"; ctx.textBaseline = "top"; ctx.font = "11px " + css("--mono");
+  const step = n <= 300 ? 50 : n <= 600 ? 100 : n <= 2000 ? 200 : 1000;
+  for (let a = Math.ceil(s0 / step) * step; a < s0 + n; a += step) ctx.fillText((a * 0.5) + " ms", X(a), yW + hW + 4);
+  legend(cols);
+}
+function legend(cols) {
+  const L = $("legend"); L.textContent = "";
+  const add = (c, t) => { const s = document.createElement("span"); const i = document.createElement("i"); i.style.background = c; s.appendChild(i); s.appendChild(document.createTextNode(t)); L.appendChild(s); };
+  if (MODE === "ba") { add(css("--before"), "PDSCH DM-RS on air (every UE, placed or not)"); add(css("--after"), "used coherently: decoded grants (stitching, fill, merging)");
+    add(css("--after6e"), "used coherently: blind DM-RS (new, 6e)"); add(css("--c8"), "TRS symbols, full band (6f)"); add(css("--c9"), "DM-RS joined via the TRS anchor (6f)");
+    add(css("--inc"), "usable incoherently only (own map, powers added)"); }
+  else CAT.forEach((t, i) => add(cols[i], t));
+  $("panelnote").textContent = MODE === "ba" ? "Dark green: the TRS itself (slots 5 and 6 every 20 ms, sent whatever the traffic). Light green: DM-RS that could not be joined otherwise but fits the nearest TRS (within 10 ms) with one number. Blue and purple: joined coherently into the map (purple = DM-RS we only have thanks to the blind dump, no DCI decoded). Amber: we have the channel but cannot join it coherently (rejected by the gate, no anchor, or cut off by a hole), so it can only enter the map incoherently. Grey above with nothing below: still no channel (partial 4-PRB groups, seen on one antenna only, or scrambled with another N_ID). Coloured below but not above: epoch fill." : "";
+  add(css("--slotbg"), "DL slot, nothing"); add(css("--trs"), "TRS slot"); add(css("--csi"), "CSI-RS on symbol 13");
+  add(css("--bar"), "band from the reference alone"); add(css("--bar2"), "band after merging and fill");
+}
+function hit(ev) {
+  const g = geom(), rect = cv.getBoundingClientRect(), x = ev.clientX - rect.left, y = ev.clientY - rect.top;
+  const a = Math.floor(view.start + (x - PAD.l) / (g.pw / view.n));
+  const P = PANELS.find((P) => y >= P.top && y <= P.top + P.h);
+  if (x < PAD.l || !P) return { a, k: null };
+  const p = Math.floor((P.top + P.h - y) / (P.h / 273));
+  const ks = idx.get(a); if (!ks) return { a, k: null };
+  const S = J.seg[SC]; return { a, k: ks.find((k) => p >= S[k + 1] && p <= S[k + 2] && P.keep(S[k + 3])) ?? null };
+}
+const ueName = (u) => u < 0 ? (sel && J.seg[SC][sel.k + 3] === 8 ? "cell TRS" : "not placed") : J.rnti[u][0] + (J.rnti[u][1] === "tablet" ? " (tablet)" : " (" + J.rnti[u][1] + " precoder)");
+cv.addEventListener("mousemove", (ev) => {
+  if (!J) return; const h = hit(ev), tip = $("tip");
+  if (h.k === null) { tip.hidden = true; return; }
+  const S = J.seg[SC]; tip.textContent = CAT[S[h.k + 3]] + " · PRB " + S[h.k + 1] + "-" + S[h.k + 2];
+  const box = cv.parentElement.getBoundingClientRect(); tip.hidden = false;
+  let left = ev.clientX - box.left + 12; left = Math.min(left, box.width - tip.offsetWidth - 6); tip.style.left = left + "px"; tip.style.top = (ev.clientY - box.top + 12) + "px";
+});
+cv.addEventListener("mouseleave", () => { $("tip").hidden = true; });
+cv.addEventListener("click", (ev) => { if (!J) return; const h = hit(ev); sel = h.k === null ? null : h; showSel(h.a); draw(); });
+function fill(dl, rows) {
+  dl.textContent = "";
+  for (const [k, v, col] of rows) {
+    const dt = document.createElement("dt"); dt.textContent = k; const dd = document.createElement("dd");
+    if (col) { const p = document.createElement("span"); p.className = "pill"; p.style.background = col; p.style.color = css("--panel"); p.textContent = v; dd.appendChild(p); } else dd.textContent = v;
+    dl.appendChild(dt); dl.appendChild(dd);
+  }
+  dl.hidden = false;
+}
+function showSel(a) {
+  $("sideempty").hidden = true; const S = J.seg[SC];
+  if (sel) {
+    const k = sel.k, c = S[k + 3];
+    fill($("sidedl"), [["Decision", CAT[c], css("--c" + c)], ["Used", USED[c] ? "yes, coherently" : TRSU[c] ? "yes, through the TRS" : INCO[c] ? "incoherently only" : "no"], ["UE", ueName(S[k + 4])],
+      ["Time", (a * 0.5).toFixed(1) + " ms into burst " + DATA.bursts[B].b], ["PRBs", S[k + 1] + " to " + S[k + 2] + " (" + (S[k + 2] - S[k + 1] + 1) + ")"]]);
+  } else $("sidedl").hidden = true;
+  const w = J.win[SC].find((w) => a >= w[0] && a < w[0] + 300);
+  if (w) {
+    $("winh").hidden = false;
+    fill($("windl"), [["Window", (w[0] * 0.5).toFixed(0) + " to " + ((w[0] + 300) * 0.5).toFixed(0) + " ms"], ["Reference", w[1] < 0 ? "none (nothing placed)" : ueName(w[1])],
+      ["DL slots", w[3]], ["Band used", w[3] ? pct(w[2] / (273 * w[3])) : "-"], ["Reference alone", w[3] ? pct(w[6] / (273 * w[3])) : "-"],
+      ["Epochs", w[4] + (w[4] ? " (longest " + w[5] + " ms)" : "")]]);
+  }
+}
+function setView() {
+  if (!J) return; const w = +$("win").value || J.span; view.n = Math.min(w, J.span);
+  view.start = Math.round(+$("pos").value / 100 * Math.max(0, J.span - view.n));
+  $("posv").textContent = (view.start * 0.0005).toFixed(2) + " s to " + ((view.start + view.n) * 0.0005).toFixed(2) + " s";
+  draw();
+}
+function setSC(s) { SC = s; $("sc_tab").setAttribute("aria-pressed", s === "tab"); $("sc_notab").setAttribute("aria-pressed", s === "notab"); sel = null; if (J) { buildIndex(); draw(); } }
+function tables() {
+  const mk = (t, head, rows) => { t.textContent = ""; const tr = document.createElement("tr"); head.forEach((h) => { const e = document.createElement("th"); e.textContent = h; tr.appendChild(e); }); t.appendChild(tr);
+    for (const r of rows) { const tr = document.createElement("tr"); r.forEach((c, i) => { const e = document.createElement("td"); if (c instanceof Node) e.appendChild(c); else e.textContent = c; tr.appendChild(e); }); t.appendChild(tr); } };
+  const a = DATA.agg, T = (sc) => a[sc].reduce((s, v) => s + v, 0);
+  const sw = (i, t) => { const s = document.createElement("span"); const q = document.createElement("span"); q.className = "sw"; q.style.background = css("--c" + i); s.appendChild(q); s.appendChild(document.createTextNode(t)); return s; };
+  const rows = CAT.map((c, i) => [sw(i, c), pct(a.tab[i] / T("tab")), pct(a.notab[i] / T("notab"))]);
+  const u = (sc) => a[sc].reduce((s, v, i) => s + (USED[i] ? v : 0), 0);
+  rows.push(["Used coherently", pct(u("tab") / T("tab")), pct(u("notab") / T("notab"))]);
+  const bu = (sc) => DATA.blind[sc].reduce((s, v, i) => s + (USED[i] ? v : 0), 0), inc = (sc) => a[sc].reduce((s, v, i) => s + (INCO[i] ? v : 0), 0);
+  rows.push(["  of which blind DM-RS (6e)", pct(bu("tab") / T("tab")), pct(bu("notab") / T("notab"))]);
+  rows.push(["Usable incoherently only", pct(inc("tab") / T("tab")), pct(inc("notab") / T("notab"))]);
+  const tu = (sc) => a[sc].reduce((s, v, i) => s + (TRSU[i] ? v : 0), 0);
+  rows.push(["Added by the TRS (symbols + joined DM-RS)", pct(tu("tab") / T("tab")), pct(tu("notab") / T("notab"))]);
+  mk($("tcat"), ["", "with tablet", "without"], rows);
+  const W = DATA.win;
+  mk($("twin"), ["", "with tablet", "without", "on air, not placed"], [
+    ["Windows", W.tab.dens.n, W.notab.dens.n, DATA.onair.n],
+    ["Band used, median", pct(W.tab.dens.med), pct(W.notab.dens.med), pct(DATA.onair.med)],
+    ["10th / 90th percentile", pct(W.tab.dens.p10, 0) + " / " + pct(W.tab.dens.p90, 0), pct(W.notab.dens.p10, 1) + " / " + pct(W.notab.dens.p90, 1), pct(DATA.onair.p10, 1) + " / " + pct(DATA.onair.p90, 1)],
+    ["Windows above 7.1%", pct(W.tab.dens.ge71, 0), pct(W.notab.dens.ge71, 0), pct(DATA.onair.ge71, 0)],
+    ["Windows with nothing", pct(W.tab.dens.zero, 0), pct(W.notab.dens.zero, 0), pct(DATA.onair.zero, 0)],
+    ["Band usable incoherently, median", pct(W.tab.inc.med), pct(W.notab.inc.med), "-"],
+    ["Band with the TRS (coherent), median", pct(W.tab.trs.med), pct(W.notab.trs.med), "-"],
+    ["  with the TRS, 10th / 90th percentile", pct(W.tab.trs.p10, 0) + " / " + pct(W.tab.trs.p90, 0), pct(W.notab.trs.p10, 1) + " / " + pct(W.notab.trs.p90, 1), "-"],
+    ["Epochs per window (median)", W.tab.ne, W.notab.ne, "-"],
+    ["Longest epoch (median)", W.tab.lo.toFixed(0) + " ms", W.notab.lo.toFixed(0) + " ms", "-"]]);
+  const tb = DATA.rows.map((r) => { const t = r.tab.c.reduce((s, v) => s + v, 0) || 1, tn = r.notab.c.reduce((s, v) => s + v, 0) || 1;
+    return [r.b, r.ues, pct((r.tab.c[0] + r.tab.c[2]) / t, 0), pct((r.tab.c[3] + r.tab.c[4]) / t), pct(r.tab.c[5] / t), pct(r.tab.c[7] / t, 0), pct(r.tab.dens, 0), pct(r.notab.dens, 1)]; });
+  mk($("tb"), ["Burst", "UEs", "tablet (stitched + fill)", "merged", "rejected", "on air, not placed", "band/window, tablet", "band/window, without"], tb);
+  mk($("tcmp"), ["", "LaSen", "This work"], [
+    ["Signal source", "Their own SDR at 5.8 GHz sending a full-band known waveform; real gNBs only give occupancy masks (energy within 10 dB of the SSB)", "The real Sunrise n78 cell over the air, bistatic, receive only"],
+    ["What is known at the receiver", "Every RE (monostatic: it sent the data itself)", "Only the DM-RS (and TRS/CSI-RS); data REs unknown"],
+    ["Precoding", "None: one antenna, fixed", "Per UE and per 4 PRBs, new epoch every ~19 ms; we stitch it (−14 → −30 dB ghost)"],
+    ["Which UE, where", "Not needed (mask only)", "Blind DCI decoding (GoldenSniffer) places grants and UEs"],
+    ["Merging users", "Not an issue (one transmitter)", "Gated anchor merge between UEs, edge fallback"],
+    ["Clock / sync", "Same box TX and RX", "Over-the-air sync, gNB clock offset tracked"],
+    ["Tracking", "Range and velocity only (OMP + local search + Kalman)", "Not yet; range-Doppler maps per 150 ms"],
+    ["Localisation / angle", "None (2 RX channels, left as future work)", "4 antennas, AoA possible (not done yet)"],
+    ["Sparse traffic", "Compressive sensing on the mask; fails with no high-score segment", "Same problem: without the tablet the median window has nothing placed"],
+    ["Ground truth", "RTK on drones", "None yet (open item 5a)"]]);
+}
+$("burst").addEventListener("change", () => loadBurst(+$("burst").value));
+const setMode = (m) => { MODE = m; $("v_ba").setAttribute("aria-pressed", m === "ba"); $("v_cat").setAttribute("aria-pressed", m === "cat"); sel = null; draw(); };
+$("v_ba").addEventListener("click", () => setMode("ba")); $("v_cat").addEventListener("click", () => setMode("cat"));
+$("sc_tab").addEventListener("click", () => setSC("tab")); $("sc_notab").addEventListener("click", () => setSC("notab"));
+["win", "pos"].forEach((id) => $(id).addEventListener("input", setView));
+$("showep").addEventListener("change", draw);
+$("showinc").addEventListener("change", () => { sel = null; draw(); });
+cv.addEventListener("keydown", (ev) => {
+  if (ev.key !== "ArrowRight" && ev.key !== "ArrowLeft") return;
+  const p = $("pos"); p.value = Math.max(0, Math.min(100, +p.value + (ev.key === "ArrowRight" ? 2 : -2))); setView(); ev.preventDefault();
+});
+window.addEventListener("resize", draw);
+const redraw = () => { draw(); tables(); kpis(); };
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", redraw);
+new MutationObserver(redraw).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+kpis(); tables(); { const i0 = Math.max(0, DATA.bursts.findIndex((b) => b.b === 8)); $("burst").value = i0; loadBurst(i0); }
+</script>

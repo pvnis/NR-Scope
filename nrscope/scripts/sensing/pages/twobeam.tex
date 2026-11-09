@@ -1,0 +1,20 @@
+\subsubsection{Merging grants in time}
+The UE never needs to know its precoder. The DM-RS is precoded exactly like the data, so the UE estimates the effective channel and equalizes with it directly. For a passive receiver this means the precoder is never revealed. We only observe the effective channel, which changes over time and frequency in a way we do not know. However, the precoders cannot point anywhere: a gNB serving one UE from one place keeps using a few beams and only changes how it mixes them. If the precoders live in a low-dimensional space, we can estimate the precoder in that space, up to an ambiguity described below.
+
+We test this with a bilinear model of all the tablet's snapshots $s$ over 20~s. On antenna $m$ and subcarrier $n$, in PRG $b(n)$:
+\begin{equation}
+  y_m[n,s] \;\approx\; \mathbf{h}_m[n]^{T}\, \mathbf{c}[b(n),s],
+  \qquad \mathbf{h}_m[n],\ \mathbf{c}[b,s] \in \mathbb{C}^{D}.
+\end{equation}
+$\mathbf{h}_m[n]$ contains $D$ fixed \textit{beam channels}, i.e.\ the channel as seen through each of $D$ beams. They are the same for all snapshots. $\mathbf{c}[b,s]$ contains the weights the precoder gives to each beam, one set per PRG and snapshot. Both are found by alternating least squares: fix $\mathbf{c}$ and solve for $\mathbf{h}$, then fix $\mathbf{h}$ and solve for $\mathbf{c}$. On held-out snapshots, $D=2$ explains the data down to $-20$~dB, against $-10$~dB for $D=1$. The tablet's precoders therefore live in a two-dimensional space.
+
+The model has a limitation. For any invertible $D\times D$ matrix $\mathbf{M}_b$ chosen independently for each PRG, $\mathbf{h}_m[n]\mathbf{M}_b$ and $\mathbf{M}_b^{-1}\mathbf{c}[b,s]$ give exactly the same fit (gauge freedom). Each PRG can be re-mixed on its own, so the model says nothing about how one PRG connects to the next in frequency, which is exactly what range needs. In time it is very useful. Once $\mathbf{h}$ is known, a precoder change only changes $\mathbf{c}$, which can be re-estimated from a single snapshot without any anchor. Removing the static part after this model leaves $-34$~dB, against $-19.5$~dB after stitching. This makes the model a good tool for time consistency and clutter removal, but not for range. It is not in the pipeline yet.
+
+\paragraph{Link with the other methods.} All our methods are special cases of this model.
+\begin{itemize}
+  \item \textbf{Stitching} is the case $D=1$: $\mathbf{c}[b,s]$ becomes one complex number per PRG. With $D=1$ the gauge freedom is only one number per PRG, and continuity across PRG boundaries fixes it. That is why stitching gives range information and the two-beam model does not. The price is that whatever lies in the second dimension is ignored. This is the residual of the one-number model: about 5\% between two precoder epochs of the tablet and 8--18\% between two UEs.
+  \item \textbf{Epochs} are intervals in which $\mathbf{c}[b,s]$ does not change with $s$.
+  \item \textbf{Gluing epochs} (anchor or Doppler model) estimates the change of $\mathbf{c}$ between epochs, with $D=1$, using time continuity. The two-beam model would estimate it directly from $\mathbf{h}$, with no anchor.
+  \item \textbf{Merging UEs} with one number assumes that the other UE's $\mathbf{c}$ is proportional to the tablet's. This holds when both are served by the same beam, or when one path dominates. The gate residual measures how far the other UE lies outside that one dimension. A per-PRG UE uses a different direction in the beam space for every PRG, which is why one number cannot merge it.
+\end{itemize}
+A natural next step is to combine the two: estimate $\mathbf{h}$ with $D=2$ and use stitching's continuity across PRG boundaries to fix $\mathbf{M}_b$. This would recover range while keeping the two-beam accuracy in time.

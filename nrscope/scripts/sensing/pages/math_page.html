@@ -1,0 +1,166 @@
+<title>PCI 632 sensing math</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400&display=swap">
+<style>
+/* layout: one reading column; each method is a block with its model, its estimator, and a verdict strip */
+:root {
+  --bg: #f7f7f5; --panel: #ffffff; --fg: #1d2127; --muted: #5f6874; --line: #dfe2e6; --accent: #2563a6;
+  --ok: #2f8a55; --part: #b07d18; --no: #b9443a; --tint: #eef3f9;
+  --serif: "Source Serif 4", Georgia, serif; --sans: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif; --mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #13171c; --panel: #1b2128; --fg: #e4e8ec; --muted: #9aa5b1; --line: #2d353e; --accent: #6aa7e6;
+  --ok: #5cbf83; --part: #d8ad4e; --no: #e46f64; --tint: #1c2733; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #13171c; --panel: #1b2128; --fg: #e4e8ec; --muted: #9aa5b1; --line: #2d353e; --accent: #6aa7e6;
+  --ok: #5cbf83; --part: #d8ad4e; --no: #e46f64; --tint: #1c2733; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font-family: var(--serif); font-size: 17px; line-height: 1.6; }
+.wrap { max-width: 780px; margin: 0 auto; padding-block: 28px 64px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: flex; flex-direction: column; gap: 26px; }
+h1 { font-family: var(--sans); font-size: 1.6rem; font-weight: 600; margin: 0; text-wrap: balance; line-height: 1.25; }
+h2 { font-family: var(--sans); font-size: 1.15rem; font-weight: 600; margin: 0; text-wrap: balance; }
+h3 { font-family: var(--sans); font-size: .8rem; font-weight: 500; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0; }
+p { margin: 0; }
+.lead { color: var(--muted); }
+section { display: flex; flex-direction: column; gap: 12px; }
+.model { background: var(--tint); border-radius: 8px; padding: 14px 16px; overflow-x: auto; }
+.verdict { font-family: var(--sans); font-size: 14px; line-height: 1.5; border-left: 3px solid var(--muted); padding: 4px 0 4px 12px; display: flex; flex-direction: column; gap: 4px; }
+.verdict.ok { border-color: var(--ok); } .verdict.part { border-color: var(--part); } .verdict.no { border-color: var(--no); }
+.tag { font-family: var(--sans); font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.ok .tag { color: var(--ok); } .part .tag { color: var(--part); } .no .tag { color: var(--no); }
+ul { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 4px; }
+.tblwrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-family: var(--sans); font-size: 14px; font-variant-numeric: tabular-nums; }
+td, th { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+th { color: var(--muted); font-weight: 500; font-size: 12.5px; }
+td.n { text-align: right; white-space: nowrap; }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
+.mono { font-family: var(--mono); font-size: .9em; }
+hr { border: 0; border-top: 1px solid var(--line); margin: 0; }
+mjx-container { overflow-x: auto; overflow-y: hidden; max-width: 100%; }
+</style>
+<script>
+window.MathJax = { tex: { inlineMath: [["\\(", "\\)"]] }, svg: { fontCache: "global" } };
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/3.2.2/es5/tex-svg.js"></script>
+
+<div class="wrap">
+  <header style="display:flex;flex-direction:column;gap:8px">
+    <h1>The math behind PCI 632 sensing</h1>
+    <p class="lead">What we do to the PDSCH DM-RS of a commercial cell before a range-Doppler map, in one model and a few estimators. Kept simple and a bit abstract; numbers are from the 4 and 5 November recordings.</p>
+  </header>
+
+  <section>
+    <h2>One model for everything</h2>
+    <p>For UE \(u\), subcarrier \(k\) (in 4-PRB group \(b(k)\)), receive antenna \(a\) and time \(t\), the DM-RS gives</p>
+    <div class="model">\[ y_u[k,a,t] \;=\; g_u\big(b(k),\,e(t)\big)\; h[k,a,t] \;+\; n \]
+    \[ h[k,a,t] \;=\; \sum_{p} \alpha_{p,a}\; e^{-j2\pi f_k \tau_p}\; e^{\,j2\pi \nu_p t} \]</div>
+    <ul>
+      <li>\(h\) is the physical channel: paths with delay \(\tau_p\) (range) and Doppler \(\nu_p\) (speed). It is the same for every UE.</li>
+      <li>\(g_u\) is what the gNB's precoder does to it: <b>one complex number</b> (phase and amplitude), common to our 4 antennas, constant inside a 4-PRB group \(b\) and inside a precoder epoch \(e\) (about 19 ms), different for every UE.</li>
+      <li>The receiver adds two known artefacts: a delay slope \(e^{-j2\pi f_k \delta(t)}\) from timing, and a phase step \(\varphi_{sf}\) at every 1 ms subframe (found this week, see the time section).</li>
+    </ul>
+    <p>The whole job: remove \(g_u\) so that what is left is \(h\) times <b>one</b> constant, over as many \((k,t)\) as possible. Then the map is a 2-D Fourier transform: frequency \(k \to\) range, time \(t \to\) Doppler.</p>
+  </section>
+  <hr>
+
+  <section>
+    <h3>Frequency, one UE</h3>
+    <h2>Stitching the 4-PRB jumps</h2>
+    <p>\(h\) is smooth across a group boundary, \(g\) jumps. So extrapolate each side to the boundary with a straight line (after removing the delay slope), getting \(L_a\) and \(R_a\) on each antenna, and fit one number for all antennas:</p>
+    <div class="model">\[ s_b = \frac{\sum_a L_a^{*} R_a}{\sum_a |L_a|^2}, \qquad G_b = G_{b-1}\, s_b, \qquad x[k,a,t] = \frac{y[k,a,t]}{G_{b(k)}} \]</div>
+    <p>In words: \(L_a\) is where the left group's channel (last subcarriers, straight-line fit, extended to the border) says the channel is at the border; \(R_a\) is the same seen from the right group. The real channel is smooth, so without a precoder change \(L_a \approx R_a\). Their ratio \(R_a/L_a\) is the jump, and \(s_b\) is that ratio fitted over all antennas at once.</p>
+    <p><b>Per epoch:</b> inside one epoch the jumps do not change, so first average the snapshots of the epoch into a template \(T_e\) (each aligned in slope and phase), stitch \(T_e\) once, and divide every snapshot of the epoch by the same \(G\). An epoch ends when a snapshot no longer correlates with the template (\(\geq 0.9\)).</p>
+    <div class="verdict ok"><span class="tag">Works</span>
+      <span>Jumps cluster at ±90° and reach 7.6 dB (90th pct); on a UE whose true jumps are zero the method finds 1.6° and 0.23 dB, so the bias is small. Ghost at +208 m: −14 dB raw → −30 dB stitched. Four antennas are 3× more repeatable than one.</span>
+      <span>Limit: errors add up along the chain (far end of a 160-PRB grant: 7° median, 36° p90).</span></div>
+  </section>
+
+  <section>
+    <h3>Frequency, holes</h3>
+    <h2>Filling or crossing holes</h2>
+    <ul>
+      <li><b>Epoch fill.</b> A group missing in this snapshot but present elsewhere in the epoch: take it from \(T_e/G\). Uses other slots, so it assumes the channel did not move much inside the epoch.</li>
+      <li><b>Edge across a hole.</b> Same line extrapolation as stitching, from both sides into the middle of the hole, one number \(s\). The jumps hidden in the hole multiply into one number, so in principle this works for any UE; what limits it is that each side's line has to travel half the hole, so an error in its slope grows with the hole size.</li>
+      <li><b>Per-4-PRB UE.</b> Each group has a different beam vector, which changes the local shape (and slope) of the effective channel, so one group's slope does not predict the next side across a hole. Touching groups work, any hole fails. Not yet tried: extrapolate with the slope of the whole band or epoch template instead of each side's own.</li>
+    </ul>
+    <div class="verdict part"><span class="tag">Partly</span>
+      <span>Edge across a hole: 0 / 4 / 8 / 16 / 32 PRBs → 2.3 / 3.7 / 5.8 / 10.8 / 22°. Usable to about 8 PRBs. Per-4-PRB UEs: any hole fails with the per-side slope; epoch fill is the only working option so far.</span></div>
+  </section>
+  <hr>
+
+  <section>
+    <h3>Frequency, several UEs</h3>
+    <h2>Merging UEs: anchor, gate, edge</h2>
+    <p>Goal: in one slot, put UE B's PRBs into the tablet's band, so the map gets a wider band (merging in <b>frequency</b>). The two UEs never share PRBs inside a slot, so the number is measured in a <b>nearby slot</b> where the tablet used B's PRBs; time only enters through how far that slot may be.</p>
+    <p>On a group both UEs use, the two precoders mostly differ by one number: \(x_B \approx c\, x_A\) (residual 8 to 18%). Estimate it from a tablet snapshot close in time (within \(D\)) on the shared groups:</p>
+    <div class="model">\[ c = \frac{\langle x_A, x_B\rangle}{\langle x_A, x_A\rangle}, \qquad \text{merged: } x_B / c \]
+    \[ \text{gate: } \varepsilon = \frac{\lVert x_B/c - x_A\rVert^2}{\lVert x_A\rVert^2} < 0.3 \]</div>
+    <p>If the anchor snapshot is not the one we merge into, chain through the tablet: \(c' = c / r\), with \(r\) the same fit between the two tablet snapshots. No anchor but the two UEs touch in the slot: <b>edge</b> matching at the junction, as for a hole.</p>
+    <div class="verdict ok"><span class="tag">Works, gated</span>
+      <span>Gate keeps 52% of merges with 14% error (the best single number would give 12%). Without the gate some UEs are 500% off. Bridge in time: about 10 ms on 5 Nov, 30 ms on 4 Nov. Edge between UEs: 47% vs 30% for the anchor, so a fallback only.</span>
+      <span>Limit: needs the tablet. Without it, 68% of 150 ms windows have nothing placed.</span></div>
+  </section>
+
+  <section>
+    <h3>Frequency and time, the tablet alone</h3>
+    <h2>The 2-beam bilinear model</h2>
+    <p>Fitting all tablet snapshots over 20 s shows its precoders live in a 2-dimensional space: two fixed "beam channels" mixed by a different pair of weights per group and snapshot.</p>
+    <div class="model">\[ y[k,s] \;\approx\; \mathbf{H}_U[k]\; \mathbf{c}[b(k),s], \qquad \mathbf{H}_U[k] \in \mathbb{C}^{1\times 2},\; \mathbf{c} \in \mathbb{C}^{2} \]</div>
+    <p>Alternating least squares: fix \(\mathbf{c}\), solve \(\mathbf{H}_U\); fix \(\mathbf{H}_U\), solve \(\mathbf{c}\). Two dimensions explain it to −20 dB on held-out data (one dimension: −10 dB).</p>
+    <p><b>The catch (gauge freedom):</b> for any invertible \(2\times2\) matrix \(M_b\) per group, \(\mathbf{H}_U[k]\,M_b\) and \(M_b^{-1}\mathbf{c}\) give the same fit. Each group can be re-mixed independently, so the model says nothing about how one group connects to the next in frequency.</p>
+    <div class="verdict part"><span class="tag">Good for time, not for range</span>
+      <span>Static residue −34 dB vs −19.5 dB for stitching: very good for clutter removal and time consistency. Useless for range because of the per-group freedom. Not in the pipeline.</span></div>
+  </section>
+  <hr>
+
+  <section>
+    <h3>Time</h3>
+    <h2>The subframe phase step</h2>
+    <p>Between two consecutive tablet snapshots the phase is stable (about 2°), except when they sit in different 1 ms subframes: then it jumps by a fixed \(\varphi_{sf}\).</p>
+    <div class="model">\[ y[k,a,n] \leftarrow y[k,a,n]\; e^{-j\varphi_{sf}\lfloor n/2 \rfloor}, \qquad \varphi_{sf} \approx 57\text{–}62^\circ \text{ per burst } (\pm 0.7^\circ) \]</div>
+    <p>\(n\) is the slot index. 60° per ms is about 168 Hz, the gNB–X410 clock offset (0.04 ppm) at 3.75 GHz: NR-Scope seems to correct the frequency inside each subframe but restart the phase at the next one. Uncorrected, it shifts the whole Doppler axis by 168 Hz and breaks any anchoring across subframes.</p>
+    <div class="verdict ok"><span class="tag">New, works</span><span>Estimated per burst from consecutive snapshots; deterministic, trivially removed. Should be fixed in NR-Scope.</span></div>
+  </section>
+
+  <section>
+    <h3>Time</h3>
+    <h2>Gluing precoder epochs</h2>
+    <p>Each epoch is stitched in frequency, but carries its own number \(c_e\). For Doppler over 150 ms we need all epochs on one number. Per antenna and group, average the 12 samples into a time series \(v_{a,b}(t)\) and model it with a few Doppler tones shared by all series:</p>
+    <div class="model">\[ v_{a,b}(t) \;=\; c_{e(t)} \sum_{q=1}^{P} \beta_{q,a,b}\; e^{\,j2\pi \nu_q t} \]</div>
+    <p>Fix \(|c|\) from the power ratio of the two epochs, scan the phase of \(c\) (5° grid), pick the tones by simultaneous OMP over a Doppler grid (−300…300 Hz) for each phase, and keep the phase with the smallest residual.</p>
+    <div class="verdict ok" id="v_glue"><span class="tag">Works (controlled)</span>
+      <span id="glue_txt">Long epochs cut in two with a known number (56 cases, 5 bursts): error 3.4° / 5.1° / 11° (median) with a time gap of 0 / 5 / 20 ms, against 3.8° / 19° / 66° for the nearest-snapshot anchor (after the subframe correction). A plain average fails (a slow phase drift remains). On the 286 real epoch changes the gap is usually under 1 ms; there one number plus 4 tones fits both epochs (residual about 5%) and agrees with the anchor to 10°. So: anchor is enough for back-to-back epochs, the Doppler model is needed when epochs are separated by idle slots.</span></div>
+  </section>
+
+  <section>
+    <h3>Frequency, sparse model</h3>
+    <h2>OMP with one number per piece (multi-band style)</h2>
+    <p>The multi-band papers treat each band as an unknown complex offset on shared paths. For us a "band" is a grant, a UE, or the two sides of a hole:</p>
+    <div class="model">\[ y[k,a] \;=\; c_{i(k)} \sum_{p=1}^{P} \alpha_{p,a}\; e^{-j2\pi f_k \tau_p} \]</div>
+    <p>Same solver idea: OMP for the delays on a 4× oversampled grid, least squares for the amplitudes and the \(c_i\), or a full scan of the phase of \(c_2\).</p>
+    <div class="verdict no" id="v_omp"><span class="tag">Does not help in frequency</span>
+      <span id="omp_txt">On 127 full-band tablet snapshots with known numbers, OMP never beats edge matching: no hole 18–29° vs 1.2°, 8-PRB hole 29–44° vs 11°, and past 32 PRBs both fail (60–90°, close to random). Two separate grants: touching 3°, 8 PRBs apart 10°, 32 PRBs apart 50°, further apart about 90°, with or without OMP. The reason shows up even when the true number is given: the model fills a hole of 4 or 8 PRBs well (10% error), 16 PRBs so-so (30–40%), and fails at 32 PRBs and beyond (90% or more). The channel is not sparse enough in delay at this bandwidth (dense multipath), so the paths cannot tie distant pieces together. One number per group on the raw snapshot fails completely (90°), as the gauge freedom predicts.</span></div>
+  </section>
+  <hr>
+
+  <section>
+    <h2>Where each piece stands</h2>
+    <div class="tblwrap"><table>
+      <tr><th>Problem</th><th>Method</th><th>Status</th><th>Number</th></tr>
+      <tr><td>4-PRB precoder jumps</td><td>stitching, per epoch, 4 antennas</td><td><span class="dot" style="background:var(--ok)"></span>works</td><td class="n">ghost −14 → −30 dB</td></tr>
+      <tr><td>Amplitude of the jumps</td><td>complex stitching number</td><td><span class="dot" style="background:var(--ok)"></span>works</td><td class="n">7.6 dB p90 corrected</td></tr>
+      <tr><td>Hole, one-precoder UE</td><td>edge across the hole</td><td><span class="dot" style="background:var(--part)"></span>≤ 8 PRBs</td><td class="n">5.8° at 8 PRBs</td></tr>
+      <tr><td>Hole, per-4-PRB UE</td><td>epoch fill</td><td><span class="dot" style="background:var(--part)"></span>only from other slots</td><td class="n">-</td></tr>
+      <tr><td>Hole, any UE</td><td>sparse delay model</td><td><span class="dot" style="background:var(--no)"></span>fails ≥ 32 PRBs</td><td class="n">90%+ at 32 PRBs</td></tr>
+      <tr><td>Second UE in frequency</td><td>anchor + gate</td><td><span class="dot" style="background:var(--ok)"></span>half of merges</td><td class="n">14% error</td></tr>
+      <tr><td>Second UE, no anchor</td><td>edge at the junction</td><td><span class="dot" style="background:var(--part)"></span>fallback</td><td class="n">47% error</td></tr>
+      <tr><td>Separated grants, no anchor</td><td>edge or sparse model</td><td><span class="dot" style="background:var(--no)"></span>fails</td><td class="n">50° at 32, ~90° beyond</td></tr>
+      <tr><td>Subframe phase step</td><td>remove \(\varphi_{sf}\) per ms</td><td><span class="dot" style="background:var(--ok)"></span>works</td><td class="n">60° ± 0.7°</td></tr>
+      <tr><td>Precoder epochs in time</td><td>sparse Doppler model</td><td><span class="dot" style="background:var(--ok)"></span>works</td><td class="n" id="glue_num">3.4° / 11° at 0 / 20 ms gap</td></tr>
+      <tr><td>Clutter, time consistency</td><td>2-beam bilinear model</td><td><span class="dot" style="background:var(--part)"></span>not for range</td><td class="n">−34 dB static residue</td></tr>
+      <tr><td>Light network</td><td>none yet (blind DM-RS dumps planned)</td><td><span class="dot" style="background:var(--no)"></span>open</td><td class="n">68% windows empty</td></tr>
+    </table></div>
+    <p class="lead" style="font-size:15px">The pattern: sparsity helps in <b>time</b> (few movers, mostly static over 150 ms) and not in <b>frequency</b> (many paths over 98 MHz). Joining things in frequency needs local continuity (stitching, edges) or a shared reference (anchor).</p>
+  </section>
+</div>
