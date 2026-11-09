@@ -237,3 +237,47 @@ def block_epochs(A, block_s, SL, q, NA, NG):
                 TPL[e] = (S_ + Y * m12, CN + pm)
         EP.append(e)
     return EP, TPL
+
+
+def inject_raw(A, targets, t0, fc=3.75e9, ula=0.5):
+    """Inject targets into raw snapshots BEFORE any processing, with sensing_offline's model (an echo is the measured
+    channel delayed, Doppler shifted, attenuated): y_k <- y_k (1 + g e^{-j2pi (k - K/2) df tau} e^{-j2pi R/lambda}
+    e^{j2pi ula a sin(angle)}), on measured values only. A: [(t, a, pm, Y, ...)], Y: NA x 816 on the 4-subcarrier grid
+    (subcarrier k = 12 PRB + 4 n + 1). targets: [(range_m, speed_ms, level_db, angle_deg)], R(t) = range - 2 speed (t-t0).
+    Returns (A with the targets, truth rows [(a, target, range, speed)])."""
+    lam = 3e8 / fc; kk = 12 * (np.arange(816) // 3) + 4 * (np.arange(816) % 3) + 1; out = []; truth = []
+    for x in A:
+        t, a, pm, Y = x[0], x[1], x[2], x[3]; m = 1.0 + 0j
+        for i, (r0, v, lv, ang) in enumerate(targets):
+            R = r0 - 2 * v * (t - t0); tau = R / 3e8
+            g = 10 ** (lv / 20) * np.exp(-2j * np.pi * R / lam) * np.exp(-2j * np.pi * (kk - 1638) * 30e3 * tau)
+            m = m + g[None, :] * np.exp(2j * np.pi * ula * np.arange(Y.shape[0]) * np.sin(np.radians(ang)))[:, None]
+            truth.append((a, i, R, v))
+        out.append(tuple([t, a, pm, Y * m] + list(x[4:])))
+    return out, truth
+
+def lowrank_fill(S, win=64, rank=4, iters=30):
+    """Fill the missing PRGs of each snapshot from the others, per antenna and per window of win consecutive snapshots:
+    the snapshots x 816 matrix of a window is completed with a rank-limited model (alternating least squares on the
+    observed entries). S: [(t, a, pm, X, l)]; returns the same list with full-band X and full PRG masks (the filled
+    values are an estimate; the measured ones are kept)."""
+    out = list(S); n = len(S)
+    for w0 in range(0, n, win):
+        idx = list(range(w0, min(n, w0 + win)))
+        if len(idx) < 2 * rank: continue
+        Mk = np.array([np.repeat(S[i][2], 12) for i in idx]); NA_ = S[idx[0]][3].shape[0]; Xf = [S[i][3].copy() for i in idx]
+        for c in range(NA_):
+            M = np.array([S[i][3][c] for i in idx]); O = Mk
+            U = np.linalg.svd(np.where(O, M, 0), full_matrices=False)[0][:, :rank]; V = np.zeros((rank, M.shape[1]), complex)
+            for _ in range(iters):
+                for k in range(M.shape[1]):
+                    o = O[:, k]
+                    if o.sum() >= rank: V[:, k] = np.linalg.lstsq(U[o], M[o, k], rcond=None)[0]
+                for j in range(M.shape[0]):
+                    o = O[j]
+                    if o.sum() >= rank: U[j] = np.linalg.lstsq(V[:, o].T, M[j, o], rcond=None)[0]
+            F = U @ V
+            for jj, i in enumerate(idx): Xf[jj][c] = np.where(O[jj], M[jj], F[jj])
+        for jj, i in enumerate(idx):
+            t, a, pm, X, l = S[i]; out[i] = (t, a, np.ones_like(pm), Xf[jj], l)
+    return out

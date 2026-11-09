@@ -13,10 +13,13 @@ Each CDM-pair value is written on both REs of its pair (subcarriers 12q + 4n and
 env GLUE=prg (with VAR=proc): glue epochs PRG by PRG (so_csi.glue_per_prg) instead of one number
 env LOS0 (1): put range zero on the direct path (burst median of the strongest delay bin) before writing
 env BLOCK=<s> (with VAR=proc): one stitching template per time block of <s> seconds (so_csi.block_epochs), not per epoch
+env INJ='r,v,dB,angle;...': inject targets into the raw snapshots first (truth to <out>.truth.csv)
+env FILL=1: low-rank completion of the missing PRGs per window (FILL_WIN 64 snapshots, FILL_RANK 4)
 env WSH=1: undo NR-Scope's window moves exactly from the GSW1 records (per antenna), then a straight-line clock drift
 env DEJUMP=1: remove NR-Scope's timing-window jumps first (so_csi.dejump / dejump_csi), for every variant
   trs     per (epoch, PRG) one number onto the nearest TRS (so_csi.ref_fix): no stitching chain, no anchor;
-          env REF_ALIGN (1: delay-align the TRS to each snapshot first), REF_DT (0.01 s: farthest TRS)
+          env REF_ALIGN (1: delay-align the TRS to each snapshot first), REF_DT (0.01 s: farthest TRS),
+          REF_EP (epoch | snap | cycle: 20 ms cycles cut at slot 2 mod 40, where the gNB updates precoders | both)
 usage: gs_to_nrsr.py <burst dir> <out estimates.bin>   env VAR (raw | proc | csi | trs), DIR (replay_blind_ch), CH (0,1,2,3)"""
 import sys, os, struct, numpy as np, collections as C
 BD, OUTF = sys.argv[1].rstrip("/") + "/", sys.argv[2]; saved = list(sys.argv)
@@ -35,6 +38,15 @@ for k in sorted(keys):
     if pm.sum() and np.all(np.isfinite(Y[:, np.repeat(pm, 12)])): S[k[1]].append((k[0] * 0.5e-3 + k[2] / 28e3, k[0], pm, Y, k[2]))
 del Dd
 U = max(S, key=lambda u: len(S[u])); A = sorted(S[U], key=lambda x: x[0])
+if os.environ.get("INJ", ""):   # targets injected into the RAW snapshots, before any processing (so_csi.inject_raw)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from so_csi import inject_raw
+    TG = [tuple(float(v) for v in x.split(",")) for x in os.environ["INJ"].split(";")]
+    A, TRUTH = inject_raw(A, TG, A[0][0])
+    with open(OUTF + ".truth.csv", "w") as ft:
+        ft.write("t_s,frame,slot,slot_abs,target,active,range_m,speed_ms,level_db,angle_deg\n")
+        TRUTH = list({(a_, i_): (a_, i_, r_, v_) for a_, i_, r_, v_ in TRUTH}.values())   # one row per slot and target
+        for a_, i_, r_, v_ in TRUTH: ft.write("0,%d,%d,%d,%d,1,%.3f,%.4f,%.1f,%.1f\n" % ((a_ // 20) % 1024, a_ % 20, a_, i_, r_, v_, TG[i_][2], TG[i_][3]))
 print("reference UE %#x, %d snapshots" % (U, len(A)))
 if os.environ.get("WSH", "0") == "1":   # undo NR-Scope's logged window moves exactly (GSW1), per antenna, then the clock drift
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -44,7 +56,9 @@ if os.environ.get("WSH", "0") == "1":   # undo NR-Scope's logged window moves ex
     jit = {}
     for sg in (1.0, -1.0):   # the sign that makes consecutive snapshots' slopes steadiest
         sl = np.unwrap([slope_of(undo_wsh(Y, shifts(a), sg), pm) for t, a, pm, Y, l in A[::3]]); jit[sg] = float(np.median(np.abs(np.diff(sl))))
-    SG = min(jit, key=jit.get)
+    # the sign is fixed (-1): measured on the TRS, whose slope changes follow the logged moves with correlation 0.99;
+    # the jitter comparison above is a near tie and once picked the wrong sign (env WSH_SIGN overrides)
+    SG = float(os.environ.get("WSH_SIGN", "-1"))
     A = [(t, a, pm, undo_wsh(Y, shifts(a), SG), l) for t, a, pm, Y, l in A]
     A, pdr, rs = remove_drift(A)
     print("window moves undone (sign %+d; slope jitter %.4f vs %.4f rad), drift %.4f rad/s on the grid, residual %.4f rad" % (SG, jit[SG], jit[-SG], pdr[0], rs))
@@ -136,11 +150,20 @@ if VAR == "trs":
         REF.append((a * 0.5e-3 + l / 28e3, R))
     del Gs
     EP, _ = epochs([(t, a, pm, Y) for t, a, pm, Y, l in A])
+    rep_ = os.environ.get("REF_EP", "epoch")
+    if rep_ == "snap": EP = list(range(len(A)))                                   # one number per snapshot and PRG
+    elif rep_ == "cycle": EP = [(a - 2) // 40 for t, a, pm, Y, l in A]          # 20 ms cycles cut at slot 2 mod 40
+    elif rep_ == "both": EP = [(e, (a - 2) // 40) for e, (t, a, pm, Y, l) in zip(EP, A)]   # detected epochs, also cut there
     XR, kept = ref_fix([(t, a, pm, Y) for t, a, pm, Y, l in A], EP, REF, max_dt=float(os.environ.get("REF_DT", "0.01")),
                        align_delay=os.environ.get("REF_ALIGN", "1") == "1")
     print("TRS reference: %d of %d snapshots have a TRS within %s s" % (sum(kept), len(kept), os.environ.get("REF_DT", "0.01")))
     A = [(t, a, pm, X, l) for (t, a, pm, Y, l), X, k in zip(A, XR, kept) if k]
     print("TRS reference: %d TRS symbols, kept %d snapshots" % (len(REF), len(A)))
+if os.environ.get("FILL", "0") == "1" and A:   # complete the missing PRGs from neighbouring snapshots (so_csi.lowrank_fill)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from so_csi import lowrank_fill
+    A = lowrank_fill(A, win=int(os.environ.get("FILL_WIN", "64")), rank=int(os.environ.get("FILL_RANK", "4")))
+    print("gaps filled (low rank %s, window %s snapshots)" % (os.environ.get("FILL_RANK", "4"), os.environ.get("FILL_WIN", "64")))
 if os.environ.get("LOS0", "1") == "1" and A:   # range zero on the direct path, not on the mean delay (so_csi.los_to_zero)
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from so_csi import los_to_zero
