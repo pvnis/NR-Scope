@@ -51,3 +51,18 @@ tracker). Most scripts take `<recording dir> <out> [burst indices]` and read the
 | `run_all2.sh`, `run_blind_all.sh`, `run_trs_all.sh`, `run_ch12.sh` | replay every burst x antenna, then the analyses |
 
 Results and open items: `sens6:~/field/OPEN_ISSUES.md`. Heavy data: `sens6:/mnt/mydrive/field`.
+
+## NR-Scope's sensing chain on our estimates (2026-11-09)
+
+| Script | What |
+|---|---|
+| `gs_to_nrsr.py` | dumps -> `sensing.record_estimates` for `build/nrscope/src/tests/sensing_offline` (variants raw / proc / csi / trs; env WSH=1 undoes the logged window moves, LOS0 puts each antenna's direct path at range zero) |
+| `so_csi.py` | CSI-RS / TRS reference corrections, window-shift (GSW1) and drift helpers |
+| `so_light.py` | light network: TRS + every DM-RS except the tablet's, one stream |
+| `so_simprec.py`, `so_synth.py` | synthetic estimates on the real occupancy (simulated precoders, timing jumps) |
+| `so_score.py` | scores `map2d.csv` against the injected targets (`--inject`) |
+| `csi_beamdiv.py` | how much the precoder direction changes per PRG (from the CSI-RS) |
+
+Needs the NR-Scope options `sensing.allow_gaps`, `sensing.align_search_bins`, `sensing.min_snapshots` and the
+GoldenSniffer GSW1 record. Per-antenna replays must be aligned (window moves, direct path) before anything
+multi-antenna: each replay has its own sync loop.
