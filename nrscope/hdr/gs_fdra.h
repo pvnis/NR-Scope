@@ -100,6 +100,11 @@ void gs_dmrs_rb_map(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb, uint3
 void gs_dmrs_rb_pairs(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb, uint32_t slot_idx, uint32_t l,
                       uint32_t n_id, cf_t* p, float* coh2);
 
+/* Port 1001's channel per CDM pair of comb 0: the same pairs with the FD-OCC [+1, -1],
+   (z0 - z1) / 2 after the sequence, 3 per CRB into p[3 c + n]. */
+void gs_dmrs_rb_pairs_1001(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb, uint32_t slot_idx, uint32_t l,
+                           uint32_t n_id, cf_t* p);
+
 /* NZP CSI-RS on one symbol, any configuration (TS 38.211 7.4.1.5): its sequence, c_init =
    (2^10 (14 n_s + l + 1)(2 n_ID + 1) + n_ID) mod 2^31, indexed from CRB 0 by
    m' = floor(n alpha) + k' + floor(kbar rho / 12). For every subcarrier c of the PRB and

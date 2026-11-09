@@ -1562,6 +1562,37 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
         for (int i = 0; i < n; i++) {
           (out[i].nof_bits > 0 && out[i].payload[0] == 1 ? n_dl : n_ul)++;
         }
+        /* dump (env NRSCOPE_GS_RAW_SIZE=<bits>): every DL DCI of that size with the raw grid of
+          symbols 2, 3, 11, 12 over the whole carrier, to study grants whose DM-RS we do not see.
+          Record: "GSR1", sfn u16, slot u8, nsym u8, rnti u16, nof_bits u16, first_crb u16, nprb u16,
+          payload (nof_bits bytes, one bit each), then per symbol: l u8 and 12 * nprb complex floats. */
+        static const uint32_t gs_raw_size =
+            getenv("NRSCOPE_GS_RAW_SIZE") != nullptr ? (uint32_t)atoi(getenv("NRSCOPE_GS_RAW_SIZE")) : 0;
+        if (gs_dump_bin != nullptr && gs_raw_size > 0) {
+          for (int i = 0; i < n; i++) {
+            if (out[i].nof_bits != gs_raw_size || out[i].payload[0] != 1) {
+              continue;
+            }
+            static const uint8_t ls[4] = {2, 3, 11, 12};
+            const uint16_t sfn16 = (uint16_t)state->sfn, rn = out[i].rnti, nb = (uint16_t)out[i].nof_bits,
+                           fc16 = (uint16_t)first_crb, np16 = (uint16_t)np;
+            const uint8_t sl8 = (uint8_t)sl, ns = 4;
+            std::lock_guard<std::mutex> lk(gs_dump_mutex);
+            fwrite("GSR1", 1, 4, gs_dump_bin);
+            fwrite(&sfn16, 2, 1, gs_dump_bin);
+            fwrite(&sl8, 1, 1, gs_dump_bin);
+            fwrite(&ns, 1, 1, gs_dump_bin);
+            fwrite(&rn, 2, 1, gs_dump_bin);
+            fwrite(&nb, 2, 1, gs_dump_bin);
+            fwrite(&fc16, 2, 1, gs_dump_bin);
+            fwrite(&np16, 2, 1, gs_dump_bin);
+            fwrite(out[i].payload, 1, nb, gs_dump_bin);
+            for (uint8_t j = 0; j < ns; j++) {
+              fwrite(&ls[j], 1, 1, gs_dump_bin);
+              fwrite(ue_dl.sf_symbols[0] + ls[j] * nof_sc, sizeof(cf_t), 12 * np, gs_dump_bin);
+            }
+          }
+        }
         std::string line = std::to_string(state->sfn) + "," + std::to_string(sl) + "," + std::to_string(n_dl) + "," +
                            std::to_string(n_ul);
         uint32_t cnt1[14] = {}, cnt8[14] = {};
@@ -1977,8 +2008,9 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
               const uint16_t sfn16 = (uint16_t)state->sfn, rn = dd.rnti, np16 = (uint16_t)nprb;
               const uint8_t  sl8   = (uint8_t)g.slot;
               const float    occf = s0.occ, cohf = s0.coh0;
+              static const bool p1001 = getenv("NRSCOPE_GS_DUMP_P1001") != nullptr;
               std::lock_guard<std::mutex> lk(gs_dump_mutex);
-              fwrite("GSD1", 1, 4, gs_dump_bin);
+              fwrite(p1001 ? "GSD2" : "GSD1", 1, 4, gs_dump_bin);
               fwrite(&sfn16, 2, 1, gs_dump_bin);
               fwrite(&sl8, 1, 1, gs_dump_bin);
               fwrite(&ns, 1, 1, gs_dump_bin);
@@ -1990,9 +2022,16 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
                 const uint8_t v = gp[c] ? 1 : 0;
                 fwrite(&v, 1, 1, gs_dump_bin);
               }
+              /* env NRSCOPE_GS_DUMP_P1001: record "GSD2", the same with port 1001 after port 1000 on
+                every symbol (3 * nprb complex floats each) */
               for (uint8_t i = 0; i < ns; i++) {
                 fwrite(&syms[i], 1, 1, gs_dump_bin);
                 fwrite(dp[i], sizeof(cf_t), 3 * nprb, gs_dump_bin);
+                if (p1001) {
+                  static thread_local cf_t q1[3 * SRSRAN_MAX_PRB_NR];
+                  gs_dmrs_rb_pairs_1001(ue_dl.sf_symbols[0] + syms[i] * nof_sc, first_crb, nprb, g.slot, syms[i], dm_nid, q1);
+                  fwrite(q1, sizeof(cf_t), 3 * nprb, gs_dump_bin);
+                }
               }
             }
             if (gs_survey_csv != nullptr) {

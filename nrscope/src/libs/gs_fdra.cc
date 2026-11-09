@@ -297,6 +297,28 @@ void gs_dmrs_rb_pairs(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb, uin
   }
 }
 
+void gs_dmrs_rb_pairs_1001(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb, uint32_t slot_idx, uint32_t l,
+                           uint32_t n_id, cf_t* p)
+{
+  static thread_local cf_t r[NRSCOPE_DMRS_MAX_PILOTS];
+  const uint32_t           m_max = (first_crb + nof_prb) * 6;
+  if (m_max > NRSCOPE_DMRS_MAX_PILOTS) {
+    return;
+  }
+  nrscope_dmrs_sequence(nrscope_dmrs_c_init(slot_idx, l, n_id, false), m_max, (float)M_SQRT1_2, r);
+  for (uint32_t c = 0; c < nof_prb; c++) {
+    for (uint32_t n = 0; n < 3; n++) {
+      const std::complex<float> a = std::complex<float>(sym[c * 12 + 4 * n]) *
+                                    std::conj(std::complex<float>(r[(first_crb + c) * 6 + 2 * n])) * 2.0f;
+      const std::complex<float> b = std::complex<float>(sym[c * 12 + 4 * n + 2]) *
+                                    std::conj(std::complex<float>(r[(first_crb + c) * 6 + 2 * n + 1])) * 2.0f;
+      const std::complex<float> v = 0.5f * (a - b);
+      __real__ p[3 * c + n]       = v.real();
+      __imag__ p[3 * c + n]       = v.imag();
+    }
+  }
+}
+
 void gs_csirs_scan(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb, uint32_t slot_idx, uint32_t l, uint32_t n_id,
                    float coh[12][4], float pr[12])
 {
