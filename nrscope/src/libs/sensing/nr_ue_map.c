@@ -1112,7 +1112,7 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
 #endif
 
   // We require a mininum of symbols
-  if (n < NR_SENSING_MIN_SNAPSHOTS) return 0;
+  if (n < nr_sensing_min_snapshots) return 0;
 
   // widest grant gathered, for the log below
   int n_pilots_widest = hist->ring[idx[0]].n_pilots;

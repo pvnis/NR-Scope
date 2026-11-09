@@ -25,6 +25,9 @@
 #include "nrscope/hdr/rrc_recfg_parse.h"
 
 extern "C" int nr_sensing_los_margin_bins; // nrscope/hdr/sensing/nr_ue_sensing.h
+extern "C" int nr_sensing_allow_gaps;      // nrscope/hdr/sensing/nr_ue_sensing.h
+extern "C" int nr_sensing_min_snapshots;
+extern "C" double nr_sensing_align_search_bins;
 extern "C" double nr_sensing_eca_batch_s;  // nrscope/hdr/sensing/nr_ue_map.h
 
 #include "srsran/phy/ue/srsgui_plot.h"
@@ -126,6 +129,18 @@ void load_sensing_config(const YAML::Node& config_yaml)
     if (sn["map_overlap"]) {
       nrscope_sensing_args.map_overlap = sn["map_overlap"].as<double>();
       std::cout << "    sensing.map_overlap: " << nrscope_sensing_args.map_overlap << std::endl;
+    }
+    if (sn["min_snapshots"]) {
+      nr_sensing_min_snapshots = sn["min_snapshots"].as<int>();
+      std::cout << "    sensing.min_snapshots: " << nr_sensing_min_snapshots << std::endl;
+    }
+    if (sn["allow_gaps"]) {
+      nr_sensing_allow_gaps = sn["allow_gaps"].as<bool>() ? 1 : 0;
+      std::cout << "    sensing.allow_gaps: " << nr_sensing_allow_gaps << std::endl;
+    }
+    if (sn["align_search_bins"]) {
+      nr_sensing_align_search_bins = sn["align_search_bins"].as<double>();
+      std::cout << "    sensing.align_search_bins: " << nr_sensing_align_search_bins << std::endl;
     }
     if (sn["los_margin_bins"]) {
       nr_sensing_los_margin_bins = sn["los_margin_bins"].as<int>();

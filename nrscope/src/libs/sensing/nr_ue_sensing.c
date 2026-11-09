@@ -14,6 +14,9 @@
 
 int nr_sensing_tdd_period_slots = 10;
 int nr_sensing_los_margin_bins = -1;
+int nr_sensing_allow_gaps = 0;
+int nr_sensing_min_snapshots = NR_SENSING_MIN_SNAPSHOTS;
+double nr_sensing_align_search_bins = NR_SENSING_ALIGN_SEARCH_BINS;
 
 bool nr_ue_sensing_extract_lattice(int n_sc,
                                    const cf_t H_row[n_sc],
@@ -39,9 +42,20 @@ bool nr_ue_sensing_extract_lattice(int n_sc,
       if (k_step == 0)
         k_step = step;
       else if (step != k_step) {
-        // an error would happen
-        LOG_E(NR_PHY, "sensing: non-uniform pilot lattice (step %d then %d at k=%d)\n", k_step, step, k);
-        return false;
+        if (nr_sensing_allow_gaps) {
+          // a gap: the lattice step is the greatest common divisor of the steps seen
+          int x = k_step, y = step;
+          while (y != 0) {
+            const int r = x % y;
+            x = y;
+            y = r;
+          }
+          k_step = x;
+        } else {
+          // an error would happen
+          LOG_E(NR_PHY, "sensing: non-uniform pilot lattice (step %d then %d at k=%d)\n", k_step, step, k);
+          return false;
+        }
       }
     }
     n++;
@@ -63,9 +77,11 @@ bool nr_ue_sensing_extract_lattice(int n_sc,
   }
   memset(out, 0, n_lattice * sizeof(*out));
   for (int k = k_first; k <= k_prev; k += k_step)
-    out[(k - offset) / k_step] = H_row[k];
+    out[(k - offset) / k_step] = valid_row[k] ? H_row[k] : 0; // a gap stays zero
 
-  lattice->n = n;
+  /* n: the positions the measured span covers, from the first pilot to the last. Without
+  gaps it is the pilot count; with gaps (allow_gaps) it includes them, as zeros. */
+  lattice->n = (k_prev - k_first) / k_step + 1;
   lattice->n_lattice = n_lattice;
   lattice->k_first = k_first;
   lattice->k_step = k_step;

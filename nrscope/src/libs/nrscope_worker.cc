@@ -457,6 +457,7 @@ void NRScopeWorker::Run()
 
     /* GoldenSniffer: demodulate and queue for its own searcher threads, never waited for */
     if (gs_decoder.ready && !uplink_only) {
+      worker_state.window_shift_samples = outcome.window_shift_total;
       gs_decoder.Submit(&slot, &worker_state, &slot_result);
     }
 

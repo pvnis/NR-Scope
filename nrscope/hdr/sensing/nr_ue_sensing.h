@@ -57,6 +57,16 @@ and the Doppler axis are untouched. */
 path is put at, or -1 to leave the delay axis where the symbol timing puts it (the default,
 as before). NR_SENSING_LOS_MARGIN_BINS is the suggested value. */
 extern int nr_sensing_los_margin_bins;
+/* sensing.allow_gaps: accept a grant whose pilots have gaps (several pieces of one grant, or
+several grants joined, on a commercial cell): the pilots stay at their lattice positions, the
+gaps stay zero, and the lattice describes the whole span. 0 (default) rejects such a grant. */
+extern int nr_sensing_allow_gaps;
+/* sensing.min_snapshots: fewest snapshots a map is built from (default NR_SENSING_MIN_SNAPSHOTS). A sparse
+periodic signal (the TRS: 4 symbols every 20 ms, ~28 in a 133 ms window) needs it lower. */
+extern int nr_sensing_min_snapshots;
+/* sensing.align_search_bins: half width of the alignment's delay search around the previous
+shift, in bins (default NR_SENSING_ALIGN_SEARCH_BINS). Wider follows larger timing-window jumps. */
+extern double nr_sensing_align_search_bins;
 /// consecutive symbols that must place the direct path elsewhere before the roll follows
 #define NR_SENSING_LOS_ROLL_VOTES 16
 #define NR_SENSING_MIN_BAND_DEN 2

@@ -69,6 +69,8 @@ static void align_ref_reset(align_state_t *s, const cf_t *p, int a, int n)
 {
   memset(s->ref_valid, 0, sizeof(s->ref_valid));
   for (int i = a; i < a + n; i++) {
+    if (crealf(p[i]) == 0.0f && cimagf(p[i]) == 0.0f)
+      continue; // a gap of the grant, not a measurement
     s->ref_re[i] = crealf(p[i]);
     s->ref_im[i] = cimagf(p[i]);
     s->ref_valid[i] = true;
@@ -83,6 +85,8 @@ static void align_ref_update(align_state_t *s, const cf_t *p, int a, int n)
 {
   const float w = NR_SENSING_ALIGN_REF_WEIGHT;
   for (int i = a; i < a + n; i++) {
+    if (crealf(p[i]) == 0.0f && cimagf(p[i]) == 0.0f)
+      continue; // a gap of the grant, not a measurement
     if (!s->ref_valid[i]) {
       s->ref_re[i] = crealf(p[i]);
       s->ref_im[i] = cimagf(p[i]);
@@ -201,11 +205,11 @@ bool nr_ue_sensing_align_symbol(uint64_t t_sample,
     int n_overlap = 0;
     for (int k = 0; k < n; k++) {
       const int i = a + k;
-      if (!s->ref_valid[i]) {
+      const double pr = crealf(pilots[i]), pi = cimagf(pilots[i]);
+      if (!s->ref_valid[i] || (pr == 0.0 && pi == 0.0)) { // no reference here, or a gap of the grant
         xr[k] = xi[k] = 0.0;
         continue;
       }
-      const double pr = crealf(pilots[i]), pi = cimagf(pilots[i]);
       const double rr = s->ref_re[i], ri = s->ref_im[i];
       xr[k] = pr * rr + pi * ri;
       xi[k] = pi * rr - pr * ri;
@@ -218,7 +222,7 @@ bool nr_ue_sensing_align_symbol(uint64_t t_sample,
     if (n_overlap >= NR_SENSING_ALIGN_MIN_OVERLAP && e_p > 0.0 && e_r > 0.0) {
       
       // coarse search around the previous shift ...
-      const int n_steps = (int)lround(NR_SENSING_ALIGN_SEARCH_BINS / NR_SENSING_ALIGN_STEP_BINS);
+      const int n_steps = (int)lround(nr_sensing_align_search_bins / NR_SENSING_ALIGN_STEP_BINS);
       double pw[2 * n_steps + 1];
       int best = -n_steps; // the first point computed, so no comparison reads an unfilled entry
       for (int k = -n_steps; k <= n_steps; k++) {

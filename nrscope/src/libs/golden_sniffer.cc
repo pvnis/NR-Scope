@@ -1763,6 +1763,20 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
           PRB mask the strict map (coherence > 0.8) of the first DM-RS symbol; the additional type-A
           positions (5, 7, 8, 11) whose strict map shares at least half of those PRBs. Decoded grants are in it too:
           the analysis removes their PRBs. */
+        /* dump (golden_sniffer.dump_blind): the receive window's total shift for this slot, so the
+          sync loop's window moves can be undone exactly offline (they tilt the phase across the band
+          like a delay step). Record: "GSW1", sfn u16, slot u8, 0 u8, window_shift_total int64 (samples). */
+        if (gs_dump_bin != nullptr && nrscope_gs_args.dump_blind) {
+          const uint16_t sfn16 = (uint16_t)state->sfn;
+          const uint8_t  sl8 = (uint8_t)sl, z8 = 0;
+          const int64_t  ws = state->window_shift_samples;
+          std::lock_guard<std::mutex> lk(gs_dump_mutex);
+          fwrite("GSW1", 1, 4, gs_dump_bin);
+          fwrite(&sfn16, 2, 1, gs_dump_bin);
+          fwrite(&sl8, 1, 1, gs_dump_bin);
+          fwrite(&z8, 1, 1, gs_dump_bin);
+          fwrite(&ws, 8, 1, gs_dump_bin);
+        }
         if (gs_dump_bin != nullptr && nrscope_gs_args.dump_blind && cnt8[dmrs_l0] >= 4) {
           static thread_local cf_t  bp[14][3 * SRSRAN_MAX_PRB_NR], bq[14][3 * SRSRAN_MAX_PRB_NR];
           static thread_local float bt[SRSRAN_MAX_PRB_NR];

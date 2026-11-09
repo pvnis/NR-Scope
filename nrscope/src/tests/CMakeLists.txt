@@ -115,6 +115,10 @@ add_test(nrscope_gs_dmrs_shape gs_dmrs_shape_test)
 
 # Replays a sensing.record_estimates file through the sensing pipeline, offline: the
 # recorded run's channel estimates, impairments included, through the live code.
+# tests/ is added before nrscope/src/CMakeLists.txt sets SRSUE_SOURCES / SRSRAN_SOURCES, so they
+# are empty here: the same lists, local to sensing_offline
+set(SO_UE_LIBS srsue_phy srsue_stack srsue_upper srsue_mac srsue_rrc srslog system srsue_nr_stack srsue_rrc_nr srsue_mac_nr)
+set(SO_RAN_LIBS srsran_common srsran_mac srsran_phy srsran_rf_utils srsran_radio srsran_gtpu srsran_rlc srsran_pdcp rrc_asn1 srslog support system rrc_nr_asn1 ngap_nr_asn1)
 add_executable(sensing_offline sensing_offline.cc)
 target_link_libraries(sensing_offline srsue_phy
                                       srsran_common
@@ -122,12 +126,18 @@ target_link_libraries(sensing_offline srsue_phy
                                       srsran_radio
                                       rrc_nr_asn1
                                       nrscope_libs
-                                      ${SRSUE_SOURCES}
-                                      ${SRSRAN_SOURCES}
+                                      rrc_nr_asn1 # again: nrscope_libs (dci_decoder) needs it after it in a static link
+                                      ${SO_UE_LIBS}
+                                      ${SO_RAN_LIBS}
                                       ${CMAKE_THREAD_LIBS_INIT}
                                       ${Boost_LIBRARIES}
                                       ${YAML_CPP_LIBRARIES}
                                       m)
+# the same extras as nrscope itself (to_google.cc needs Python, the libs liquid)
+target_link_libraries(sensing_offline "liquid")
+if (PYTHON_LIBRARIES)
+  target_link_libraries(sensing_offline ${PYTHON_LIBRARIES})
+endif()
 
 # GoldenSniffer blind PDCCH detection (src/libs/golden_sniffer): srsRAN encodes DCIs
 # into synthetic slots, the blind search must find them with no RNTI, scrambling ID,
