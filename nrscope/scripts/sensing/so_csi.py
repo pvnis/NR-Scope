@@ -1,3 +1,4 @@
+import os
 """CSI-RS-based precoder correction ("CSI stitching"), shared by gs_to_nrsr.py (VAR=csi) and so_simprec.py.
 For every DM-RS snapshot y (NA x 816, 3 CDM-pair values per PRB) and PRG b, with H_b the 8-port channel of the nearest
 CSI-RS (NA x 4 PRBs x 8 ports, flat in a PRB): the PRG's precoder weights w_b = argmin |y_b - H_b w|, the burst's
@@ -148,13 +149,13 @@ def ref_fix(A, EP, REF, max_dt=0.01, align_delay=False):
             z = np.sum((P_[:, 1:] * np.conj(P_[:, :-1]))[:, ok])
             if z != 0: R = R * np.exp(1j * np.angle(z) * idx)[None, :]
         for b in np.flatnonzero(pm):
-            sl = slice(12 * b, 12 * b + 12); k = (EP[i], b)
+            sl = slice(12 * b, 12 * b + 12); k = (_epk(EP[i], b), b)
             num[k] = num.get(k, 0) + np.vdot(R[:, sl], Y[:, sl]); den[k] = den.get(k, 0) + np.vdot(R[:, sl], R[:, sl]).real
     out = []; kept = []
     for i, (t, a, pm, Y) in enumerate(A):
         X = np.zeros_like(Y); ok = False
         for b in np.flatnonzero(pm):
-            k = (EP[i], b)
+            k = (_epk(EP[i], b), b)
             if k in num and den[k] > 0 and num[k] != 0:
                 X[:, 12 * b:12 * b + 12] = Y[:, 12 * b:12 * b + 12] / (num[k] / den[k]); ok = True
         out.append(X); kept.append(ok)
@@ -178,7 +179,10 @@ def los_to_zero(S, NF=4096):
     for Pa in P:
         k = int(np.argmax(Pa)); y0, y1, y2 = Pa[k - 1], Pa[k], Pa[(k + 1) % NF]; d = 0.5 * (y0 - y2) / (y0 - 2 * y1 + y2 + 1e-30)
         v = k + d; b0.append(v - NF if v > NF / 2 else v)
-    b0 = np.array(b0); ramp = np.exp(2j * np.pi * b0[:, None] * np.arange(S[0][3].shape[1])[None, :] / NF)
+    # ramp about the carrier (DC, pilot q~409.25), not the band edge: the edge version leaves a constant phase per
+    # antenna (2 pi b0 409/NF), which breaks the inter-antenna phase whenever it is not calibrated away afterwards
+    q = np.arange(S[0][3].shape[1]) - float(os.environ.get("WSH_Q0", "409.25"))
+    b0 = np.array(b0); ramp = np.exp(2j * np.pi * b0[:, None] * q[None, :] / NF)
     return [(t, a, pm, X * ramp, l) for t, a, pm, X, l in S], b0
 
 
@@ -200,7 +204,11 @@ PH_PER_SAMPLE = 2 * np.pi * 120e3 / 122.88e6   # phase step per DM-RS/TRS grid i
 def undo_wsh(Y, shifts, sign=1.0):
     """Y: NA x M on the 4-subcarrier grid; shifts: NA window shifts (samples) for this slot. Multiplies antenna c by
     exp(sign * j * PH_PER_SAMPLE * shift_c * q), undoing the window move (sign found empirically)."""
-    q = np.arange(Y.shape[1])
+    # The phase of a window move is linear in frequency about the CARRIER (DC), not about the band edge: measuring q
+    # from the edge leaves a constant phase PH*shift*q_dc per antenna, which breaks the inter-antenna phase at every
+    # move (each antenna replay moves at its own times). Pilot q sits at subcarrier ~4q+1 of 3276, DC at 1638 -> q_dc
+    # 409.25 (env WSH_Q0; 0 restores the old behaviour).
+    q = np.arange(Y.shape[1]) - float(os.environ.get("WSH_Q0", "409.25"))
     return Y * np.exp(1j * sign * PH_PER_SAMPLE * np.asarray(shifts, float)[:, None] * q[None, :])
 
 def slope_of(Y, pm):
@@ -212,7 +220,7 @@ def remove_drift(A):
     per-snapshot phase slope over time (unwrapped, robust) and remove that line only. A: [(t, a, pm, Y, ...)]."""
     t = np.array([x[0] for x in A]); s = np.unwrap(np.array([slope_of(x[3], x[2]) for x in A]))
     p = np.polyfit(t, s, 1); r = s - np.polyval(p, t); keep = np.abs(r) < 3 * np.std(r) + 1e-9
-    p = np.polyfit(t[keep], s[keep], 1); q = np.arange(A[0][3].shape[1])
+    p = np.polyfit(t[keep], s[keep], 1); q = np.arange(A[0][3].shape[1]) - float(os.environ.get("WSH_Q0", "409.25"))   # about DC
     out = [tuple([x[0], x[1], x[2], x[3] * np.exp(-1j * np.polyval(p, x[0]) * q)[None, :]] + list(x[4:])) for x in A]
     return out, p, float(np.std(s[keep] - np.polyval(p, t[keep])))
 
@@ -256,28 +264,70 @@ def inject_raw(A, targets, t0, fc=3.75e9, ula=0.5):
         out.append(tuple([t, a, pm, Y * m] + list(x[4:])))
     return out, truth
 
-def lowrank_fill(S, win=64, rank=4, iters=30):
-    """Fill the missing PRGs of each snapshot from the others, per antenna and per window of win consecutive snapshots:
-    the snapshots x 816 matrix of a window is completed with a rank-limited model (alternating least squares on the
-    observed entries). S: [(t, a, pm, X, l)]; returns the same list with full-band X and full PRG masks (the filled
-    values are an estimate; the measured ones are kept)."""
-    out = list(S); n = len(S)
-    for w0 in range(0, n, win):
-        idx = list(range(w0, min(n, w0 + win)))
-        if len(idx) < 2 * rank: continue
-        Mk = np.array([np.repeat(S[i][2], 12) for i in idx]); NA_ = S[idx[0]][3].shape[0]; Xf = [S[i][3].copy() for i in idx]
-        for c in range(NA_):
-            M = np.array([S[i][3][c] for i in idx]); O = Mk
-            U = np.linalg.svd(np.where(O, M, 0), full_matrices=False)[0][:, :rank]; V = np.zeros((rank, M.shape[1]), complex)
-            for _ in range(iters):
-                for k in range(M.shape[1]):
-                    o = O[:, k]
-                    if o.sum() >= rank: V[:, k] = np.linalg.lstsq(U[o], M[o, k], rcond=None)[0]
-                for j in range(M.shape[0]):
-                    o = O[j]
-                    if o.sum() >= rank: U[j] = np.linalg.lstsq(V[:, o].T, M[j, o], rcond=None)[0]
-            F = U @ V
-            for jj, i in enumerate(idx): Xf[jj][c] = np.where(O[jj], M[jj], F[jj])
-        for jj, i in enumerate(idx):
-            t, a, pm, X, l = S[i]; out[i] = (t, a, np.ones_like(pm), Xf[jj], l)
-    return out
+def gcal_prep(REFS):
+    """Per-4-PRB-group inter-antenna calibration from full-band references (the TRS). REFS: [(t, R)], R: NA x 816.
+    Returns (times, C) with C[j, c, b] = sum over group b of R_c conj(R_0) for reference j."""
+    TT = np.array([r[0] for r in REFS])
+    C = np.array([(R * np.conj(R[0])[None, :]).reshape(R.shape[0], -1, 12).sum(2) for _, R in REFS])
+    return TT, C
+
+def gcal_apply(t, X, prep, half=0.04):
+    """Rotate each antenna, group by group, onto antenna 0 with the references within +-half s of t (summed, so a
+    moving target averages out; the nearest one if none). One phase per snapshot is not enough: the
+    inter-antenna phase swings by turns across the band, so it would depend on which PRBs the snapshot covers."""
+    TT, C = prep; s = np.abs(TT - t) <= half
+    z = C[s].sum(0) if s.any() else C[int(np.argmin(np.abs(TT - t)))]
+    NA = X.shape[0]
+    return (X.reshape(NA, -1, 12) * np.exp(-1j * np.angle(z))[:, :, None]).reshape(NA, -1)
+
+def _epk(e, b):
+    """Epoch key of PRG b: EP entries are one key per snapshot, or a dict {PRG: key} when one symbol carries
+    several precoder epochs (blind record: several UEs per symbol)."""
+    return e[b] if isinstance(e, dict) else e
+
+
+def ref_fix_hyb(A, EP, REF, max_dt=0.01, align_delay=False, iters=6):
+    """TRS reference with d(t, b) = c(t) * D(epoch, b), fitted by alternating weighted LS. The per-snapshot,
+    per-PRG numbers of ref_fix(snap) are factored: D carries the precoder (constant over the epoch, so it does not
+    follow a target's Doppler), c(t) one complex number per snapshot common to all PRGs carries the common
+    phase/timing jitter that one number per epoch cannot follow. A target leaks into c(t) only through its average
+    over the whole allocation (small beyond a few metres for wide grants), not per PRG as with REF_EP=snap, which
+    removes the array-mean part of near slow targets. Weights |R_b|^2. EP[i]: one key, or {PRG: key} (_epk); c(t)
+    is shared by all epochs of a snapshot. Same inputs/outputs as ref_fix."""
+    TR = np.array([r[0] for r in REF]); idx = np.arange(REF[0][1].shape[1]) if REF else None
+    inside = ((idx[1:] % 12) != 0) if REF else None
+    II, BB, KK, dd, ww = [], [], [], [], []; kid = {}
+    for i, (t, a, pm, Y) in enumerate(A):
+        if not len(TR): break
+        j = int(np.argmin(np.abs(TR - t)))
+        if abs(TR[j] - t) > max_dt: continue
+        R = REF[j][1]
+        if align_delay:
+            m = np.repeat(pm, 12); ok = m[1:] & m[:-1] & inside; P_ = Y * np.conj(R)
+            z = np.sum((P_[:, 1:] * np.conj(P_[:, :-1]))[:, ok])
+            if z != 0: R = R * np.exp(1j * np.angle(z) * idx)[None, :]
+        for b in np.flatnonzero(pm):
+            sl = slice(12 * b, 12 * b + 12); den = np.vdot(R[:, sl], R[:, sl]).real
+            if den > 0:
+                II.append(i); BB.append(b); KK.append(kid.setdefault((_epk(EP[i], b), b), len(kid)))
+                dd.append(np.vdot(R[:, sl], Y[:, sl]) / den); ww.append(den)
+    fac = {}
+    if II:
+        II = np.array(II); KK = np.array(KK); dd = np.array(dd); ww = np.array(ww); nI = len(A); nK = len(kid)
+        def bsum(ix, v, n): return np.bincount(ix, v.real, n) + 1j * np.bincount(ix, v.imag, n)
+        g = bsum(KK, ww * dd, nK) / np.maximum(np.bincount(KK, ww, nK), 1e-30); c = np.ones(nI, complex)
+        for _ in range(iters):
+            c = bsum(II, ww * np.conj(g[KK]) * dd, nI) / np.maximum(np.bincount(II, ww * np.abs(g[KK]) ** 2, nI), 1e-30)
+            c[np.bincount(II, None, nI) == 0] = 1
+            g = bsum(KK, ww * np.conj(c[II]) * dd, nK) / np.maximum(np.bincount(KK, ww * np.abs(c[II]) ** 2, nK), 1e-30)
+        F = c[II] * g[KK]
+        fac = {(int(i), int(b)): f for i, b, f in zip(II, BB, F)}
+    out = []; kept = []
+    for i, (t, a, pm, Y) in enumerate(A):
+        X = np.zeros_like(Y); ok = False
+        for b in np.flatnonzero(pm):
+            f = fac.get((i, int(b)))
+            if f is not None and abs(f) > 0:
+                X[:, 12 * b:12 * b + 12] = Y[:, 12 * b:12 * b + 12] / f; ok = True
+        out.append(X); kept.append(ok)
+    return out, kept

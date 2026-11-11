@@ -56,7 +56,7 @@ Results and open items: `sens6:~/field/OPEN_ISSUES.md`. Heavy data: `sens6:/mnt/
 
 | Script | What |
 |---|---|
-| `gs_to_nrsr.py` | dumps -> `sensing.record_estimates` for `build/nrscope/src/tests/sensing_offline` (variants raw / proc / csi / trs; env WSH=1 undoes the logged window moves, LOS0 puts each antenna's direct path at range zero) |
+| `gs_to_nrsr.py`, `gs_to_nrsr_ep.py` | dumps -> `sensing.record_estimates` for `build/nrscope/src/tests/sensing_offline` (variants raw / proc / csi / trs; env WSH=1 undoes the logged window moves, LOS0 puts each antenna's direct path at range zero) |
 | `so_csi.py` | CSI-RS / TRS reference corrections, window-shift (GSW1) and drift helpers |
 | `so_light.py` | light network: TRS + every DM-RS except the tablet's, one stream |
 | `so_simprec.py`, `so_synth.py` | synthetic estimates on the real occupancy (simulated precoders, timing jumps) |
@@ -66,3 +66,34 @@ Results and open items: `sens6:~/field/OPEN_ISSUES.md`. Heavy data: `sens6:/mnt/
 Needs the NR-Scope options `sensing.allow_gaps`, `sensing.align_search_bins`, `sensing.min_snapshots` and the
 GoldenSniffer GSW1 record. Per-antenna replays must be aligned (window moves, direct path) before anything
 multi-antenna: each replay has its own sync loop.
+
+## Reference, calibration and merging (2026-11-10/11)
+
+All streams: `GCAL=1` calibrates the inter-antenna phase per 4-PRB group from the TRS (one phase per snapshot is not
+enough: it swings by turns across the band). Run `sensing_offline` with `sensing.align_search_bins: 0`
+(`cfg_*_noalign.yaml`): the converters already undo the window moves and zero the direct path, and the delay search
+can lock on a secondary path (every target a constant few bins off).
+
+TRS reference (`so_csi.ref_fix`, `ref_fix_hyb`), per stream: `REF_EP` (`gs_to_nrsr_ep.py`), `TAB_EP` (decoded UE)
+and `BLIND_EP` (blind record) in `so_light.py`:
+
+| Mode | Reference numbers | Notes |
+|---|---|---|
+| `snap` | one per snapshot and 4-PRB group | default; eats the array-mean part of near slow targets (+15 deg read as +22 at 25 m) |
+| `epoch` | one per precoder epoch and group | angles right, many detections lost |
+| `slot` | one per slot and group | no measurable change vs `snap` |
+| `hyb` | `c(t) * D(epoch, group)`: one per snapshot common to all groups x one per epoch and group | with `HYB_MAXEP=0.01` (epochs <= 10 ms): angles right, detection kept |
+
+`BLIND_TRACK=1` splits the blind record (several UEs per symbol) into UE tracks, one epoch key per group, so
+`BLIND_EP=hyb` keeps its detections. Proposed: tablet `TAB_EP=hyb BLIND_EP=hyb BLIND_TRACK=1 HYB_MAXEP=0.01`,
+no tablet `BLIND_EP=hyb BLIND_TRACK=1 HYB_MAXEP=0.01`.
+
+| Script | What |
+|---|---|
+| `run_v3.sh`, `run_hyb4.sh`, `run_hyb4_all.sh` | TRS-ref stream: reference variants, delay search on/off, all bursts |
+| `run_light4*.sh`, `run_light5_all.sh`, `run_light6_all.sh` | light streams: reference variants, UE tracks, slot pooling |
+| `run_minprb.sh`, `run_usemap.sh`, `gen_um7.py` | narrow DM-RS symbols; usage map (env `NR_SENSING_TRACE`) |
+| `run_kpi.sh`, `kpi_pfa.py` | no injection: detections per map/cell (Pfa upper bound), clutter suppression |
+| `sum_v3.py`, `aoa_v3.py`, `cellpow.py` | main table, 3-target angles, target cell power |
+| `trs_consist.py`, `wsh_resid.py` | TRS consistency between occasions; residual slope vs logged window moves |
+| `track_real.py` | tracking on real-data maps (stand-in geometry) |

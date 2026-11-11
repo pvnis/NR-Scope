@@ -14,7 +14,6 @@ env GLUE=prg (with VAR=proc): glue epochs PRG by PRG (so_csi.glue_per_prg) inste
 env LOS0 (1): put range zero on the direct path (burst median of the strongest delay bin) before writing
 env BLOCK=<s> (with VAR=proc): one stitching template per time block of <s> seconds (so_csi.block_epochs), not per epoch
 env INJ='r,v,dB,angle;...': inject targets into the raw snapshots first (truth to <out>.truth.csv)
-env FILL=1: low-rank completion of the missing PRGs per window (FILL_WIN 64 snapshots, FILL_RANK 4)
 env WSH=1: undo NR-Scope's window moves exactly from the GSW1 records (per antenna), then a straight-line clock drift
 env DEJUMP=1: remove NR-Scope's timing-window jumps first (so_csi.dejump / dejump_csi), for every variant
   trs     per (epoch, PRG) one number onto the nearest TRS (so_csi.ref_fix): no stitching chain, no anchor;
@@ -159,11 +158,6 @@ if VAR == "trs":
     print("TRS reference: %d of %d snapshots have a TRS within %s s" % (sum(kept), len(kept), os.environ.get("REF_DT", "0.01")))
     A = [(t, a, pm, X, l) for (t, a, pm, Y, l), X, k in zip(A, XR, kept) if k]
     print("TRS reference: %d TRS symbols, kept %d snapshots" % (len(REF), len(A)))
-if os.environ.get("FILL", "0") == "1" and A:   # complete the missing PRGs from neighbouring snapshots (so_csi.lowrank_fill)
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from so_csi import lowrank_fill
-    A = lowrank_fill(A, win=int(os.environ.get("FILL_WIN", "64")), rank=int(os.environ.get("FILL_RANK", "4")))
-    print("gaps filled (low rank %s, window %s snapshots)" % (os.environ.get("FILL_RANK", "4"), os.environ.get("FILL_WIN", "64")))
 if os.environ.get("LOS0", "1") == "1" and A:   # range zero on the direct path, not on the mean delay (so_csi.los_to_zero)
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from so_csi import los_to_zero
