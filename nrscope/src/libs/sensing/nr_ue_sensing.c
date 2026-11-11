@@ -16,6 +16,17 @@ int nr_sensing_tdd_period_slots = 10;
 int nr_sensing_los_margin_bins = -1;
 int nr_sensing_allow_gaps = 0;
 int nr_sensing_min_snapshots = NR_SENSING_MIN_SNAPSHOTS;
+FILE *nr_sensing_trace(void)
+{
+  static int init = 0;
+  static FILE *f = NULL;
+  if (!init) {
+    init = 1;
+    const char *p = getenv("NR_SENSING_TRACE");
+    if (p != NULL && *p) f = fopen(p, "w");
+  }
+  return f;
+}
 double nr_sensing_align_search_bins = NR_SENSING_ALIGN_SEARCH_BINS;
 
 bool nr_ue_sensing_extract_lattice(int n_sc,
@@ -425,8 +436,10 @@ int nr_ue_sensing_slot_profile(int n_sym,
     /* Bring this symbol's static scene back onto
     the reference (FFT window moves, phase jumps) before anything reads the pilots. A
     symbol that does not match the reference is left out. */
-    if (!nr_ue_sensing_align_symbol(t_sample[m], stream, &lat, pilots, NULL))
+    if (!nr_ue_sensing_align_symbol(t_sample[m], stream, &lat, pilots, NULL)) {
+      if (nr_sensing_trace()) fprintf(nr_sensing_trace(), "A %lu %lu\n", (unsigned long)slot_abs, (unsigned long)t_sample[m]);
       continue;
+    }
 #endif
 
     // if (lat.n < 50) {
@@ -496,7 +509,10 @@ int nr_ue_sensing_slot_profile(int n_sym,
     so that the Doppler transform can be done later. The random drop leaves out at most
     one symbol of the slot. The range profile below still averages every symbol: it is
     built from magnitudes and does not care how the samples are spaced in time. */
+    if (hist && m == drop_m && nr_sensing_trace())
+      fprintf(nr_sensing_trace(), "R %lu %lu\n", (unsigned long)slot_abs, (unsigned long)t_sample[m]);
     if (hist && m != drop_m) {
+      if (nr_sensing_trace()) fprintf(nr_sensing_trace(), "H %lu %lu\n", (unsigned long)slot_abs, (unsigned long)t_sample[m]);
       nr_ue_sensing_history_push(hist, t_sample[m], stream, &lat, idft_size, h_time);
     }
 

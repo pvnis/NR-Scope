@@ -64,6 +64,10 @@ extern int nr_sensing_allow_gaps;
 /* sensing.min_snapshots: fewest snapshots a map is built from (default NR_SENSING_MIN_SNAPSHOTS). A sparse
 periodic signal (the TRS: 4 symbols every 20 ms, ~28 in a 133 ms window) needs it lower. */
 extern int nr_sensing_min_snapshots;
+/* Offline debugging: when the environment variable NR_SENSING_TRACE names a file, each symbol offered to the
+sensing chain, its fate and the snapshots of each map are written to it (one line per event). Off by default. */
+#include <stdio.h>
+FILE *nr_sensing_trace(void);
 /* sensing.align_search_bins: half width of the alignment's delay search around the previous
 shift, in bins (default NR_SENSING_ALIGN_SEARCH_BINS). Wider follows larger timing-window jumps. */
 extern double nr_sensing_align_search_bins;

@@ -1952,6 +1952,12 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
   free(res_re);
   free(res_im);
 
+  if (nr_sensing_trace()) {
+    fprintf(nr_sensing_trace(), "M %d", n);
+    for (int i = 0; i < n; i++) fprintf(nr_sensing_trace(), " %lu", (unsigned long)hist->ring[idx[i]].t_sample);
+    fprintf(nr_sensing_trace(), "\n");
+    fflush(nr_sensing_trace());
+  }
   return n;
 }
 
