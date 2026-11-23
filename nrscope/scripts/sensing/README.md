@@ -46,7 +46,7 @@ tracker). Most scripts take `<recording dir> <out> [burst indices]` and read the
 
 | Script | What |
 |---|---|
-| `rec4c.sh` | 4-channel IQ bursts into RAM (2 GB/s does not fit any disk live), moved to disk; RAM wait, watchdog, `usrp-hwd` restart on the X410 |
+| 4-channel recording | `../rec_direct` (gap-free, O_DIRECT to the NVMe); replaces the burst recorder `rec4c.sh` (lost 0.37% of samples) |
 | `replay.sh`, `replay4ch.sh`, `replay4ch_blind.sh` | one channel through NR-Scope (file radio, lossless); `_blind` adds `dump_blind` |
 | `run_all2.sh`, `run_blind_all.sh`, `run_trs_all.sh`, `run_ch12.sh` | replay every burst x antenna, then the analyses |
 
