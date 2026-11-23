@@ -1,19 +1,24 @@
 #!/bin/bash
-# field_prep.sh: before a field session with NR-Scope on sens6 + X410 (run as the sens
+# field_prep.sh: before a field session with NR-Scope on sens6/sens8 + X410 (run as the sens
 # user; uses sudo). Re-applies what does not survive a reboot or a power cycle of the
 # X410, and checks the rest. Prints OK/FIX/FAIL per item; nothing here reboots anything.
 #
 #  - X410 management IPv4 192.168.1.190 on its RJ45 eth0 (DHCP-only there: gone after a
 #    power cycle; UHD's DPDK discovery needs it). Re-added over the IPv6 link-local
 #    address, which needs no configuration.
-#  - rcuc/3..13 at SCHED_FIFO 95: NR-Scope's busy threads otherwise starve the RCU
-#    callbacks of their CPU (RCU stalls; once it took sens6 off the network).
+#  - rcuc/3..N-1 at SCHED_FIFO 95: NR-Scope's busy threads otherwise starve the RCU
+#    callbacks of their CPU (RCU stalls; once it took sens6 off the network). CPUs 1-2 are
+#    the isolated ones on both hosts, N = number of CPUs.
 #  - the USB wifi interrupt on CPU 0, away from the workers.
 #  - UHD's DPDK I/O thread on an isolated CPU (/root/.config/uhd.conf dpdk_lcore=2).
 #  - CPU governor, FFTW wisdom, disk space, the X410 links.
 X410_IP=192.168.1.190
 X410_LL=fe80::280:2fff:fe36:ecdb
 MGMT_IF=enp128s31f6
+# data link: the host port whose MAC is the dpdk_mac in /root/.config/uhd.conf
+DPDK_MAC=$(sudo -n sed -n "s/^\[dpdk_mac=\(.*\)\]/\1/p" /root/.config/uhd.conf 2>/dev/null | head -1)
+DATA_IF=$(for i in /sys/class/net/*; do [ "$(cat $i/address)" = "$DPDK_MAC" ] && basename $i; done | head -1)
+NCPU=$(nproc --all)
 ok()   { echo "OK    $*"; }
 fix()  { echo "FIX   $*"; }
 fail() { echo "FAIL  $*"; FAILED=1; }
@@ -27,18 +32,18 @@ elif timeout 15 ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeo
      "ip addr add $X410_IP/24 dev eth0" 2>/dev/null && ping -c1 -W2 $X410_IP >/dev/null 2>&1; then
   fix "X410 management: added $X410_IP to its eth0 (over IPv6 link-local)"
 else
-  fail "X410 management unreachable (RJ45 cable from sens6 $MGMT_IF to the X410 eth0? X410 booted?)"
+  fail "X410 management unreachable (RJ45 cable from $(hostname) $MGMT_IF to the X410 eth0? X410 booted?)"
 fi
 carrier=$(cat /sys/class/net/$MGMT_IF/carrier_changes 2>/dev/null)
 echo "      ($MGMT_IF carrier changes since boot: $carrier; a growing number means a bad RJ45 contact)"
-if ip link show enp2s0f1np1 2>/dev/null | grep -q "state UP"; then ok "X410 SFP data link enp2s0f1np1 up"; else fail "X410 SFP data link enp2s0f1np1 down"; fi
+if [ -n "$DATA_IF" ] && ip link show $DATA_IF 2>/dev/null | grep -q "state UP"; then ok "X410 SFP data link $DATA_IF up"; else fail "X410 SFP data link ${DATA_IF:-(no NIC with dpdk_mac $DPDK_MAC)} down"; fi
 
 # RCU callback threads
 n=0
-for p in $(pgrep -x "rcuc/([3-9]|1[0-3])"); do
-  sudo -n chrt -f -p 95 $p && n=$((n + 1))
+for c in $(seq 3 $((NCPU - 1))); do
+  p=$(pgrep -x "rcuc/$c") && sudo -n chrt -f -p 95 $p && n=$((n + 1))
 done
-[ $n -ge 11 ] && ok "rcuc/3..13 at FIFO 95 ($n threads)" || fail "rcuc priorities: only $n of 11 set"
+[ $n -ge $((NCPU - 3)) ] && ok "rcuc/3..$((NCPU - 1)) at FIFO 95 ($n threads)" || fail "rcuc priorities: only $n of $((NCPU - 3)) set"
 
 # wifi USB interrupt
 irq=$(grep -m1 xhci_hcd /proc/interrupts | cut -d: -f1 | tr -d " ")
