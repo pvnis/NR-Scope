@@ -107,6 +107,12 @@ target_link_libraries(sensing_join_test srsue_phy srsran_common srsran_phy srsra
                       ${SRSUE_SOURCES} ${SRSRAN_SOURCES} ${CMAKE_THREAD_LIBS_INIT} m)
 add_test(nrscope_sensing_join sensing_join_test)
 
+# sensing.backend omp: two moving paths on gappy snapshots, built through the receiver's own delay transform
+add_executable(sensing_omp_test sensing_omp_test.c)
+target_link_libraries(sensing_omp_test srsue_phy srsran_common srsran_phy srsran_radio rrc_nr_asn1 nrscope_libs
+                      ${SRSUE_SOURCES} ${SRSRAN_SOURCES} ${CMAKE_THREAD_LIBS_INIT} m)
+add_test(nrscope_sensing_omp sensing_omp_test)
+
 # GoldenSniffer: DM-RS ports and CDM groups of a ciphered UE, read on air
 add_executable(gs_dmrs_shape_test gs_dmrs_shape_test.cc)
 target_link_libraries(gs_dmrs_shape_test srsue_phy srsran_common srsran_phy srsran_radio rrc_nr_asn1 nrscope_libs

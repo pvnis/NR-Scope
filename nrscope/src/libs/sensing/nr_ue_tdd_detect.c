@@ -10,7 +10,6 @@
  */
 
 #include <math.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "nrscope/hdr/sensing/sensing_defs.h"

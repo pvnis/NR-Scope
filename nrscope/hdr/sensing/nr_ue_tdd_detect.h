@@ -123,7 +123,15 @@ typedef enum {
   where what is left of the direct path after clutter removal can pass the CFAR. Like
   UNCERTAIN, drawn as a marker but not localised. */
   NR_TDD_VERDICT_LOS_GUARD = 4,
+  /* within NR_TDD_EDGE_GUARD_BINS of the end of the stored range axis: the detector's training cells are cut off
+     there, so any raised floor crosses its threshold (seen with gappy snapshots: almost every false detection of a
+     map sat in its last bin) */
+  NR_TDD_VERDICT_EDGE = 5,
+  /* set aside: faster than sensing.max_speed (|speed| > max_speed_ms). The map's Doppler axis extends one TDD period
+     beyond max_speed for the replicas; a detection out there is no target the run is looking for. */
+  NR_TDD_VERDICT_SPEED = 6,
 } nr_tdd_verdict_t;
+#define NR_TDD_EDGE_GUARD_BINS 2
 
 /* How close in power, in dB, a target's mirror cell at -f must be for the target to be
    set aside as NR_TDD_VERDICT_UNCERTAIN. A target standing this far above its mirror

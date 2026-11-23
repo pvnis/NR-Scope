@@ -28,7 +28,10 @@
 // Remember we assume TDD, 30 KHz SCS and 3.45 GHz
 
 #define NR_SENSING_MIN_SNAPSHOTS  32 
-#define NR_SENSING_TARGET_DV_MS   0.3  // sets the minimum window t_span^min (0.3 m/s: about 0.146 s)
+/* sensing.target_dv (m/s): the velocity resolution a map must reach, which sets its minimum window t_span^min
+(0.3 m/s: about 0.146 s; 0.15 m/s: about 0.29 s). Default 0.3. */
+extern double nr_sensing_target_dv;
+#define NR_SENSING_TARGET_DV_MS   (nr_sensing_target_dv)
 
 /* How far past NR_SENSING_TARGET_DV_MS a map may land before it is worth a warning.
 The window is aimed at t_span^min itself, and snapshots arrive where the scheduler put
@@ -47,7 +50,9 @@ Because with pilots every p subcarriers, the effective grid spacing feeding the 
 A length-L IDFT of a grid with spacing Δf_p produces delay samples spaced
 by Δτ = 1 / (L · p · Δf) => so Δd = c·Δτ = c / (L · p · Δf)
 */
+#ifndef NR_SENSING_MAP_MAX_BINS_RANGE
 #define NR_SENSING_MAP_MAX_BINS_RANGE 50
+#endif
 
 /*
 Make sure the Doppler axis is fine enough to resolve the targets.
@@ -167,6 +172,15 @@ typedef struct {
   reveal. It cancels at the peak of a resolved path, which is why the profile
   itself never needed it. */
   int k_first;
+  /* Lattice positions that carry a measurement: bit i of mask is lattice position i.
+  A grant with gaps (sensing.allow_gaps) keeps zeros inside its span, and every model of
+  the snapshot's point spread (clutter kernel, direct path filter, gain, TDD detector)
+  has to leave them out, or the static scene leaks through the gaps it does not model. */
+  uint64_t mask[NR_SENSING_MAX_IDFT / 64];
+  /// coherent gain of the taper over the measured positions, sum_l w[l] over measured l
+  float cgain;
+  /// hash of mask, so snapshots with identical masks share one kernel
+  uint64_t mask_hash;
   /// valid entries in h[]
   int n_bins;
   /// complex delay response
@@ -199,6 +213,15 @@ struct nr_sensing_history_s {
   bool los_roll_valid;
   int los_roll;
   int los_roll_votes;
+  /* sensing.static_subtract: the static scene per stream slot and lattice position (st_re/st_im/st_ok, each
+  NR_SENSING_MAX_STREAMS x NR_SENSING_MAX_IDFT), a running mean over the snapshots that measured that position */
+  float *st_re, *st_im;
+  uint8_t *st_ok;
+  /* the direct path's bin per stream slot, from the static estimate's own delay profile (the maps cannot find it in
+  the residual once the static scene is removed); refreshed every NR_SENSING_STATIC_BIN_EVERY updates */
+  double st_bin[NR_SENSING_MAX_STREAMS];
+  uint8_t st_bin_ok[NR_SENSING_MAX_STREAMS];
+  int st_updates[NR_SENSING_MAX_STREAMS];
   /// DL carrier frequency in Hz, needed to turn the Doppler axis into speeds
   uint64_t carrier_hz;
   /* Several DL actors (--num-dl-actors) push into the same history at the same time, and
@@ -316,14 +339,37 @@ bool nr_ue_sensing_history_init(nr_sensing_history_t *hist,
 void nr_ue_sensing_history_free(nr_sensing_history_t *hist);
 
 /* Append one time sample. Copies NR_SENSING_MAP_MAX_BINS_RANGE bins of h_time.
-   Overwrites the oldest entry once full.
+   Overwrites the oldest entry once full. pilots: the lattice indexed, tapered pilots the
+   delay response was computed from; their zeros inside the span are the grant's gaps.
 
    stream identifies the measurement process; k_step and k_offset are filled in from
    lattice, so the caller only has to supply the port bitmap and the layer. */
+/// sensing.gain_equalise, see the gain factor in nr_ue_sensing_range_doppler()
+extern int nr_sensing_gain_equalise;
+
+/* sensing.static_subtract (0 off, default) and sensing.static_weight: remove the static scene per subcarrier, before
+the delay transform, see nr_ue_sensing_static_subtract() */
+extern int nr_sensing_static_subtract;
+#define NR_SENSING_STATIC_BIN_EVERY 64
+extern double nr_sensing_static_weight;
+/* sensing.static_phase_norm: with static_subtract, remove each snapshot's common phase (phase noise, residual
+carrier offset) against the static estimate before learning and subtracting it. Off by default. */
+extern int nr_sensing_static_phase_norm;
+#define NR_SENSING_STATIC_PHASE_MIN 12   /* subcarriers shared with the static estimate needed to estimate it */
+
+/* Subtract, from the measured positions of one aligned symbol (lattice indexed pilots, gaps zero), the static scene
+at those positions: per stream and position a running mean (weight nr_sensing_static_weight per update) over the
+symbols that measured it, updated with this symbol first. Exact for any static channel, however many paths and
+whatever the gaps: with gaps, each snapshot sees the static scene through its own mask, so removing it after the
+delay transform needs every static path modelled, while here no model is needed. A moving target averages out of
+the mean (its phase turns); one slower than about 1 / (weight x update rate) is partly removed with it. */
+void nr_ue_sensing_static_subtract(nr_sensing_history_t *hist, nr_sensing_stream_t stream, const pilot_lattice_t *lattice, cf_t *pilots);
+
 void nr_ue_sensing_history_push(nr_sensing_history_t *hist,
                                 uint64_t t_sample,
                                 nr_sensing_stream_t stream,
                                 const pilot_lattice_t *lattice,
+                                const cf_t *pilots,
                                 int idft_size,
                                 const cf_t *h_time);
 
@@ -379,6 +425,15 @@ typedef struct {
   int win_len;
   /// first lattice index carrying a pilot, (k_first - k_first % k_step) / k_step
   int win_start;
+  /* Optional (NULL: a Hann over win_len): the window a target's range response really went
+  through, averaged over the map's snapshots: gain x taper x measured mask, on lattice
+  positions win_start .. win_start + win_len - 1. At least NR_SENSING_MAX_IDFT floats. */
+  float *win;
+  /* Optional (NULL: not filled), at least hist->depth entries each: snapshot i's entry in the history copy the map
+  was built from (its mask, pilots and grant start, so a back end can model a path exactly as that snapshot holds
+  it), and the gain the map applied to it. Valid while that history copy is. */
+  const nr_sensing_snapshot_t **snap;
+  double *gain;
   /// IDFT length the delay responses were produced with
   int idft_size;
   /// metres of path length per delay bin
@@ -719,6 +774,17 @@ static inline void nr_sensing_params_default(nr_sensing_params_t *p)
    n_bins    : entries to fill, one per delay bin of the map
    kre, kim  : receive n_bins entries each */
 void nr_ue_sensing_clutter_kernel(int n_pilots, int a_m, double u0, int idft_size, int n_bins, float *kre, float *kim);
+
+/* The same kernel over the measured positions only: mask is the snapshot's (bit i = lattice
+   position i), NULL means every position of the span was measured. */
+void nr_ue_sensing_clutter_kernel_masked(int n_pilots,
+                                         int a_m,
+                                         const uint64_t *mask,
+                                         double u0,
+                                         int idft_size,
+                                         int n_bins,
+                                         float *kre,
+                                         float *kim);
 
 /* Range-Doppler map from the accumulated history, for one reference signal.
 

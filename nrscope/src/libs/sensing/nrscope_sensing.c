@@ -19,6 +19,7 @@
 #include "nrscope/hdr/sensing/nrscope_sensing_record.h"
 #include "nrscope/hdr/sensing/nrscope_sensing_join.h"
 #include "nrscope/hdr/sensing/nr_ue_tdd_detect.h"
+#include "nrscope/hdr/sensing/nr_ue_omp.h"
 #include "srsran/phy/ch_estimation/dmrs_sch.h"
 #include "srsran/phy/utils/vector.h"
 
@@ -803,7 +804,7 @@ static void nr_ue_sensing_map_task(void *arg)
   telling the real peaks from the TDD replicas. It works on rx0 only.
   When on, its targets are the ones the AoA measures. When off, the AoA finds its own
   peaks on the averaged map, and speeds are only right inside the map's window. */
-  const bool detect = t->args->tdd_detect;
+  const bool detect = t->args->tdd_detect || t->args->omp;   // sensing.backend omp is a detector too
 
   /* Runtime parameter --sensing-antenna-avg: average the maps of all Rx antennas and
   estimate the angle of arrival. The AoA needs at least 2 antennas. */
@@ -818,6 +819,9 @@ static void nr_ue_sensing_map_task(void *arg)
     slow[a].t_s = malloc_or_fail((size_t)t->snap[a].depth * sizeof(*slow[a].t_s));
     slow[a].h_re = malloc_or_fail((size_t)t->snap[a].depth * NR_SENSING_MAP_MAX_BINS_RANGE * sizeof(*slow[a].h_re));
     slow[a].h_im = malloc_or_fail((size_t)t->snap[a].depth * NR_SENSING_MAP_MAX_BINS_RANGE * sizeof(*slow[a].h_im));
+    slow[a].win = malloc_or_fail((size_t)NR_SENSING_MAX_IDFT * sizeof(*slow[a].win));
+    slow[a].snap = malloc_or_fail((size_t)t->snap[a].depth * sizeof(*slow[a].snap));
+    slow[a].gain = malloc_or_fail((size_t)t->snap[a].depth * sizeof(*slow[a].gain));
   }
 
   // Computes the sensing map for the first antenna (see t->snap[0]) independently of the 
@@ -911,7 +915,9 @@ static void nr_ue_sensing_map_task(void *arg)
     const double t_span = det->t_s[det->n_snap - 1] - det->t_s[0];
 
     float *hann = malloc_or_fail((size_t)det->win_len * sizeof(*hann));
-    if (!nr_ue_sensing_hann_coeffs(det->win_len, hann))
+    if (det->win != NULL)
+      memcpy(hann, det->win, (size_t)det->win_len * sizeof(*hann)); // gaps and grants as the data has them
+    else if (!nr_ue_sensing_hann_coeffs(det->win_len, hann))
       for (int i = 0; i < det->win_len; i++)
         hann[i] = 1.0f; // degenerate lattice: the transform was left rectangular too
 
@@ -951,7 +957,15 @@ static void nr_ue_sensing_map_task(void *arg)
     nr_tdd_cfg_default(&cfg);
     nr_tdd_target_t rej[NR_TDD_MAX_REJECTED];
     int n_rej = 0;
-    n_tgt = nr_tdd_detect(&obs, &cfg, tgt, NR_TDD_MAX_TARGETS, rej, &n_rej);
+    if (t->args->omp) {
+      /* sensing.backend omp: every chain whose samples the map kept is fitted jointly, one amplitude per chain,
+      so the phases the AoA reads stay those of the data. */
+      const nr_omp_cfg_t ocfg = {.max_paths = t->args->omp_max_paths, .threshold_db = t->args->omp_threshold_db, .local_noise = t->args->omp_local_noise};
+      n_tgt = nr_ue_omp_detect(slow, n_slow, n_freq_det, f_max_det, lambda_m, trend_q, trend_n_q, &ocfg, tgt,
+                               NR_TDD_MAX_TARGETS);
+    } else {
+      n_tgt = nr_tdd_detect(&obs, &cfg, tgt, NR_TDD_MAX_TARGETS, rej, &n_rej);
+    }
 
     /* Set aside the targets whose mirror at -f is about as strong, see
     NR_TDD_VERDICT_UNCERTAIN. Read on the averaged map, the same grid the detector ran
@@ -999,6 +1013,39 @@ static void nr_ue_sensing_map_task(void *arg)
     /* Set aside the targets within detect_los_guard_bins of the direct path, see
     NR_TDD_VERDICT_LOS_GUARD. Their removal from the map stays: it only takes out
     direct-path residue. */
+    { /* Set aside the targets at the end of the stored range axis, see NR_TDD_VERDICT_EDGE. */
+      const double b_max = t->map.n_bins - 1 - NR_TDD_EDGE_GUARD_BINS;
+      int n_kept = 0;
+      for (int i = 0; i < n_tgt; i++) {
+        if (tgt[i].bin > b_max) {
+          if (n_rej < NR_TDD_MAX_REJECTED) {
+            rej[n_rej] = tgt[i];
+            rej[n_rej++].verdict = NR_TDD_VERDICT_EDGE;
+          }
+        } else {
+          tgt[n_kept++] = tgt[i];
+        }
+      }
+      n_tgt = n_kept;
+    }
+
+    /* Set aside the targets faster than sensing.max_speed, see NR_TDD_VERDICT_SPEED: the Doppler axis carries a TDD
+    period of margin for the replicas, so the detector can return speeds no target of the run has. */
+    if (t->args->max_speed_ms > 0.0) {
+      int n_kept = 0;
+      for (int i = 0; i < n_tgt; i++) {
+        if (fabs(tgt[i].speed_ms) > t->args->max_speed_ms) {
+          if (n_rej < NR_TDD_MAX_REJECTED) {
+            rej[n_rej] = tgt[i];
+            rej[n_rej++].verdict = NR_TDD_VERDICT_SPEED;
+          }
+        } else {
+          tgt[n_kept++] = tgt[i];
+        }
+      }
+      n_tgt = n_kept;
+    }
+
     if (t->args->detect_los_guard_bins > 0) {
       const double b_min = t->map.bin_los + t->args->detect_los_guard_bins;
       int n_kept = 0;
@@ -1209,6 +1256,9 @@ static void nr_ue_sensing_map_task(void *arg)
   }
   for (int a = 0; a < n_slow; a++) {
     free(slow[a].t_s);
+    free(slow[a].win);
+    free(slow[a].snap);
+    free(slow[a].gain);
     free(slow[a].h_re);
     free(slow[a].h_im);
   }

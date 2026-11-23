@@ -26,6 +26,13 @@
 
 extern "C" int nr_sensing_los_margin_bins; // nrscope/hdr/sensing/nr_ue_sensing.h
 extern "C" int nr_sensing_allow_gaps;      // nrscope/hdr/sensing/nr_ue_sensing.h
+extern "C" double nr_sensing_min_measured; // nrscope/hdr/sensing/nr_ue_sensing.h
+extern "C" double nr_sensing_min_band;     // nrscope/hdr/sensing/nr_ue_sensing.h
+extern "C" int nr_sensing_gain_equalise;   // nrscope/hdr/sensing/nr_ue_map.h
+extern "C" int nr_sensing_static_subtract; // nrscope/hdr/sensing/nr_ue_map.h
+extern "C" double nr_sensing_static_weight;
+extern "C" int nr_sensing_static_phase_norm;
+extern "C" double nr_sensing_target_dv;
 extern "C" int nr_sensing_min_snapshots;
 extern "C" double nr_sensing_align_search_bins;
 extern "C" double nr_sensing_eca_batch_s;  // nrscope/hdr/sensing/nr_ue_map.h
@@ -94,6 +101,21 @@ void load_sensing_config(const YAML::Node& config_yaml)
       nrscope_sensing_args.doppler_clean_thr_db = sn["doppler_clean_thr_db"].as<double>();
     flag("music", &nrscope_sensing_args.music);
     flag("mirror_reject", &nrscope_sensing_args.mirror_reject);
+    if (sn["backend"]) {
+      const std::string be = sn["backend"].as<std::string>();
+      if (be != "periodogram" && be != "omp") {
+        std::cerr << "sensing.backend must be periodogram or omp, not " << be << std::endl;
+        exit(1);
+      }
+      nrscope_sensing_args.omp = be == "omp";
+      std::cout << "    sensing.backend: " << be << std::endl;
+    }
+    if (sn["omp_max_paths"])
+      nrscope_sensing_args.omp_max_paths = sn["omp_max_paths"].as<int>();
+    if (sn["omp_threshold_db"])
+      nrscope_sensing_args.omp_threshold_db = sn["omp_threshold_db"].as<double>();
+    if (sn["omp_local_noise"])
+      nrscope_sensing_args.omp_local_noise = sn["omp_local_noise"].as<bool>() ? 1 : 0;
     if (sn["detect_los_guard_bins"]) {
       nrscope_sensing_args.detect_los_guard_bins = sn["detect_los_guard_bins"].as<int>();
       std::cout << "    sensing.detect_los_guard_bins: " << nrscope_sensing_args.detect_los_guard_bins << std::endl;
@@ -137,6 +159,34 @@ void load_sensing_config(const YAML::Node& config_yaml)
     if (sn["allow_gaps"]) {
       nr_sensing_allow_gaps = sn["allow_gaps"].as<bool>() ? 1 : 0;
       std::cout << "    sensing.allow_gaps: " << nr_sensing_allow_gaps << std::endl;
+    }
+    if (sn["min_measured"]) {
+      nr_sensing_min_measured = sn["min_measured"].as<double>();
+      std::cout << "    sensing.min_measured: " << nr_sensing_min_measured << std::endl;
+    }
+    if (sn["min_band"]) {
+      nr_sensing_min_band = sn["min_band"].as<double>();
+      std::cout << "    sensing.min_band: " << nr_sensing_min_band << std::endl;
+    }
+    if (sn["static_subtract"]) {
+      nr_sensing_static_subtract = sn["static_subtract"].as<bool>() ? 1 : 0;
+      std::cout << "    sensing.static_subtract: " << nr_sensing_static_subtract << std::endl;
+    }
+    if (sn["target_dv"]) {
+      nr_sensing_target_dv = sn["target_dv"].as<double>();
+      std::cout << "    sensing.target_dv: " << nr_sensing_target_dv << std::endl;
+    }
+    if (sn["static_phase_norm"]) {
+      nr_sensing_static_phase_norm = sn["static_phase_norm"].as<bool>() ? 1 : 0;
+      std::cout << "    sensing.static_phase_norm: " << nr_sensing_static_phase_norm << std::endl;
+    }
+    if (sn["static_weight"]) {
+      nr_sensing_static_weight = sn["static_weight"].as<double>();
+      std::cout << "    sensing.static_weight: " << nr_sensing_static_weight << std::endl;
+    }
+    if (sn["gain_equalise"]) {
+      nr_sensing_gain_equalise = sn["gain_equalise"].as<bool>() ? 1 : 0;
+      std::cout << "    sensing.gain_equalise: " << nr_sensing_gain_equalise << std::endl;
     }
     if (sn["align_search_bins"]) {
       nr_sensing_align_search_bins = sn["align_search_bins"].as<double>();

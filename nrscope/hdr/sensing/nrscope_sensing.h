@@ -88,6 +88,13 @@ typedef struct {
   keeps them. The AoA stage has its own guard (NR_AOA_LOS_GUARD_MIN), so this one
   matters for the markers and anything that reads them. */
   int detect_los_guard_bins;
+  /* sensing.backend: "periodogram" (default: the TDD detector on the range-Doppler map) or "omp" (nr_ue_omp.h:
+  mask-aware 2D-OMP on the slow-time residual, which models the gaps of every snapshot). omp implies the detector
+  stage, as tdd_detect does. omp_max_paths / omp_threshold_db: 0 takes nr_ue_omp.h's defaults. */
+  bool omp;
+  int omp_max_paths;
+  double omp_threshold_db;
+  int omp_local_noise;   /* sensing.omp_local_noise: see nr_omp_cfg_t.local_noise; off by default */
   /* test_record_samples: record-only mode. Write one file per window holding every
   (chain, layer) of its slow-time samples to <dump>.rec.<NNNNN>.csv, up to
   record_max_files, and skip the whole live map pipeline (range_doppler, detector, AoA,

@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  */
 
+#include <complex.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -33,6 +34,13 @@ bool nr_ue_sensing_history_init(nr_sensing_history_t *hist,
   hist->scs_hz = scs_hz;
   hist->ofdm_symbol_size = ofdm_symbol_size;
   hist->carrier_hz = carrier_hz;
+  hist->st_re = calloc((size_t)NR_SENSING_MAX_STREAMS * NR_SENSING_MAX_IDFT, sizeof(float));
+  hist->st_im = calloc((size_t)NR_SENSING_MAX_STREAMS * NR_SENSING_MAX_IDFT, sizeof(float));
+  hist->st_ok = calloc((size_t)NR_SENSING_MAX_STREAMS * NR_SENSING_MAX_IDFT, sizeof(uint8_t));
+  if (!hist->st_re || !hist->st_im || !hist->st_ok) {
+    LOG_E(NR_PHY, "sensing: cannot allocate the static scene estimate\n");
+    return false;
+  }
   return true;
 }
 
@@ -40,6 +48,8 @@ void nr_ue_sensing_history_free(nr_sensing_history_t *hist)
 {
   free(hist->ring);
   hist->ring = NULL;
+  free(hist->st_re); free(hist->st_im); free(hist->st_ok);
+  hist->st_re = hist->st_im = NULL; hist->st_ok = NULL;
   hist->depth = 0;
   hist->head = 0;
   hist->count = 0;
@@ -80,10 +90,21 @@ static int *nr_ue_sensing_counter(nr_sensing_history_t *hist, const nr_sensing_s
   return &hist->since_last_map[free_slot].count;
 }
 
+static inline int nr_ue_sensing_lattice_start(const nr_sensing_snapshot_t *s);
+
+/* sensing.gain_equalise: scale every snapshot of a map to the coherent gain of the best
+measured one (1, the default), or use the snapshots as measured (0). */
+int nr_sensing_gain_equalise = 1;
+int nr_sensing_static_subtract = 0;
+int nr_sensing_static_phase_norm = 0;
+double nr_sensing_target_dv = 0.3;
+double nr_sensing_static_weight = 1.0 / 1024.0;
+
 void nr_ue_sensing_history_push(nr_sensing_history_t *hist,
                                 uint64_t t_sample,
                                 nr_sensing_stream_t stream,
                                 const pilot_lattice_t *lattice,
+                                const cf_t *pilots,
                                 int idft_size,
                                 const cf_t *h_time)
 {
@@ -101,6 +122,29 @@ void nr_ue_sensing_history_push(nr_sensing_history_t *hist,
   s->n_pilots = lattice->n;
   s->k_first = lattice->k_first;
   s->idft_size = idft_size;
+
+  /* Which positions of the span were measured, and the taper's coherent gain over them.
+  The pilots are already tapered: Hann is zero at both ends of the span, so those two
+  positions read as gaps, which changes nothing since their weight is zero either way. */
+  memset(s->mask, 0, sizeof(s->mask));
+  {
+    const int a = nr_ue_sensing_lattice_start(s);
+    float w[NR_SENSING_MAX_IDFT];
+    const bool tapered = nr_ue_sensing_hann_coeffs(s->n_pilots, w);
+    double cg = 0.0;
+    uint64_t hsh = 1469598103934665603ULL;
+    for (int l = 0; l < s->n_pilots && a + l < NR_SENSING_MAX_IDFT; l++) {
+      const bool meas = pilots == NULL || crealf(pilots[a + l]) != 0.0f || cimagf(pilots[a + l]) != 0.0f;
+      if (!meas)
+        continue;
+      s->mask[(a + l) >> 6] |= 1ULL << ((a + l) & 63);
+      cg += tapered ? w[l] : 1.0;
+    }
+    for (int k = 0; k < NR_SENSING_MAX_IDFT / 64; k++)
+      hsh = (hsh ^ s->mask[k]) * 1099511628211ULL;
+    s->cgain = (float)cg;
+    s->mask_hash = hsh ^ ((uint64_t)s->n_pilots << 32) ^ (uint64_t)a;
+  }
 
   // The IDFT has already been computed with the 0-padded idft_size,
   // idft_size is always 2048 here, so n_bins is always NR_SENSING_DELAY_BINS
@@ -429,6 +473,88 @@ void nr_ue_sensing_clear_since_last_map(nr_sensing_history_t *hist, const nr_sen
   pthread_mutex_unlock(&hist->lock);
 }
 
+void nr_ue_sensing_static_subtract(nr_sensing_history_t *hist, nr_sensing_stream_t stream, const pilot_lattice_t *lattice, cf_t *pilots)
+{
+  if (hist == NULL || hist->st_re == NULL)
+    return;
+  const nr_sensing_stream_t key = nr_ue_sensing_stream(stream.ports, stream.layer, lattice);
+  pthread_mutex_lock(&hist->lock);
+  int *cnt = nr_ue_sensing_counter(hist, &key, true);
+  if (cnt == NULL) {
+    pthread_mutex_unlock(&hist->lock);
+    return;   // no slot for this stream: left as it is
+  }
+  const size_t slot = (size_t)(((char *)cnt - (char *)&hist->since_last_map[0].count) / sizeof(hist->since_last_map[0]));
+  float *sr = hist->st_re + slot * NR_SENSING_MAX_IDFT, *si = hist->st_im + slot * NR_SENSING_MAX_IDFT;
+  uint8_t *ok = hist->st_ok + slot * NR_SENSING_MAX_IDFT;
+  const int a = (lattice->k_first - lattice->k_first % lattice->k_step) / lattice->k_step;
+  const float w = (float)nr_sensing_static_weight;
+  if (nr_sensing_static_phase_norm) {
+    /* the snapshot's common phase against the static estimate, on the subcarriers both have: what the receiver's
+    oscillator (phase noise, residual carrier offset) put on the whole snapshot since the static scene was learnt.
+    Taken out of the whole snapshot, targets included, before learning and subtracting. Needs enough overlap. */
+    double zr = 0.0, zi = 0.0; int nz = 0;
+    for (int i = a; i < a + lattice->n && i < NR_SENSING_MAX_IDFT; i++) {
+      const float pr = crealf(pilots[i]), pi = cimagf(pilots[i]);
+      if ((pr == 0.0f && pi == 0.0f) || !ok[i]) continue;
+      zr += (double)sr[i] * pr + (double)si[i] * pi; zi += (double)sr[i] * pi - (double)si[i] * pr; nz++;
+    }
+    const double za = sqrt(zr * zr + zi * zi);
+    if (nz >= NR_SENSING_STATIC_PHASE_MIN && za > 0.0) {
+      const cf_t rot = (cf_t)((zr - I * zi) / za);
+      for (int i = a; i < a + lattice->n && i < NR_SENSING_MAX_IDFT; i++)
+        if (crealf(pilots[i]) != 0.0f || cimagf(pilots[i]) != 0.0f) pilots[i] *= rot;
+    }
+  }
+  for (int i = a; i < a + lattice->n && i < NR_SENSING_MAX_IDFT; i++) {
+    const float pr = crealf(pilots[i]), pi = cimagf(pilots[i]);
+    if (pr == 0.0f && pi == 0.0f)
+      continue;   // a gap: not measured, nothing to learn or remove
+    if (!ok[i]) {
+      sr[i] = pr; si[i] = pi; ok[i] = 1;
+    } else {
+      sr[i] += w * (pr - sr[i]); si[i] += w * (pi - si[i]);
+    }
+    float or_ = pr - sr[i], oi = pi - si[i];
+    if (or_ == 0.0f && oi == 0.0f) or_ = 1e-30f;   // keep it a measurement: a zero would read as a gap downstream
+    pilots[i] = or_ + I * oi;
+  }
+  /* now and then: where the direct path is, from the static estimate (taper over its measured span, the same delay
+  transform as the snapshots, strongest bin, sub-bin by a parabola in dB), on the snapshots' axis (roll included) */
+  if (++hist->st_updates[slot] % NR_SENSING_STATIC_BIN_EVERY == 1) {
+    const int nl = lattice->n_lattice, N = NR_SENSING_IDFT_SIZE(lattice->k_step);
+    int lo = -1, hi = -1;
+    for (int i = 0; i < nl && i < NR_SENSING_MAX_IDFT; i++)
+      if (ok[i]) { if (lo < 0) lo = i; hi = i; }
+    if (lo >= 0 && hi - lo >= 8 && nl <= N && N <= NR_SENSING_MAX_IDFT * 2) {
+      cf_t *in = calloc((size_t)nl, sizeof(cf_t)), *out = malloc((size_t)N * sizeof(cf_t));
+      float w[NR_SENSING_MAX_IDFT];
+      if (in && out && nr_ue_sensing_hann_coeffs(hi - lo + 1, w)) {
+        for (int i = lo; i <= hi; i++)
+          if (ok[i]) in[i] = (sr[i] + I * si[i]) * w[i - lo];
+        nr_ue_sensing_delay_response(nl, in, N, out);
+        int pk = 0; double best = -1.0;
+        for (int b = 0; b < N; b++) {
+          const double e = (double)crealf(out[b]) * crealf(out[b]) + (double)cimagf(out[b]) * cimagf(out[b]);
+          if (e > best) { best = e; pk = b; }
+        }
+        const double ym = 10 * log10(1e-30 + crealf(out[(pk + N - 1) % N]) * crealf(out[(pk + N - 1) % N]) + cimagf(out[(pk + N - 1) % N]) * cimagf(out[(pk + N - 1) % N]));
+        const double y0 = 10 * log10(1e-30 + best);
+        const double yp = 10 * log10(1e-30 + crealf(out[(pk + 1) % N]) * crealf(out[(pk + 1) % N]) + cimagf(out[(pk + 1) % N]) * cimagf(out[(pk + 1) % N]));
+        const double den = ym - 2 * y0 + yp;
+        double b = pk + ((den < 0) ? 0.5 * (ym - yp) / den : 0.0);
+        if (hist->los_roll_valid) b += hist->los_roll;
+        b = fmod(b + N, N);
+        if (b > N / 2) b -= N;                                     // just before bin 0: a small negative bin
+        hist->st_bin[slot] = b;
+        hist->st_bin_ok[slot] = 1;
+      }
+      free(in); free(out);
+    }
+  }
+  pthread_mutex_unlock(&hist->lock);
+}
+
 bool nr_ue_sensing_history_take(nr_sensing_history_t *src,
                                 const nr_sensing_stream_t *stream,
                                 int n_layers,
@@ -519,6 +645,18 @@ static void nr_ue_sensing_format_grants(const nr_sensing_history_t *hist, const 
 
 void nr_ue_sensing_clutter_kernel(int n_pilots, int a_m, double u0, int idft_size, int n_bins, float *kre, float *kim)
 {
+  nr_ue_sensing_clutter_kernel_masked(n_pilots, a_m, NULL, u0, idft_size, n_bins, kre, kim);
+}
+
+void nr_ue_sensing_clutter_kernel_masked(int n_pilots,
+                                         int a_m,
+                                         const uint64_t *mask,
+                                         double u0,
+                                         int idft_size,
+                                         int n_bins,
+                                         float *kre,
+                                         float *kim)
+{
   float w[NR_SENSING_MAX_IDFT];
 
   /* The same taper the data went through, from the same generator, so the model
@@ -556,8 +694,11 @@ void nr_ue_sensing_clutter_kernel(int n_pilots, int a_m, double u0, int idft_siz
     double sr = 0.0;
     double si = 0.0;
     for (int l = 0; l < n_pilots; l++) {
-      sr += w[l] * cr;
-      si += w[l] * ci;
+      const int pos = a_m + l;
+      if (mask == NULL || (pos >= 0 && pos < NR_SENSING_MAX_IDFT && ((mask[pos >> 6] >> (pos & 63)) & 1ULL))) {
+        sr += w[l] * cr; // a gap adds nothing: the data holds a zero there
+        si += w[l] * ci;
+      }
       const double nr = cr * dr - ci * di;
       ci = cr * di + ci * dr;
       cr = nr;
@@ -632,28 +773,32 @@ static void nr_ue_sensing_remove_path(const nr_sensing_history_t *hist,
 
   /* One kernel per distinct (n_m, a_m). The kernel depends on b - u only, so the one
   of bins b_lo..b_hi is the kernel centred at u - b_lo, over span bins. */
-  float *pool[NR_CLUTTER_MAX_KERNELS][2] = {{NULL}};
-  int pool_pilots[NR_CLUTTER_MAX_KERNELS];
-  int pool_start[NR_CLUTTER_MAX_KERNELS];
+  /* Shared by identical masks (which fixes n_m and a_m too). Sized for one kernel per
+  snapshot: with gaps the masks rarely repeat, and a skipped kernel leaves a path in. */
+  static __thread float *pool[NR_SENSING_HISTORY_DEPTH][2];
+  static __thread float *pool_d[NR_SENSING_HISTORY_DEPTH][2];   // the kernel's derivative in delay, same layout
+  static __thread uint64_t pool_hash[NR_SENSING_HISTORY_DEPTH];
   int pool_n = 0;
   const float *kr[NR_SENSING_HISTORY_DEPTH] = {NULL};
   const float *ki[NR_SENSING_HISTORY_DEPTH] = {NULL};
+  const float *dr[NR_SENSING_HISTORY_DEPTH] = {NULL};
+  const float *di[NR_SENSING_HISTORY_DEPTH] = {NULL};
 
   for (int i = 0; i < n; i++) {
     const nr_sensing_snapshot_t *s = &hist->ring[idx[i]];
     const int a_m = nr_ue_sensing_lattice_start(s);
     int j = 0;
-    while (j < pool_n && (pool_pilots[j] != s->n_pilots || pool_start[j] != a_m))
+    while (j < pool_n && pool_hash[j] != s->mask_hash)
       j++;
 
     if (j == pool_n) {
-      if (pool_n == NR_CLUTTER_MAX_KERNELS) {
+      if (pool_n == NR_SENSING_HISTORY_DEPTH) {
         char grants[512];
         nr_ue_sensing_format_grants(hist, idx, n, grants, sizeof(grants));
         LOG_W(NR_PHY,
               "sensing: more than %d distinct grants over %d snapshots, clutter kernel skipped from snapshot %d on. "
               "Grants: %s\n",
-              NR_CLUTTER_MAX_KERNELS,
+              NR_SENSING_HISTORY_DEPTH,
               n,
               i,
               grants);
@@ -663,52 +808,89 @@ static void nr_ue_sensing_remove_path(const nr_sensing_history_t *hist,
       pool[j][1] = malloc((size_t)span * sizeof(float));
       if (pool[j][0] == NULL || pool[j][1] == NULL) {
         LOG_E(NR_PHY, "sensing: cannot allocate a clutter kernel, path at bin %.2f left in\n", u);
+        free(pool[j][0]);
+        free(pool[j][1]);
+        pool[j][0] = pool[j][1] = NULL;
         break;
       }
-      nr_ue_sensing_clutter_kernel(s->n_pilots, a_m, u - b_lo, s->idft_size, span, pool[j][0], pool[j][1]);
-      pool_pilots[j] = s->n_pilots;
-      pool_start[j] = a_m;
+      nr_ue_sensing_clutter_kernel_masked(s->n_pilots, a_m, s->mask, u - b_lo, s->idft_size, span, pool[j][0], pool[j][1]);
+      /* d K / d u by a central difference: fitted along with K, it absorbs a sub-bin error in u, whose leftover would
+      otherwise change with each snapshot's mask and spread over Doppler where mean removal cannot reach it */
+      pool_d[j][0] = malloc((size_t)span * sizeof(float));
+      pool_d[j][1] = malloc((size_t)span * sizeof(float));
+      float *tp_r = malloc((size_t)span * sizeof(float)), *tp_i = malloc((size_t)span * sizeof(float));
+      float *tm_r = malloc((size_t)span * sizeof(float)), *tm_i = malloc((size_t)span * sizeof(float));
+      if (pool_d[j][0] && pool_d[j][1] && tp_r && tp_i && tm_r && tm_i) {
+        const double dl = 0.05;
+        nr_ue_sensing_clutter_kernel_masked(s->n_pilots, a_m, s->mask, u - b_lo + dl, s->idft_size, span, tp_r, tp_i);
+        nr_ue_sensing_clutter_kernel_masked(s->n_pilots, a_m, s->mask, u - b_lo - dl, s->idft_size, span, tm_r, tm_i);
+        for (int q = 0; q < span; q++) {
+          pool_d[j][0][q] = (float)((tp_r[q] - tm_r[q]) / (2.0 * dl));
+          pool_d[j][1][q] = (float)((tp_i[q] - tm_i[q]) / (2.0 * dl));
+        }
+      } else if (pool_d[j][0] && pool_d[j][1]) {
+        memset(pool_d[j][0], 0, (size_t)span * sizeof(float));
+        memset(pool_d[j][1], 0, (size_t)span * sizeof(float));
+      }
+      free(tp_r); free(tp_i); free(tm_r); free(tm_i);
+      pool_hash[j] = s->mask_hash;
       pool_n++;
     }
     kr[i] = pool[j][0];
     ki[i] = pool[j][1];
+    dr[i] = pool_d[j][0];
+    di[i] = pool_d[j][1];
   }
 
-  // alpha = sum r conj(K) / sum |K|^2
-  double num_r = 0.0;
-  double num_i = 0.0;
-  double den = 0.0;
+  /* [alpha, beta] = the least squares amplitudes of K and dK/du over the window:
+         [<K,K>  <K,D>] [alpha]   [<K,r>]
+         [<D,K>  <D,D>] [beta ] = [<D,r>]
+     alpha alone keeps it a clutter filter (one value for the whole window); beta is the same for the window too, so a
+     mover at this delay is not removed either. Falls back to alpha alone when D is missing or the system singular. */
+  double complex g11 = 0, g12 = 0, g22 = 0, b1 = 0, b2 = 0;
+  bool have_d = true;
   for (int i = 0; i < n; i++) {
     if (kr[i] == NULL)
       continue;
+    if (dr[i] == NULL) have_d = false;
     const size_t row = (size_t)i * n_bins + b_lo;
     for (int j = 0; j < span; j++) {
-      const double rr = res_re[row + j];
-      const double ri = res_im[row + j];
-      num_r += rr * kr[i][j] + ri * ki[i][j];
-      num_i += ri * kr[i][j] - rr * ki[i][j];
-      den += (double)kr[i][j] * kr[i][j] + (double)ki[i][j] * ki[i][j];
+      const double complex r = res_re[row + j] + I * res_im[row + j];
+      const double complex K = kr[i][j] + I * ki[i][j];
+      const double complex D = dr[i] ? dr[i][j] + I * di[i][j] : 0;
+      g11 += conj(K) * K; g12 += conj(K) * D; g22 += conj(D) * D;
+      b1 += conj(K) * r; b2 += conj(D) * r;
     }
   }
-
-  if (den > 0.0) {
-    const double a_re = num_r / den;
-    const double a_im = num_i / den;
-    // r -= alpha * K
+  double complex alpha = 0, beta = 0;
+  const double complex det = g11 * g22 - g12 * conj(g12);
+  if (have_d && cabs(det) > 1e-12 * creal(g11) * creal(g22) && creal(g22) > 0) {
+    alpha = (g22 * b1 - g12 * b2) / det;
+    beta = (g11 * b2 - conj(g12) * b1) / det;
+  } else if (creal(g11) > 0) {
+    alpha = b1 / g11;
+  }
+  if (creal(g11) > 0) {
     for (int i = 0; i < n; i++) {
       if (kr[i] == NULL)
         continue;
       const size_t row = (size_t)i * n_bins + b_lo;
       for (int j = 0; j < span; j++) {
-        res_re[row + j] -= (float)(a_re * kr[i][j] - a_im * ki[i][j]);
-        res_im[row + j] -= (float)(a_re * ki[i][j] + a_im * kr[i][j]);
+        double complex m = alpha * (kr[i][j] + I * ki[i][j]);
+        if (dr[i]) m += beta * (dr[i][j] + I * di[i][j]);
+        res_re[row + j] -= (float)creal(m);
+        res_im[row + j] -= (float)cimag(m);
       }
     }
   }
 
-  for (int j = 0; j < NR_CLUTTER_MAX_KERNELS; j++) {
+  for (int j = 0; j < pool_n; j++) {
     free(pool[j][0]);
     free(pool[j][1]);
+    pool[j][0] = pool[j][1] = NULL;
+    free(pool_d[j][0]);
+    free(pool_d[j][1]);
+    pool_d[j][0] = pool_d[j][1] = NULL;
   }
 }
 
@@ -1306,9 +1488,24 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
     return 0;
   }
 
-  // The gain factor
-  for (int i = 0; i < n; i++)
-    gain[i] = (double)n_pilots_max / (double)hist->ring[idx[i]].n_pilots;
+  /* The gain factor (sensing.gain_equalise; off: every snapshot as measured). Measured on
+  the 5 Nov light-network data (OPEN_ISSUES 4b3): at an equal false-alarm rate, equalising
+  finds as many targets overall but 3-8 points fewer weak ones, since it also amplifies the
+  noise of the sparse snapshots. Kept as a toggle to compare. Not the pilot count of the span: a span with gaps holds fewer
+  pilots than its length, and the tapered sum the IDFT computes is the taper's coherent
+  gain over what was measured. Snapshots without a mask (cgain 0) keep the count. */
+  double cg_max = 0.0;
+  for (int i = 0; i < n; i++) {
+    const nr_sensing_snapshot_t *s = &hist->ring[idx[i]];
+    const double cg = s->cgain > 0.0f ? s->cgain : 0.5 * s->n_pilots;
+    if (cg > cg_max) cg_max = cg;
+  }
+  for (int i = 0; i < n; i++) {
+    const nr_sensing_snapshot_t *s = &hist->ring[idx[i]];
+    const double cg = s->cgain > 0.0f ? s->cgain : 0.5 * s->n_pilots;
+    gain[i] = (nr_sensing_gain_equalise && cg > 0.0) ? cg_max / cg : 1.0;
+  }
+
 
   // for printing some statistics in the logs
   int n_positions = 0;
@@ -1390,6 +1587,15 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
   integer bin: at 2.44 m/bin the rounding alone is up to 1.2 m of bias, and it lands
   directly on D = L + dR in nr_ue_target_position(). */
   map->bin_los = (double)u0 + nr_ue_sensing_peak_frac(e_prof, u0, n_bins);
+  if (nr_sensing_static_subtract) {
+    /* the static scene was removed before the transform: the residual's peak is a target, not the direct path; the
+    static estimate of this stream knows where it is */
+    for (int k = 0; k < NR_SENSING_MAX_STREAMS; k++)
+      if (hist->since_last_map[k].used && nr_ue_sensing_stream_eq(&hist->since_last_map[k].key, stream) && hist->st_bin_ok[k]) {
+        map->bin_los = hist->st_bin[k];
+        break;
+      }
+  }
   LOG_I(NR_PHY, "LOS bin to check its stability: %.2f (peak bin %d)\n", map->bin_los, u0);
 
   /* The residual everything below works on: the raw snapshots, from which the kernel
@@ -1484,8 +1690,9 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
         /* The kernel of this snapshot's own grant. Rebuilt per snapshot rather than
         pooled by (n_pilots, a_m) as remove_path does: it costs O(span) and the
         transform that follows is orders of magnitude more. */
-        nr_ue_sensing_clutter_kernel(s->n_pilots,
+        nr_ue_sensing_clutter_kernel_masked(s->n_pilots,
                                      nr_ue_sensing_lattice_start(s),
+                                     s->mask,
                                      map->bin_los - b_lo,
                                      s->idft_size,
                                      span,
@@ -1821,6 +2028,10 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
     slow_out->t0_sample = first->t_sample;
     for (int i = 0; i < n; i++) {
       slow_out->t_s[i] = t[i];
+      if (slow_out->snap != NULL)
+        slow_out->snap[i] = &hist->ring[idx[i]];
+      if (slow_out->gain != NULL)
+        slow_out->gain[i] = gain[i];
       for (int b = 0; b < n_bins; b++) {
         const size_t k = (size_t)i * n_bins + b;
         slow_out->h_re[k] = res_re[k];
@@ -1837,6 +2048,35 @@ int nr_ue_sensing_range_doppler(const nr_sensing_history_t *hist,
     */
     slow_out->win_len = n_pilots_max;
     slow_out->win_start = (first->k_first - first->k_first % first->stream.k_step) / first->stream.k_step;
+    if (slow_out->win != NULL) {
+      /* The window a target really went through, so the detector's range model has the
+      gaps and the varying grants the data has: the mean over the map's snapshots of
+      gain x taper x measured mask, from the lowest start to the highest end. */
+      int lo = NR_SENSING_MAX_IDFT, hi = 0;
+      for (int i = 0; i < n; i++) {
+        const nr_sensing_snapshot_t *s = &hist->ring[idx[i]];
+        const int a = nr_ue_sensing_lattice_start(s);
+        if (a < lo) lo = a;
+        if (a + s->n_pilots > hi) hi = a + s->n_pilots;
+      }
+      if (hi > NR_SENSING_MAX_IDFT) hi = NR_SENSING_MAX_IDFT;
+      if (hi - lo >= 8) {
+        memset(slow_out->win, 0, (size_t)(hi - lo) * sizeof(float));
+        float w[NR_SENSING_MAX_IDFT];
+        for (int i = 0; i < n; i++) {
+          const nr_sensing_snapshot_t *s = &hist->ring[idx[i]];
+          const int a = nr_ue_sensing_lattice_start(s);
+          const bool tapered = nr_ue_sensing_hann_coeffs(s->n_pilots, w);
+          for (int l = 0; l < s->n_pilots && a + l < hi; l++) {
+            const int pos = a + l;
+            if ((s->mask[pos >> 6] >> (pos & 63)) & 1ULL)
+              slow_out->win[pos - lo] += (float)(gain[i] * (tapered ? w[l] : 1.0) / n);
+          }
+        }
+        slow_out->win_len = hi - lo;
+        slow_out->win_start = lo;
+      }
+    }
     slow_out->idft_size = first->idft_size;
     slow_out->m_per_bin = m_per_bin;
     slow_out->trend_degree = trend_degree;

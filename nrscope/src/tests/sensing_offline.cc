@@ -55,6 +55,11 @@
  *                   the chains' LO offsets, as a real echo would), so the AoA reports
  *                   asin(sin(angle of the direct path) + sin(angle)), not angle itself
  *     start=<s>, stop=<s>  when it is present, from the recording's first slot
+ *     point=1       one path instead of a copy of the channel: per symbol and antenna the direct path's own
+ *                   complex gain and delay (phase slope across the measured subcarriers, then masked least
+ *                   squares), moved to R(t). The target keeps the direct path's power, precoder residue,
+ *                   timing and LO phase, but brings no copy of the static scene (which a resolving back end
+ *                   such as sensing.backend omp would otherwise report as extra paths)
  *
  * The truth goes to <dump>.truth.csv, one row per slot and target, for
  * scripts/sensing/score_injection.py.
@@ -92,6 +97,7 @@ struct inject_t {
   double angle_deg = 0.0;
   double start_s  = 0.0;
   double stop_s   = INFINITY;
+  bool   point    = false;   // point=1: one path following the direct path, no copy of the static scene
 
   bool active(double t) const { return t >= start_s && t < stop_s; }
   double range_at(double t) const
@@ -150,6 +156,8 @@ static bool parse_inject(const char* spec, inject_t* out)
       t.start_s = v;
     else if (k == "stop")
       t.stop_s = v;
+    else if (k == "point")
+      t.point = v != 0.0;
     else {
       fprintf(stderr, "--inject: unknown key '%s'\n", k.c_str());
       return false;
@@ -178,7 +186,7 @@ static void inject_record(const std::vector<inject_t>& tg, const nrsr_rec_hdr_t&
     std::complex<double> g0[MAX_INJECT], step[MAX_INJECT];
     int                  n = 0;
     for (const inject_t& x : tg) {
-      if (!x.active(t))
+      if (!x.active(t) || x.point)
         continue;
       const double R   = x.range_at(t);
       const double tau = R / C_LIGHT;
@@ -188,10 +196,63 @@ static void inject_record(const std::vector<inject_t>& tg, const nrsr_rec_hdr_t&
       step[n] = std::polar(1.0, -2.0 * M_PI * fh.scs_hz * tau);
       n++;
     }
-    if (n == 0)
-      continue;
     cf_t*       h = &H[(size_t)l * n_sc];
     const bool* v = &valid[(size_t)l * n_sc];
+    bool any_point = false;
+    for (const inject_t& x : tg)
+      any_point |= x.active(t) && x.point;
+    if (any_point) {
+      /* the direct path of this symbol and antenna: the peak of its delay profile over the measured subcarriers,
+      coarse (32 ns steps over +-1 us) then fine (1 ns around the coarse peak). Not the mean phase step between
+      neighbours: on gappy, multipath-rich symbols that is off by up to ~90 m. Then its gain by least squares. */
+      auto prof = [&](double tau) {
+        std::complex<double> a = 0.0;
+        const std::complex<double> st = std::polar(1.0, 2.0 * M_PI * fh.scs_hz * tau);
+        std::complex<double> ph = 1.0;
+        for (uint32_t k = 0; k < n_sc; k++) {
+          if (v[k]) a += std::complex<double>(__real__ h[k], __imag__ h[k]) * ph;
+          ph *= st;
+        }
+        return std::norm(a);
+      };
+      double tau_dp = 0.0, best_p = -1.0;
+      for (int i = -32; i <= 32; i++) {
+        const double tt = i * 32e-9, pp = prof(tt);
+        if (pp > best_p) { best_p = pp; tau_dp = tt; }
+      }
+      const double tc = tau_dp;
+      for (int i = -32; i <= 32; i++) {
+        const double tt = tc + i * 1e-9, pp = prof(tt);
+        if (pp > best_p) { best_p = pp; tau_dp = tt; }
+      }
+      std::complex<double> alpha = 0.0;
+      int n_v = 0;
+      for (uint32_t k = 0; k < n_sc; k++)
+        if (v[k]) {
+          alpha += std::complex<double>(__real__ h[k], __imag__ h[k]) * std::polar(1.0, 2.0 * M_PI * k * fh.scs_hz * tau_dp);
+          n_v++;
+        }
+      if (n_v > 0)
+        alpha /= (double)n_v;
+      int ip = 0;
+      for (const inject_t& x : tg) {
+        if (!x.active(t) || !x.point) continue;
+        const double R = x.range_at(t), tau = tau_dp + R / C_LIGHT;
+        const std::complex<double> g = alpha * std::polar(pow(10.0, x.level_db / 20.0),
+            -2.0 * M_PI * R / lambda + 2.0 * M_PI * ULA_SPACING * rh.aarx * sin(x.angle_deg * M_PI / 180.0));
+        for (uint32_t k = 0; k < n_sc; k++)
+          if (v[k]) {
+            const std::complex<double> y = std::complex<double>(__real__ h[k], __imag__ h[k])
+                                           + g * std::polar(1.0, -2.0 * M_PI * k * fh.scs_hz * tau);
+            __real__ h[k] = (float)y.real();
+            __imag__ h[k] = (float)y.imag();
+          }
+        ip++;
+      }
+      (void)ip;
+    }
+    if (n == 0)
+      continue; // no copy-mode target active on this symbol
     for (uint32_t k = 0; k < n_sc; k++) {
       std::complex<double> m = 1.0;
       for (int i = 0; i < n; i++) {
@@ -212,7 +273,7 @@ static void usage(const char* argv0)
 {
   fprintf(stderr,
           "usage: %s <config.yaml> <estimates.bin> [--dump <map2d.csv>] [--inject <spec>]...\n"
-          "  spec: range=<m>[,speed=<m/s>][,level=<dB>][,swing=<m>,period=<s>][,angle=<deg>][,start=<s>][,stop=<s>]\n",
+          "  spec: range=<m>[,speed=<m/s>][,level=<dB>][,swing=<m>,period=<s>][,angle=<deg>][,start=<s>][,stop=<s>][,point=1]\n",
           argv0);
 }
 

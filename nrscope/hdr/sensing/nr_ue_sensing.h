@@ -61,6 +61,12 @@ extern int nr_sensing_los_margin_bins;
 several grants joined, on a commercial cell): the pilots stay at their lattice positions, the
 gaps stay zero, and the lattice describes the whole span. 0 (default) rejects such a grant. */
 extern int nr_sensing_allow_gaps;
+
+/* sensing.min_measured: drop a symbol whose measured pilots (gaps excluded) cover less than
+this fraction of the carrier's lattice positions. 0 (default) checks the span only, as the
+half-carrier test always did; with gaps the span can be wide while little of it is measured. */
+extern double nr_sensing_min_measured;
+extern double nr_sensing_min_band;   // sensing.min_band (share of the carrier), default 1/2
 /* sensing.min_snapshots: fewest snapshots a map is built from (default NR_SENSING_MIN_SNAPSHOTS). A sparse
 periodic signal (the TRS: 4 symbols every 20 ms, ~28 in a 133 ms window) needs it lower. */
 extern int nr_sensing_min_snapshots;

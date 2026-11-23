@@ -15,6 +15,9 @@
 int nr_sensing_tdd_period_slots = 10;
 int nr_sensing_los_margin_bins = -1;
 int nr_sensing_allow_gaps = 0;
+double nr_sensing_min_measured = 0.0;
+/* sensing.min_band: smallest share of the carrier a symbol's grant must cover to be used (default NR_SENSING_MIN_BAND_NUM/DEN = 1/2) */
+double nr_sensing_min_band = (double)NR_SENSING_MIN_BAND_NUM / NR_SENSING_MIN_BAND_DEN;
 int nr_sensing_min_snapshots = NR_SENSING_MIN_SNAPSHOTS;
 FILE *nr_sensing_trace(void)
 {
@@ -417,9 +420,18 @@ int nr_ue_sensing_slot_profile(int n_sym,
       continue;
 
     // A narrow grant is dropped rather than averaged in, or just taken into account.
-    if (lat.n * NR_SENSING_MIN_BAND_DEN < lat.n_lattice * NR_SENSING_MIN_BAND_NUM) {
+    if ((double)lat.n < nr_sensing_min_band * lat.n_lattice) {
       //LOG_I(NR_PHY, "sensing: narrow lattice of %d pilots over %d positions is dropped\n", lat.n, lat.n_lattice);
       continue;
+    }
+    if (nr_sensing_min_measured > 0.0) {
+      // the span passed; now what was really measured inside it
+      const int a0 = (lat.k_first - lat.k_first % lat.k_step) / lat.k_step;
+      int n_meas = 0;
+      for (int l = 0; l < lat.n; l++)
+        n_meas += crealf(pilots[a0 + l]) != 0.0f || cimagf(pilots[a0 + l]) != 0.0f;
+      if (n_meas < nr_sensing_min_measured * lat.n_lattice)
+        continue;
     }
 #if NR_SENSING_EMULATE_GRANTS != 0
     /* Simulation only: this slot's emulated grant replaces what was measured, before anything
@@ -441,6 +453,9 @@ int nr_ue_sensing_slot_profile(int n_sym,
       continue;
     }
 #endif
+
+    if (nr_sensing_static_subtract && hist != NULL)
+      nr_ue_sensing_static_subtract(hist, stream, &lat, pilots);
 
     // if (lat.n < 50) {
     //   LOG_I(NR_PHY, "sensing: %d pilots\n", lat.n);
@@ -513,7 +528,7 @@ int nr_ue_sensing_slot_profile(int n_sym,
       fprintf(nr_sensing_trace(), "R %lu %lu\n", (unsigned long)slot_abs, (unsigned long)t_sample[m]);
     if (hist && m != drop_m) {
       if (nr_sensing_trace()) fprintf(nr_sensing_trace(), "H %lu %lu\n", (unsigned long)slot_abs, (unsigned long)t_sample[m]);
-      nr_ue_sensing_history_push(hist, t_sample[m], stream, &lat, idft_size, h_time);
+      nr_ue_sensing_history_push(hist, t_sample[m], stream, &lat, pilots, idft_size, h_time);
     }
 
     // each h_time[b] is a X[k] after the IDFT. The modulus squared |X[k]|^2
