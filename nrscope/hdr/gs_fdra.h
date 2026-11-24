@@ -86,6 +86,10 @@ float gs_fdra_lift(const GsFdraHyp& h, const uint8_t* payload, uint32_t nof_bits
 
 /* The strict per-CRB map behind it: coherence |s|/d over 0.8 (an empty CRB passes 0.5 a
    third of the time), single-CRB specks smoothed. Returns the occupancy. */
+/* PDSCH DM-RS type 2 on one symbol: per PRB the best coherence of CDM groups 0 and 1 (blocks 6 subcarriers apart); val
+   (optional, 4 per PRB): group 0 block 0, group 0 block 1, group 1 block 0, group 1 block 1, each the mean of its pair */
+void gs_dmrs_type2(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb, uint32_t slot_idx, uint32_t l, uint32_t n_id,
+                   float* coh, cf_t* val);
 float gs_fdra_occ_map(const cf_t* s, const float* d, uint32_t nof_prb, bool* occ);
 
 /* Per CRB of one symbol (CRB first_crb + c at grid subcarrier 12 c), DM-RS type 1 with

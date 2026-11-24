@@ -105,6 +105,9 @@ struct GoldenSnifferArgs {
   int32_t     survey_pci = -1;       // and a neighbour cell's PDSCH DM-RS (its PCI), on the first DM-RS symbol
   int32_t     dump_rnti = -1;        // survey: every grant of this UE, its port-1000 DM-RS per CDM pair, to dump_file
   std::string dump_file;
+  std::vector<int> pdsch_dmrs_nids;  // all extra IDs (pdsch_dmrs_nids: [..]): the blind dump writes one record per ID (rnti 1 + k)
+  int32_t     pdsch_dmrs_nid = -1;   // PDSCH DM-RS scramblingID0 the cell gives its UEs (RRC, found offline): the UE-N_ID
+                                     // FDRA hypotheses use it instead of the UE's PDCCH DM-RS N_ID; -1: the PDCCH N_ID
   bool        dump_blind = false;    // survey: the PCI-scrambled PDSCH DM-RS of every slot (rnti 0) to dump_file
   double   quiet_s        = 1.0;   // a blind-tracked UE silent this long starts a sweep (gone or new RNTI?)
 };

@@ -182,6 +182,51 @@ void gs_fdra_rb_coherence(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb,
     __imag__ s[c] = acc.imag();
     d[c] = pw;
   }
+  /* DM-RS type 2 (a UE the gNB switched to it): where its pattern is more coherent, the PRB takes it */
+  static thread_local float t2[SRSRAN_MAX_PRB_NR];
+  gs_dmrs_type2(sym, first_crb, nof_prb, slot_idx, l, n_id, t2, nullptr);
+  for (uint32_t c = 0; c < nof_prb; c++) {
+    const float c1 = d[c] > 0 ? std::abs(std::complex<float>(s[c])) / d[c] : 0.0f;
+    if (t2[c] > c1) {
+      __real__ s[c] = t2[c];
+      __imag__ s[c] = 0;
+      d[c] = 1.0f;
+    }
+  }
+}
+
+void gs_dmrs_type2(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb, uint32_t slot_idx, uint32_t l, uint32_t n_id,
+                   float* coh, cf_t* val)
+{
+  static thread_local cf_t r[NRSCOPE_DMRS_MAX_PILOTS];
+  const uint32_t           m_max = (first_crb + nof_prb) * 4 + 4;
+  if (m_max > NRSCOPE_DMRS_MAX_PILOTS) {
+    return;
+  }
+  nrscope_dmrs_sequence(nrscope_dmrs_c_init(slot_idx, l, n_id, false), m_max, (float)M_SQRT1_2, r);
+  for (uint32_t c = 0; c < nof_prb; c++) {
+    float best = 0;
+    for (uint32_t g = 0; g < 2; g++) {
+      std::complex<float> z[2][2];
+      for (uint32_t b = 0; b < 2; b++) {
+        const uint32_t n = 2 * (first_crb + c) + b; // 6-subcarrier blocks from point A
+        for (uint32_t kp = 0; kp < 2; kp++) {
+          const std::complex<float> y(sym[c * 12 + 6 * b + 2 * g + kp]);
+          z[b][kp] = y * std::conj(std::complex<float>(r[2 * n + kp])) * 2.0f; // |r|^2 = 1/2
+        }
+        if (val != nullptr) {
+          const std::complex<float> v = 0.5f * (z[b][0] + z[b][1]);
+          __real__ val[4 * c + 2 * g + b] = v.real();
+          __imag__ val[4 * c + 2 * g + b] = v.imag();
+        }
+      }
+      const std::complex<float> acc = z[0][0] * std::conj(z[1][0]) + z[0][1] * std::conj(z[1][1]);
+      const float pw = 0.5f * (std::norm(z[0][0]) + std::norm(z[1][0]) + std::norm(z[0][1]) + std::norm(z[1][1]));
+      const float co = pw > 0 ? std::abs(acc) / pw : 0.0f;
+      best = co > best ? co : best;
+    }
+    coh[c] = best;
+  }
 }
 
 void gs_dmrs_shape(const cf_t* sym, uint32_t first_crb, const bool* prb, uint32_t nof_grid_prb, uint32_t slot_idx,

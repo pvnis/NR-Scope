@@ -446,6 +446,16 @@ void load_golden_sniffer_config(const YAML::Node& config_yaml)
   if (g["survey_pci"]) {
     a.survey_pci = g["survey_pci"].as<int32_t>();
   }
+  if (g["pdsch_dmrs_nid"]) {
+    a.pdsch_dmrs_nid = g["pdsch_dmrs_nid"].as<int>();
+    a.pdsch_dmrs_nids = {a.pdsch_dmrs_nid};
+  }
+  if (g["pdsch_dmrs_nids"]) { // a list; the FDRA learner uses the first
+    a.pdsch_dmrs_nids = g["pdsch_dmrs_nids"].as<std::vector<int>>();
+    if (!a.pdsch_dmrs_nids.empty()) {
+      a.pdsch_dmrs_nid = a.pdsch_dmrs_nids[0];
+    }
+  }
   if (g["dump_blind"]) {
     a.dump_blind = g["dump_blind"].as<bool>();
   }
@@ -939,7 +949,7 @@ void golden_sniffer_update(WorkState&                   state,
     snprintf(b, sizeof(b), "%s%s, BWP %u PRBs at CRB %u, field at bit %u (%u bits), PDSCH DM-RS N_ID %s",
              hy.type == 1 ? "type 1" : hy.type == 0 ? "type 0" : "dynamic",
              hy.type == 1 ? "" : (hy.rbg_cfg == 1 ? " rbg config 1" : " rbg config 2"), hy.nbwp, hy.bwp_start,
-             hy.off, hy.width, hy.nid_ue ? "= its PDCCH DM-RS N_ID" : "= PCI");
+             hy.off, hy.width, hy.nid_ue ? (nrscope_gs_args.pdsch_dmrs_nid >= 0 ? "= golden_sniffer.pdsch_dmrs_nid" : "= its PDCCH DM-RS N_ID") : "= PCI");
     return std::string(b);
   };
   for (const GsFdraObs& o : result.gs_fdra_obs) {
@@ -978,7 +988,8 @@ void golden_sniffer_update(WorkState&                   state,
         b2 = m;
       }
     }
-    if (best >= 0 && b1 >= 0.5f && b1 - b2 >= 0.25f) {
+    /* a near-full-band UE scores the neighbouring layouts almost as well: with many DCIs a clean lift needs less margin */
+    if (best >= 0 && b1 >= 0.5f && (b1 - b2 >= 0.25f || (e.fdra_n >= 100 && b1 >= 0.9f && b1 - b2 >= 0.15f))) {
       e.fdra_lock      = (int16_t)best;
       e.fdra_lock_size = o.size;
       fdra_by_size[o.size][(int16_t)best]++;
@@ -1608,6 +1619,13 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
         std::string bitmap, l0_extra, line_tail;
         for (uint32_t l = 1; l < 14; l++) {
           gs_dmrs_rb_map(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, np, sl, l, pci, c0, c1, oc, q0, q1);
+          { /* DM-RS type 2 (a UE switched to it): its PRBs count as DM-RS too */
+            static thread_local float t2c[SRSRAN_MAX_PRB_NR];
+            gs_dmrs_type2(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, np, sl, l, pci, t2c, nullptr);
+            for (uint32_t c = 0; c < np; c++) {
+              if (t2c[c] > c0[c]) c0[c] = t2c[c];
+            }
+          }
           memcpy(sv_c0[l], c0, np * sizeof(float));
           if (l == dmrs_l0) { // what the DM-RS runs are read from, kept past the loop
             memcpy(sv_c1, c1, np * sizeof(float));
@@ -1830,6 +1848,117 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
             }
           }
         }
+        /* dump (golden_sniffer.dump_blind): the slot's type-2 DM-RS (PCI-scrambled), "GSD3": header as GSD1 (rnti 0), the
+          strict type-2 map as mask, then per symbol (the first DM-RS symbol and the additional ones on the same PRBs): l and
+          4 values per PRB (group 0 block 0, group 0 block 1, group 1 block 0, group 1 block 1) */
+        if (gs_dump_bin != nullptr && nrscope_gs_args.dump_blind) {
+          static thread_local float t2s[14][SRSRAN_MAX_PRB_NR];
+          static thread_local cf_t  t2v[14][4 * SRSRAN_MAX_PRB_NR];
+          const uint32_t cand[5] = {dmrs_l0, 5, 7, 8, 11};
+          for (uint32_t i = 0; i < 5; i++) {
+            if (cand[i] < 14 && (i == 0 || cand[i] != dmrs_l0))
+              gs_dmrs_type2(ue_dl.sf_symbols[0] + cand[i] * nof_sc, first_crb, np, sl, cand[i], pci, t2s[cand[i]], t2v[cand[i]]);
+          }
+          uint32_t n8 = 0;
+          for (uint32_t c = 0; c < np; c++) n8 += t2s[dmrs_l0][c] > 0.8f;
+          if (n8 >= 4) {
+            uint8_t ls[14], nl = 0;
+            for (uint32_t i = 0; i < 5; i++) {
+              const uint32_t l = cand[i];
+              if (l >= 14 || (i > 0 && l == dmrs_l0)) continue;
+              if (i > 0) {
+                uint32_t both = 0;
+                for (uint32_t c = 0; c < np; c++) both += t2s[l][c] > 0.8f && t2s[dmrs_l0][c] > 0.8f;
+                if (both < 4 || 2 * both < n8) continue;
+              }
+              ls[nl++] = (uint8_t)l;
+            }
+            double cs = 0;
+            for (uint32_t c = 0; c < np; c++)
+              if (t2s[dmrs_l0][c] > 0.8f) cs += t2s[dmrs_l0][c];
+            const uint16_t sfn16 = (uint16_t)state->sfn, rn = 0, np16 = (uint16_t)np;
+            const uint8_t  sl8 = (uint8_t)sl;
+            const float    occf = 0, cohf = (float)(cs / n8);
+            std::lock_guard<std::mutex> lk(gs_dump_mutex);
+            fwrite("GSD3", 1, 4, gs_dump_bin);
+            fwrite(&sfn16, 2, 1, gs_dump_bin);
+            fwrite(&sl8, 1, 1, gs_dump_bin);
+            fwrite(&nl, 1, 1, gs_dump_bin);
+            fwrite(&rn, 2, 1, gs_dump_bin);
+            fwrite(&np16, 2, 1, gs_dump_bin);
+            fwrite(&occf, 4, 1, gs_dump_bin);
+            fwrite(&cohf, 4, 1, gs_dump_bin);
+            for (uint32_t c = 0; c < np; c++) {
+              const uint8_t v = t2s[dmrs_l0][c] > 0.8f ? 1 : 0;
+              fwrite(&v, 1, 1, gs_dump_bin);
+            }
+            for (uint8_t i = 0; i < nl; i++) {
+              fwrite(&ls[i], 1, 1, gs_dump_bin);
+              fwrite(t2v[ls[i]], sizeof(cf_t), 4 * np, gs_dump_bin);
+            }
+          }
+        }
+        /* dump (golden_sniffer.pdsch_dmrs_nids): the same blind record for each extra DM-RS scrambling ID the
+          cell gives its UEs (found offline), rnti = 1 + k: those UEs' DM-RS are invisible under the PCI */
+        if (gs_dump_bin != nullptr && nrscope_gs_args.dump_blind && !nrscope_gs_args.pdsch_dmrs_nids.empty()) {
+          static thread_local float xc0[14][SRSRAN_MAX_PRB_NR], xc1[SRSRAN_MAX_PRB_NR], xoc[SRSRAN_MAX_PRB_NR],
+              xq0[SRSRAN_MAX_PRB_NR], xq1[SRSRAN_MAX_PRB_NR];
+          static thread_local cf_t  xp[14][3 * SRSRAN_MAX_PRB_NR], xq[14][3 * SRSRAN_MAX_PRB_NR];
+          static thread_local float xt[SRSRAN_MAX_PRB_NR];
+          static const bool         p1001x = getenv("NRSCOPE_GS_DUMP_P1001") != nullptr;
+          for (size_t k = 0; k < nrscope_gs_args.pdsch_dmrs_nids.size(); k++) {
+            const int nidx = nrscope_gs_args.pdsch_dmrs_nids[k];
+            if (nidx < 0 || (uint32_t)nidx == pci) {
+              continue;
+            }
+            const uint32_t cand[5] = {dmrs_l0, 5, 7, 8, 11};
+            for (uint32_t l : cand) {
+              if (l >= 14) continue;
+              gs_dmrs_rb_map(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, np, sl, l, (uint32_t)nidx, xc0[l], xc1, xoc, xq0, xq1);
+            }
+            uint32_t n8 = 0;
+            for (uint32_t c = 0; c < np; c++) n8 += xc0[dmrs_l0][c] > 0.8f;
+            if (n8 < 4) continue;
+            uint8_t xs[14], xn = 0;
+            for (uint32_t i = 0; i < 5; i++) {
+              const uint32_t l = cand[i];
+              if (l >= 14 || (i > 0 && l == dmrs_l0)) continue;
+              if (i > 0) {
+                uint32_t both = 0;
+                for (uint32_t c = 0; c < np; c++) both += xc0[l][c] > 0.8f && xc0[dmrs_l0][c] > 0.8f;
+                if (both < 4 || 2 * both < n8) continue;
+              }
+              gs_dmrs_rb_pairs(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, np, sl, l, (uint32_t)nidx, xp[xn], xt);
+              if (p1001x) gs_dmrs_rb_pairs_1001(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, np, sl, l, (uint32_t)nidx, xq[xn]);
+              xs[xn++] = (uint8_t)l;
+            }
+            double   cs = 0;
+            uint32_t cn = 0;
+            for (uint32_t c = 0; c < np; c++)
+              if (xc0[dmrs_l0][c] > 0.8f) { cs += xc0[dmrs_l0][c]; cn++; }
+            const uint16_t sfn16 = (uint16_t)state->sfn, rn = (uint16_t)(1 + k), np16 = (uint16_t)np;
+            const uint8_t  sl8 = (uint8_t)sl;
+            const float    occf = 0, cohf = cn > 0 ? (float)(cs / cn) : 0;
+            std::lock_guard<std::mutex> lk(gs_dump_mutex);
+            fwrite(p1001x ? "GSD2" : "GSD1", 1, 4, gs_dump_bin);
+            fwrite(&sfn16, 2, 1, gs_dump_bin);
+            fwrite(&sl8, 1, 1, gs_dump_bin);
+            fwrite(&xn, 1, 1, gs_dump_bin);
+            fwrite(&rn, 2, 1, gs_dump_bin);
+            fwrite(&np16, 2, 1, gs_dump_bin);
+            fwrite(&occf, 4, 1, gs_dump_bin);
+            fwrite(&cohf, 4, 1, gs_dump_bin);
+            for (uint32_t c = 0; c < np; c++) {
+              const uint8_t v = xc0[dmrs_l0][c] > 0.8f ? 1 : 0;
+              fwrite(&v, 1, 1, gs_dump_bin);
+            }
+            for (uint8_t i = 0; i < xn; i++) {
+              fwrite(&xs[i], 1, 1, gs_dump_bin);
+              fwrite(xp[i], sizeof(cf_t), 3 * np, gs_dump_bin);
+              if (p1001x) fwrite(xq[i], sizeof(cf_t), 3 * np, gs_dump_bin);
+            }
+          }
+        }
         line += "," + bitmap + l0_extra + "," + csi + ",";
         for (uint32_t l = 1; l < 14; l++) { // CRBs over the strict threshold per symbol, appended last
           line_tail += (l > 1 ? ":" : "") + std::to_string(cnt8[l]);
@@ -1975,13 +2104,15 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
             f_p      = gs_fdra_occ_map(rb_s, rb_d, nprb, occ_p);
             have_map = true;
           }
-          /* and the map under this UE's own PDCCH DM-RS N_ID, when it has one */
-          const bool own_nid = dd.n_id != pci;
-          if (own_nid && ue_map_nid != dd.n_id) {
+          /* and the map under this UE's own N_ID, when it has one: golden_sniffer.pdsch_dmrs_nid (a
+            scramblingID0 the cell gives over RRC, found offline) if set, else its PDCCH DM-RS N_ID */
+          const uint32_t ue_nid  = nrscope_gs_args.pdsch_dmrs_nid >= 0 ? (uint32_t)nrscope_gs_args.pdsch_dmrs_nid : dd.n_id;
+          const bool     own_nid = ue_nid != pci;
+          if (own_nid && ue_map_nid != ue_nid) {
             gs_fdra_rb_coherence(ue_dl.sf_symbols[0] + dmrs_l0 * nof_sc, first_crb, nprb,
-                                 slot->idx % slots_per_frame, dmrs_l0, dd.n_id, ue_s, ue_d);
+                                 slot->idx % slots_per_frame, dmrs_l0, ue_nid, ue_s, ue_d);
             f_u        = gs_fdra_occ_map(ue_s, ue_d, nprb, occ_u);
-            ue_map_nid = dd.n_id;
+            ue_map_nid = ue_nid;
           }
           /* the layout for this DCI's size: the cell's for that size, else the UE's own lock
             when it was learned at this size; another size with neither is learned (or, for a
@@ -2015,7 +2146,7 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
           }
           float          coh    = 0;
           const bool     use_ue = hy.nid_ue != 0 && own_nid;
-          const uint32_t dm_nid = use_ue ? dd.n_id : pci; // the PDSCH DM-RS N_ID of this UE
+          const uint32_t dm_nid = use_ue ? ue_nid : pci; // the PDSCH DM-RS N_ID of this UE
           gs_fdra_score(hy, dd.payload, dd.nof_bits, first_crb, nprb, use_ue ? ue_s : rb_s, use_ue ? ue_d : rb_d, &coh);
           GsGrant g = {};
           g.rnti      = dd.rnti;
@@ -2081,7 +2212,55 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
             /* dump: this UE's grant, port-1000 DM-RS per CDM pair on every DM-RS symbol it shows.
               Record: "GSD1", sfn u16, slot u8, n_sym u8, rnti u16, nprb u16, occ f32, coherence f32,
               prb mask (nprb bytes), then per symbol: l u8 and 3 * nprb complex floats. */
+            /* a UE on DM-RS type 2 (the gNB can switch a UE to it over RRC): its grant is dumped as "GSD3" (header as GSD1
+              with its rnti, then per symbol l and 4 values per PRB: group 0 block 0, group 0 block 1, group 1 block 0,
+              group 1 block 1) when the type-2 pattern is more coherent over its PRBs than type 1 */
+            bool t2grant = false;
             if (gs_dump_bin != nullptr && (nrscope_gs_args.dump_rnti == -2 || (int32_t)dd.rnti == nrscope_gs_args.dump_rnti)) {
+              static thread_local float t2g[14][SRSRAN_MAX_PRB_NR];
+              static thread_local cf_t  t2gv[14][4 * SRSRAN_MAX_PRB_NR];
+              gs_dmrs_type2(ue_dl.sf_symbols[0] + dmrs_l0 * nof_sc, first_crb, nprb, g.slot, dmrs_l0, dm_nid, t2g[dmrs_l0], t2gv[dmrs_l0]);
+              double cm = 0;
+              uint32_t cn = 0;
+              for (uint32_t c = 0; c < nprb; c++)
+                if (gp[c]) { cm += t2g[dmrs_l0][c]; cn++; }
+              const float c2 = cn ? (float)(cm / cn) : 0.0f;
+              if (c2 > s0.coh0 && c2 > 0.5f) {
+                t2grant = true;
+                uint8_t ls[14], nl = 0;
+                ls[nl++] = (uint8_t)dmrs_l0;
+                const uint32_t add[4] = {5, 7, 8, 11};
+                for (uint32_t l : add) {
+                  if (l == dmrs_l0) continue;
+                  gs_dmrs_type2(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, nprb, g.slot, l, dm_nid, t2g[l], t2gv[l]);
+                  double cl = 0;
+                  for (uint32_t c = 0; c < nprb; c++)
+                    if (gp[c]) cl += t2g[l][c];
+                  if (cn && cl / cn > 0.5) ls[nl++] = (uint8_t)l;
+                }
+                const uint16_t sfn16 = (uint16_t)state->sfn, rn = dd.rnti, np16 = (uint16_t)nprb;
+                const uint8_t  sl8 = (uint8_t)g.slot;
+                const float    occf = 0, cohf = c2;
+                std::lock_guard<std::mutex> lk(gs_dump_mutex);
+                fwrite("GSD3", 1, 4, gs_dump_bin);
+                fwrite(&sfn16, 2, 1, gs_dump_bin);
+                fwrite(&sl8, 1, 1, gs_dump_bin);
+                fwrite(&nl, 1, 1, gs_dump_bin);
+                fwrite(&rn, 2, 1, gs_dump_bin);
+                fwrite(&np16, 2, 1, gs_dump_bin);
+                fwrite(&occf, 4, 1, gs_dump_bin);
+                fwrite(&cohf, 4, 1, gs_dump_bin);
+                for (uint32_t c = 0; c < nprb; c++) {
+                  const uint8_t v = gp[c] ? 1 : 0;
+                  fwrite(&v, 1, 1, gs_dump_bin);
+                }
+                for (uint8_t i = 0; i < nl; i++) {
+                  fwrite(&ls[i], 1, 1, gs_dump_bin);
+                  fwrite(t2gv[ls[i]], sizeof(cf_t), 4 * nprb, gs_dump_bin);
+                }
+              }
+            }
+            if (!t2grant && gs_dump_bin != nullptr && (nrscope_gs_args.dump_rnti == -2 || (int32_t)dd.rnti == nrscope_gs_args.dump_rnti)) {
               static thread_local cf_t  dp[14][3 * SRSRAN_MAX_PRB_NR];
               static thread_local float dt2[SRSRAN_MAX_PRB_NR];
               uint8_t                   syms[14], ns = 0;

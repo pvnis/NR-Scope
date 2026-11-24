@@ -31,10 +31,9 @@ def load_gsc(path):
     raw = open(path, "rb").read(); i = 0; out = {}; base = None
     while i + 12 <= len(raw):
         tag = raw[i:i + 4]
-        if tag in (b"GSD1", b"GSD2"):
-            two = tag == b"GSD2"
-            if i + 20 > len(raw): break
-            sfn, sl, ns, rn, npb, occ, coh = struct.unpack_from("<HBBHHff", raw, i + 4); j = i + 20; per = 3 * npb * 8 * (2 if two else 1)
+        if tag in (b"GSD1", b"GSD2", b"GSD3"):
+            if i + 20 > len(raw): break      # skipped here; GSD3 = DM-RS type 2, 4 values per PRB
+            sfn, sl, ns, rn, npb, occ, coh = struct.unpack_from("<HBBHHff", raw, i + 4); j = i + 20; per = {b"GSD1": 3, b"GSD2": 6, b"GSD3": 4}[tag] * npb * 8
             if j + npb + ns * (1 + per) > len(raw): break
             a = sfn * 20 + sl
             if base is None: base = a
