@@ -1793,6 +1793,8 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
           static thread_local float bt[SRSRAN_MAX_PRB_NR];
           static const bool         p1001 = getenv("NRSCOPE_GS_DUMP_P1001") != nullptr;
           uint8_t                   syms[14], ns = 0;
+          static thread_local uint8_t jm0[SRSRAN_MAX_PRB_NR];
+          uint32_t                    jn0 = 0;
           for (uint32_t l = 1; l < 13; l++) {
             if (l != dmrs_l0) { // additional positions of type A (5, 7, 8, 11), on the same PRBs as the first symbol
               uint32_t both = 0;
@@ -1804,6 +1806,15 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
               }
             }
             gs_dmrs_rb_pairs(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, np, sl, l, pci, bp[ns], bt);
+            if (l == dmrs_l0) {   // the record's PRBs: the strict per-PRB map, re-decided jointly over 5 PRBs
+              static thread_local uint8_t cin[SRSRAN_MAX_PRB_NR];
+              for (uint32_t c = 0; c < np; c++) cin[c] = sv_c0[dmrs_l0][c] > 0.8f;
+              jn0 = gs_dmrs_joint_mask(bp[ns], 3, np, cin, jm0, 5, 0.8f);
+              if (jn0 == 0) break;
+            } else {               // an extra symbol: kept when most of the first symbol's PRBs pass there too
+              static thread_local uint8_t jx[SRSRAN_MAX_PRB_NR];
+              if (2 * gs_dmrs_joint_mask(bp[ns], 3, np, jm0, jx, 5, 0.8f) < jn0) continue;
+            }
             if (p1001) {
               gs_dmrs_rb_pairs_1001(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, np, sl, l, pci, bq[ns]);
             }
@@ -1812,11 +1823,12 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
           double   cs = 0;
           uint32_t cn = 0;
           for (uint32_t c = 0; c < np; c++) {
-            if (sv_c0[dmrs_l0][c] > 0.8f) {
+            if (jm0[c]) {
               cs += sv_c0[dmrs_l0][c];
               cn++;
             }
           }
+          if (jn0 > 0 && ns > 0) {
           const uint16_t sfn16 = (uint16_t)state->sfn, rn = 0, np16 = (uint16_t)np;
           const uint8_t  sl8 = (uint8_t)sl;
           const float    occf = 0, cohf = cn > 0 ? (float)(cs / cn) : 0;
@@ -1830,7 +1842,7 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
           fwrite(&occf, 4, 1, gs_dump_bin);
           fwrite(&cohf, 4, 1, gs_dump_bin);
           for (uint32_t c = 0; c < np; c++) {
-            const uint8_t v = sv_c0[dmrs_l0][c] > 0.8f ? 1 : 0;
+            const uint8_t v = jm0[c];
             fwrite(&v, 1, 1, gs_dump_bin);
           }
           for (uint8_t i = 0; i < ns; i++) {
@@ -1839,6 +1851,7 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
             if (p1001) {
               fwrite(bq[i], sizeof(cf_t), 3 * np, gs_dump_bin);
             }
+          }
           }
         }
         /* dump (golden_sniffer.dump_blind): the slot's type-2 DM-RS (PCI-scrambled), "GSD3": header as GSD1 (rnti 0), the
@@ -1852,23 +1865,26 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
             if (cand[i] < 14 && (i == 0 || cand[i] != dmrs_l0))
               gs_dmrs_type2(ue_dl.sf_symbols[0] + cand[i] * nof_sc, first_crb, np, sl, cand[i], pci, t2s[cand[i]], t2v[cand[i]]);
           }
-          uint32_t n8 = 0;
-          for (uint32_t c = 0; c < np; c++) n8 += t2s[dmrs_l0][c] > 0.8f;
+          static thread_local cf_t    g0v[2 * SRSRAN_MAX_PRB_NR];
+          static thread_local uint8_t t2in[SRSRAN_MAX_PRB_NR], t2m[14][SRSRAN_MAX_PRB_NR];
+          auto g0of = [&](uint32_t l) { for (uint32_t c = 0; c < np; c++) { g0v[2 * c] = t2v[l][4 * c]; g0v[2 * c + 1] = t2v[l][4 * c + 1]; } };
+          for (uint32_t c = 0; c < np; c++) t2in[c] = t2s[dmrs_l0][c] > 0.8f;
+          g0of(dmrs_l0);
+          const uint32_t n8 = gs_dmrs_joint_mask(g0v, 2, np, t2in, t2m[dmrs_l0], 5, 0.8f);   // PRBs jointly, CDM group 0
           if (n8 >= 4) {
             uint8_t ls[14], nl = 0;
             for (uint32_t i = 0; i < 5; i++) {
               const uint32_t l = cand[i];
               if (l >= 14 || (i > 0 && l == dmrs_l0)) continue;
               if (i > 0) {
-                uint32_t both = 0;
-                for (uint32_t c = 0; c < np; c++) both += t2s[l][c] > 0.8f && t2s[dmrs_l0][c] > 0.8f;
-                if (both < 4 || 2 * both < n8) continue;
+                g0of(l);
+                if (2 * gs_dmrs_joint_mask(g0v, 2, np, t2m[dmrs_l0], t2m[l], 5, 0.8f) < n8) continue;
               }
               ls[nl++] = (uint8_t)l;
             }
             double cs = 0;
             for (uint32_t c = 0; c < np; c++)
-              if (t2s[dmrs_l0][c] > 0.8f) cs += t2s[dmrs_l0][c];
+              if (t2m[dmrs_l0][c]) cs += t2s[dmrs_l0][c];
             const uint16_t sfn16 = (uint16_t)state->sfn, rn = 0, np16 = (uint16_t)np;
             const uint8_t  sl8 = (uint8_t)sl;
             const float    occf = 0, cohf = (float)(cs / n8);
@@ -1882,7 +1898,7 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
             fwrite(&occf, 4, 1, gs_dump_bin);
             fwrite(&cohf, 4, 1, gs_dump_bin);
             for (uint32_t c = 0; c < np; c++) {
-              const uint8_t v = t2s[dmrs_l0][c] > 0.8f ? 1 : 0;
+              const uint8_t v = t2m[dmrs_l0][c];
               fwrite(&v, 1, 1, gs_dump_bin);
             }
             for (uint8_t i = 0; i < nl; i++) {
@@ -2239,11 +2255,13 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
               static thread_local float t2g[14][SRSRAN_MAX_PRB_NR];
               static thread_local cf_t  t2gv[14][4 * SRSRAN_MAX_PRB_NR];
               gs_dmrs_type2(ue_dl.sf_symbols[0] + dmrs_l0 * nof_sc, first_crb, nprb, g.slot, dmrs_l0, dm_nid, t2g[dmrs_l0], t2gv[dmrs_l0]);
-              double cm = 0;
+              static thread_local cf_t    gg0[2 * SRSRAN_MAX_PRB_NR];
+              static thread_local uint8_t gin[SRSRAN_MAX_PRB_NR];
+              auto gg0of = [&](uint32_t l) { for (uint32_t c = 0; c < nprb; c++) { gg0[2 * c] = t2gv[l][4 * c]; gg0[2 * c + 1] = t2gv[l][4 * c + 1]; } };
               uint32_t cn = 0;
-              for (uint32_t c = 0; c < nprb; c++)
-                if (gp[c]) { cm += t2g[dmrs_l0][c]; cn++; }
-              const float c2 = cn ? (float)(cm / cn) : 0.0f;
+              for (uint32_t c = 0; c < nprb; c++) { gin[c] = gp[c] ? 1 : 0; cn += gin[c]; }
+              gg0of(dmrs_l0);
+              const float c2 = cn ? gs_dmrs_joint_coh(gg0, 2, nprb, gin) : 0.0f;   // over the whole grant: data gives ~0
               if (c2 > s0.coh0 && c2 > 0.5f) {
                 t2grant = true;
                 uint8_t ls[14], nl = 0;
@@ -2252,10 +2270,8 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
                 for (uint32_t l : add) {
                   if (l == dmrs_l0) continue;
                   gs_dmrs_type2(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, nprb, g.slot, l, dm_nid, t2g[l], t2gv[l]);
-                  double cl = 0;
-                  for (uint32_t c = 0; c < nprb; c++)
-                    if (gp[c]) cl += t2g[l][c];
-                  if (cn && cl / cn > 0.5) ls[nl++] = (uint8_t)l;
+                  gg0of(l);
+                  if (cn && gs_dmrs_joint_coh(gg0, 2, nprb, gin) > 0.5f) ls[nl++] = (uint8_t)l;
                 }
                 const uint16_t sfn16 = (uint16_t)state->sfn, rn = dd.rnti, np16 = (uint16_t)nprb;
                 const uint8_t  sl8 = (uint8_t)g.slot;

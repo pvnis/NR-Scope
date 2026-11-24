@@ -195,6 +195,46 @@ void gs_fdra_rb_coherence(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb,
   }
 }
 
+uint32_t gs_dmrs_joint_mask(const cf_t* v, uint32_t per, uint32_t nof_prb, const uint8_t* in, uint8_t* out, uint32_t W, float th)
+{
+  static thread_local std::complex<double> cs[4 * SRSRAN_MAX_PRB_NR + 2];
+  static thread_local double               ce[4 * SRSRAN_MAX_PRB_NR + 2];
+  const uint32_t                           n = per * nof_prb;
+  cs[0] = 0;
+  ce[0] = 0;
+  for (uint32_t k = 0; k + 1 < n; k++) {   // products of neighbouring values, both inside `in`
+    const bool ok = in[k / per] && in[(k + 1) / per];
+    const std::complex<float> a(v[k + 1]), b(v[k]);
+    cs[k + 1] = cs[k] + (ok ? std::complex<double>(a * std::conj(b)) : 0.0);
+    ce[k + 1] = ce[k] + (ok ? 0.5 * (std::norm(a) + std::norm(b)) : 0.0);
+  }
+  const uint32_t h = W / 2;
+  uint32_t       kept = 0;
+  for (uint32_t c = 0; c < nof_prb; c++) {
+    out[c] = 0;
+    if (!in[c]) continue;
+    const uint32_t lo = c >= h ? (c - h) * per : 0, hi = std::min((c + h + 1) * per - 1, n - 1);
+    if (hi <= lo) continue;
+    const double E = ce[hi] - ce[lo];
+    if (E > 0 && std::abs(cs[hi] - cs[lo]) / E >= th) { out[c] = 1; kept++; }
+  }
+  if (kept < 4) { for (uint32_t c = 0; c < nof_prb; c++) out[c] = 0; kept = 0; }
+  return kept;
+}
+
+float gs_dmrs_joint_coh(const cf_t* v, uint32_t per, uint32_t nof_prb, const uint8_t* in)
+{
+  std::complex<double> s = 0;
+  double               e = 0;
+  for (uint32_t k = 0; k + 1 < per * nof_prb; k++) {
+    if (!in[k / per] || !in[(k + 1) / per]) continue;
+    const std::complex<float> a(v[k + 1]), b(v[k]);
+    s += std::complex<double>(a * std::conj(b));
+    e += 0.5 * (std::norm(a) + std::norm(b));
+  }
+  return e > 0 ? (float)(std::abs(s) / e) : 0.0f;
+}
+
 void gs_dmrs_type2(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb, uint32_t slot_idx, uint32_t l, uint32_t n_id,
                    float* coh, cf_t* val)
 {

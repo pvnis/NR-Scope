@@ -90,6 +90,12 @@ float gs_fdra_lift(const GsFdraHyp& h, const uint8_t* payload, uint32_t nof_bits
    (optional, 4 per PRB): group 0 block 0, group 0 block 1, group 1 block 0, group 1 block 1, each the mean of its pair */
 void gs_dmrs_type2(const cf_t* sym, uint32_t first_crb, uint32_t nof_prb, uint32_t slot_idx, uint32_t l, uint32_t n_id,
                    float* coh, cf_t* val);
+/* DM-RS PRBs decided jointly over W neighbouring PRBs: v = port-1000 values in frequency order (per per PRB, equally
+   spaced), in = candidate PRBs; out[c] = 1 when the values over the W PRBs centred on c (inside `in`) are coherent:
+   |sum v[n+1] v*[n]| / sum |v|^2 >= th. Fewer than 4 PRBs kept: none. Returns the number kept. */
+uint32_t gs_dmrs_joint_mask(const cf_t* v, uint32_t per, uint32_t nof_prb, const uint8_t* in, uint8_t* out, uint32_t W, float th);
+/* joint coherence of the port-1000 values over the PRBs of `in` (a whole grant): |sum v[n+1] v*[n]| / sum |v|^2 */
+float gs_dmrs_joint_coh(const cf_t* v, uint32_t per, uint32_t nof_prb, const uint8_t* in);
 float gs_fdra_occ_map(const cf_t* s, const float* d, uint32_t nof_prb, bool* occ);
 
 /* Per CRB of one symbol (CRB first_crb + c at grid subcarrier 12 c), DM-RS type 1 with
