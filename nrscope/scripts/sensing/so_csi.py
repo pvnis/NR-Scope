@@ -320,6 +320,14 @@ def ref_fix_hyb(A, EP, REF, max_dt=0.01, align_delay=False, iters=6):
             c = bsum(II, ww * np.conj(g[KK]) * dd, nI) / np.maximum(np.bincount(II, ww * np.abs(g[KK]) ** 2, nI), 1e-30)
             c[np.bincount(II, None, nI) == 0] = 1
             g = bsum(KK, ww * np.conj(c[II]) * dd, nK) / np.maximum(np.bincount(KK, ww * np.abs(c[II]) ** 2, nK), 1e-30)
+        if os.environ.get("HYB_ROBUST", "0") == "1":   # members that disagree with their reference (another precoder
+            w0 = ww.copy(); thr = float(os.environ.get("HYB_ROBUST_THR", "0.3"))   # mixed in) are down-weighted, refit
+            for _ in range(iters):
+                r = np.abs(dd - c[II] * g[KK]) / np.maximum(np.abs(c[II] * g[KK]), 1e-30)
+                ww = w0 * np.where(r < thr, 1.0, (thr / np.maximum(r, 1e-30)) ** 2)
+                c = bsum(II, ww * np.conj(g[KK]) * dd, nI) / np.maximum(np.bincount(II, ww * np.abs(g[KK]) ** 2, nI), 1e-30)
+                c[np.bincount(II, None, nI) == 0] = 1
+                g = bsum(KK, ww * np.conj(c[II]) * dd, nK) / np.maximum(np.bincount(KK, ww * np.abs(c[II]) ** 2, nK), 1e-30)
         F = c[II] * g[KK]
         fac = {(int(i), int(b)): f for i, b, f in zip(II, BB, F)}
     out = []; kept = []

@@ -12,6 +12,23 @@ usage: gs_all.py <rec dir> <out prefix>"""
 import sys, struct, json, glob, os, pickle, numpy as np, collections as C
 R=sys.argv[1]; OUT=sys.argv[2]; N=272; NG=N//4; L=3*N; CH=[int(c) for c in os.environ.get("CH","0,1,2,3").split(",")]; NA=len(CH); MINB=int(os.environ.get("MINB","10"))
 q=np.arange(L); rng=np.random.default_rng(7); NF=1024; DF=120e3; BIN=3e8/(NF*DF)
+CLEAN_STATS={"in":0,"kept":0,"sym_in":0,"sym_kept":0}
+def clean_mask(v,m,per):
+    """v: port-1000 values in frequency order (per values per PRB, equally spaced), m: the decoder's PRB mask -> the
+    PRBs whose pilots are coherent with their neighbours over a window of CLEAN_W PRBs (only inside m)"""
+    if os.environ.get("CLEAN","1")!="1": return m
+    W=int(os.environ.get("CLEAN_W","5")); th=float(os.environ.get("CLEAN_TH","0.8")); n=len(m)
+    mv=np.repeat(m,per); pr=v[1:]*np.conj(v[:-1]); ok=mv[1:]&mv[:-1]; pr=np.where(ok,pr,0); en=np.where(ok,0.5*(np.abs(v[1:])**2+np.abs(v[:-1])**2),0)
+    cs=np.r_[0,np.cumsum(pr)]; ce=np.r_[0,np.cumsum(en)]; h=W//2; out=np.zeros(n,bool)
+    for c in np.flatnonzero(m):
+        lo=max(0,(c-h)*per); hi=min(len(pr),(c+h+1)*per-1)
+        if hi<=lo: continue
+        E=ce[hi]-ce[lo]
+        if E>0 and abs(cs[hi]-cs[lo])/E>=th: out[c]=True
+    CLEAN_STATS["in"]+=int(m.sum()); CLEAN_STATS["kept"]+=int(out.sum()); CLEAN_STATS["sym_in"]+=1
+    if out.sum()<4: out[:]=False
+    else: CLEAN_STATS["sym_kept"]+=1
+    return out
 def load(path):
     raw=open(path,"rb").read(); i=0; out={}; base=None
     while i+12<=len(raw):
@@ -27,12 +44,51 @@ def load(path):
             for _ in range(ns):
                 l=raw[j]; j+=1
                 if npb>=N and occ<4 and coh>=0.5:
-                    out[(a,rn,l)]=(m[:N].reshape(NG,4).all(1),np.frombuffer(raw,np.complex64,3*npb,j)[:L])
+                    v1=np.frombuffer(raw,np.complex64,3*npb,j+(3*npb*8 if two and os.environ.get('P1001')=='1' else 0))[:L]   # env P1001=1: port 1001
+                    mc=clean_mask(np.frombuffer(raw,np.complex64,3*npb,j)[:L].astype(complex),m[:N],3)
+                    if mc.sum()>=4: PRBM[(a,rn,l)]=mc.copy(); out[(a,rn,l)]=(mc.reshape(NG,4).all(1),v1)
                 j+=per
             i=j
+        elif tag==b"GSD3" and os.environ.get("T2","1")=="1":
+            if i+20>len(raw): break
+            sfn,sl,ns,rn,npb,occ,coh=struct.unpack_from("<HBBHHff",raw,i+4); j=i+20; per=4*npb*8
+            if j+npb+ns*(1+per)>len(raw): break
+            m=np.frombuffer(raw,np.uint8,npb,j).astype(bool); j+=npb; a=sfn*20+sl
+            if base is None: base=a
+            a=a+20480 if a<base-1000 else a
+            for _ in range(ns):
+                l=raw[j]; j+=1
+                if npb>=N and coh>=0.5 and m[:N].sum()>=4:
+                    v=np.frombuffer(raw,np.complex64,4*npb,j).reshape(npb,4)[:N].astype(complex)
+                    ms=clean_mask(v[:,[0,1]].ravel(),m[:N],2)   # this symbol's PRBs that really carry type-2 DM-RS
+                    if ms.sum()>=4:
+                        y=t2_lattice(v,ms); key=(a,rn,l)
+                        if key in out and key in PRBM:   # a type-1 record of the same slot and symbol (other UEs): join
+                            m0=PRBM[key]; y0=out[key][1].copy(); mm=np.repeat(ms,3); y0[mm]=y[mm]; mj=m0|ms
+                        else: y0=y; mj=ms
+                        out[key]=(mj.reshape(NG,4).all(1),y0); PRBM[key]=mj
+                j+=per
+            i=j
+        elif tag==b"GSD3":
+            npb,ns=struct.unpack_from("<H",raw,i+10)[0],raw[i+7]; i+=20+npb+ns*(1+4*npb*8)
+        elif tag==b"GSE1":
+            i+=10+4*struct.unpack_from("<H",raw,i+8)[0]
         elif tag==b"GSC1":
             npb=struct.unpack_from("<H",raw,i+10)[0]; i+=12+12*npb*8
         else: i+=1
+    return out
+PRBM={}   # (a, rnti, l) -> PRB mask of the record kept in load(): to join type-1 and type-2 records
+_K2=np.r_[0.5,6.5]; _K1=np.r_[1.0,5.0,9.0]
+def t2_lattice(v,m):
+    """type-2 CDM group 0 (npb x [b0, b1] at subcarriers 0.5, 6.5) -> the type-1 lattice (3 per PRB at 1, 5, 9) inside
+    the mask m: delay slope out, linear interpolation along the band, slope back in. Outside m: 0."""
+    n=len(m); kk=(12*np.arange(n)[:,None]+_K2[None,:]).ravel()
+    g=v[:,[0,1]].ravel()   # columns: g0b0, g0b1, g1b0, g1b1
+    mk=np.repeat(m,2); out=np.zeros(3*n,complex); kq=(12*np.arange(n)[:,None]+_K1[None,:]).ravel(); mq=np.repeat(m,3)
+    if mk.sum()<2: return out
+    ok=mk[1:]&mk[:-1]; z=np.sum((g[1:]*np.conj(g[:-1]))[ok]); sl=np.angle(z)/6.0 if z!=0 else 0.0
+    w=g*np.exp(-1j*sl*kk); kv=kk[mk]; wv=w[mk]
+    out[mq]=(np.interp(kq[mq],kv,wv.real)+1j*np.interp(kq[mq],kv,wv.imag))*np.exp(1j*sl*kq[mq])
     return out
 def ends(d,a0,a1,x0):
     x=np.arange(a0,a1)-x0; return np.polyfit(x,d[a0:a1].real,1)[1]+1j*np.polyfit(x,d[a0:a1].imag,1)[1]

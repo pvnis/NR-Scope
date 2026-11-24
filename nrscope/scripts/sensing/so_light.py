@@ -11,13 +11,15 @@ record_estimates file for NR-Scope's sensing_offline.
   TRS-beam sample (CSI_DT 6 ms, kept when the fit residual < CSI_MAXRES 0.3); CSI_REF=1 also uses them as references
   for the DM-RS (nearest of TRS or CSI-RS-derived sample).
 - INJ='range,speed,dB,angle;...': targets injected into every raw signal first (truth to <out>.truth.csv).
-usage: so_light.py <burst dir> <out.bin>   env MODE (notab | tab), USE_DMRS (1), USE_CSI (0), CSI_REF (0), INJ, DIR"""
+usage: so_light.py <burst dir> <out.bin>   env MODE (notab | tab), PREC_IGNORE (0), ORACLE_OWN (0, sim: true precoder keys), ASSOC_EVAL (0, sim: association purity), FIG_DUMP (npz of antenna 0's H and HW), USE_DMRS (1), USE_CSI (0), CSI_REF (0), INJ, DIR"""
 import sys, os, struct, numpy as np, collections as C
 BD, OUTP = sys.argv[1].rstrip("/") + "/", sys.argv[2]; saved = list(sys.argv); os.environ["CH"] = "0,1,2,3"
 src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "gs_all.py")).read().split("Rz=C.defaultdict(list)")[0]
 sys.argv = ["gs_all.py", "/dev/null", "/dev/null"]; exec(src); sys.argv = saved
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gs_trs_lib import load_gsc, trs_despread
+from gs_trs_lib import load_gsc, trs_despread, trs_comb
+import gs_trs_lib
+print("PCI %d (TRS / CSI-RS sequences)" % gs_trs_lib.set_pci(BD))
 from so_csi import load_wsh, undo_wsh, slope_of, PH_PER_SAMPLE as PH
 MODE = os.environ.get("MODE", "notab"); USE = os.environ.get("USE_DMRS", "1") == "1"; DIR = os.environ.get("DIR", "replay_blind_ch")
 NSC = 3276; NFq = 4096; files = [BD + DIR + "%d/ue_dmrs.bin" % c for c in range(4)]
@@ -39,7 +41,10 @@ KK_D = 12 * (np.arange(816) // 3) + 4 * (np.arange(816) % 3) + 1; KK_T = KK_D + 
 def shifts(a): return [W.get(a, W[min(W, key=lambda b: abs(b - a))]) if W else 0 for W in WS]
 # TRS
 G = [load_gsc(f) for f in files]; gk = sorted(set(G[0]).intersection(*[set(g) for g in G[1:]]))
-TRS = [(a * 0.5e-3 + l / 28e3, a, l, undo_wsh(inj(np.array([trs_despread(*G[c][(a, l)], a % 20, l, 2)[:N].ravel() for c in range(4)]),
+TRS_C, _tc = trs_comb(G[0]); KK_T = KK_D - 1 + TRS_C   # TRS on REs c, c+4, c+8 (2 on PCI 632, 0 on PCI 630)
+print("TRS on subcarriers %d, %d, %d of each PRB (coherence %.2f)" % (TRS_C, TRS_C + 4, TRS_C + 8, _tc))
+if _tc < 0.5: print("WARNING: no coherent TRS under PCI %d: wrong PCI?" % gs_trs_lib.PCI)
+TRS = [(a * 0.5e-3 + l / 28e3, a, l, undo_wsh(inj(np.array([trs_despread(*G[c][(a, l)], a % 20, l, TRS_C)[:N].ravel() for c in range(4)]),
                                                a * 0.5e-3 + l / 28e3, a, KK_T), shifts(a), -1.0))
        for a, l in gk if l in (4, 8)]
 del G
@@ -63,6 +68,7 @@ ramp = np.exp(2j * np.pi * np.array(b0)[:, None] * qd[None, :] / NFq)
 TRS = [(t, a, l, R * ramp) for t, a, l, R in TRS]
 print("TRS: %d symbols; direct path per antenna was at %s m" % (len(TRS), " ".join("%+.1f" % (b / NFq / 120e3 * 3e8) for b in b0)))
 snaps = [(t, a, l, full, R, "trs") for t, a, l, R in TRS]
+FIGD = []   # env FIG_DUMP=<npz>: antenna 0's TRS (H) and DM-RS (HW: the loaded UE, blind pieces) as anchoring starts
 SIDE = [(a, l, "trs", -1, full, "ok") for t, a, l, R in TRS]   # every candidate symbol and its fate (env SIDE=<file>)
 # CSI-RS as extra TRS-beam samples (env USE_CSI=1): per CSI-RS occasion (slots 2/10, symbol 13), the one set of 8 port
 # weights for the whole band that best reproduces the nearest TRS (<= CSI_DT), i.e. the TRS beam through that occasion's
@@ -70,7 +76,7 @@ SIDE = [(a, l, "trs", -1, full, "ok") for t, a, l, R in TRS]   # every candidate
 if os.environ.get("USE_CSI", "0") == "1":
     from gs_trs_lib import csi8_despread
     G = [load_gsc(f) for f in files]; gk = sorted(set(G[0]).intersection(*[set(g) for g in G[1:]]))
-    TT0 = np.array([x[0] for x in TRS]); qc = 3 * np.arange(N) + 1; qd0 = float(os.environ.get("WSH_Q0", "409.25")); nc = 0; resid = []
+    TT0 = np.array([x[0] for x in TRS]); qc = 3 * np.arange(N) + 1; qd0 = float(os.environ.get("WSH_Q0", "409.25")); nc = 0; resid = []; CSD = []   # CSD: env CSI_DUMP=<npz>, every fitted occasion
     for a, l in gk:
         if l != 13 or a % 20 not in (2, 10): continue
         t = a * 0.5e-3 + 13 / 28e3; j = int(np.argmin(np.abs(TT0 - t)))
@@ -82,12 +88,14 @@ if os.environ.get("USE_CSI", "0") == "1":
         Pm = Pm * np.exp(2j * np.pi * np.array(b0)[:, None, None] * (qc - qd0)[None, :, None] / NFq)
         Rt = TRS[j][3].reshape(4, N, 3).mean(2)                                                # TRS per PRB
         Am = Pm.reshape(-1, 8); v, *_ = np.linalg.lstsq(Am, Rt.reshape(-1), rcond=None)
-        S = (Am @ v).reshape(4, N); rr = np.sum(np.abs(Rt - S) ** 2) / np.sum(np.abs(Rt) ** 2); resid.append(rr)
+        S = (Am @ v).reshape(4, N); rr = np.sum(np.abs(Rt - S) ** 2) / np.sum(np.abs(Rt) ** 2); resid.append(rr); CSD.append((t, a, TT0[j] - t, rr, v))
         if rr > float(os.environ.get("CSI_MAXRES", "0.3")): SIDE.append((a, 13, "csi", -1, full, "fit")); continue
         snaps.append((t, a, 13, full, np.repeat(S, 3, 1), "csi")); nc += 1; SIDE.append((a, 13, "csi", -1, full, "ok"))
     del G
+    if os.environ.get("CSI_DUMP"): np.savez_compressed(os.environ["CSI_DUMP"], t=np.array([x[0] for x in CSD]), slot=np.array([x[1] for x in CSD]), dt_trs=np.array([x[2] for x in CSD]), resid=np.array([x[3] for x in CSD]), v=np.array([x[4] for x in CSD]))
     print("CSI-RS as TRS-beam samples: %d of %d occasions kept, fit residual median %.3f" % (nc, len(resid), np.median(resid) if resid else np.nan))
-def track_keys(E, dt=0.02, cmin=0.9):
+def track_keys(E, dt=float(os.environ.get("BT_DT", "0.02")), cmin=float(os.environ.get("BT_CMIN", "0.9")),
+               nmin=int(os.environ.get("BT_NMIN", "4"))):   # env BT_DT / BT_CMIN / BT_NMIN
     """Per-PRG precoder-epoch keys for the blind record, which mixes several UEs per symbol: each contiguous run of
     PRGs joins the track (seen within dt) it overlaps on >= 4 PRGs with the highest precoder coherence >= cmin (0.95
     below 6 shared PRGs), the continuity test of epochs(); otherwise it opens a new track. E: [(t, pm, Y)] in time."""
@@ -98,7 +106,7 @@ def track_keys(E, dt=0.02, cmin=0.9):
             rm = np.zeros(NG, bool); rm[s0:e0] = True; best = None; bc = 0.0
             for T in TK:
                 sh = (T[1] > 0) & rm; ns = int(sh.sum())
-                if ns < 4: continue
+                if ns < nmin: continue
                 r = np.sum(np.conj(T[0][:, sh] / T[1][sh][None, :, None]) * Y3[:, sh], axis=(0, 2))
                 cc = np.abs(ESL[:, sh] @ r) / (np.abs(r).sum() + 1e-30); jj = int(np.argmax(cc))
                 if cc[jj] >= (cmin if ns >= 6 else 0.95) and cc[jj] > bc: bc = cc[jj]; best = (T, SL[jj], np.angle(ESL[jj, sh] @ r))
@@ -110,8 +118,226 @@ def track_keys(E, dt=0.02, cmin=0.9):
             for b in range(s0, e0): k[b] = ("trk", T[3])
         keys.append(k)
     return keys
+def prg_keys(E, dt=float(os.environ.get("PP_DT", "0.1")), tol=float(os.environ.get("PP_TOL", "0.15")),
+             cmin=float(os.environ.get("PP_CMIN", "0.8"))):
+    """Per-PRG precoder continuity for the blind record (BLIND_TRACK=2): no user identity. Each PRG keeps the templates
+    of its recent precoders (NA x 12, scaled to their snapshot's common factor, alive dt): a PRG used by another UE in
+    between gets its own precoder back when that UE returns. A snapshot's common factor c (the receiver's oscillator)
+    is the ratio most PRGs agree on within tol over all (PRG, template) pairs, else the previous c within 5 ms; a PRG
+    continues the template whose ratio matches c (and shape coherence >= cmin), otherwise opens a new key (a precoder
+    change or a new UE). E: [(t, pm, Y)] in time."""
+    TP = {}; keys = []; nid = 0; c_prev = None   # PRG -> list of [template, last time, key id]
+    for t, pm, Y in E:
+        Y3 = Y.reshape(NA, NG, 12); k = {}; cand = {}
+        for b in np.flatnonzero(pm):
+            TP[b] = [T for T in TP.get(b, []) if t - T[1] <= dt]
+            ny = np.vdot(Y3[:, b], Y3[:, b]).real
+            for T in TP[b]:
+                num = np.vdot(T[0], Y3[:, b]); den = np.vdot(T[0], T[0]).real
+                if den > 0 and ny > 0 and abs(num) / np.sqrt(den * ny) >= cmin: cand.setdefault(b, []).append((num / den, T))
+        allr = [(b, r) for b, L in cand.items() for r, T in L]
+        c = None
+        if len({b for b, r in allr}) >= 2:   # consensus over PRGs: the ratio the most distinct PRGs agree with
+            def votes(r0): return len({b for b, r in allr if abs(r / r0 - 1) < tol})
+            r0 = max((r for b, r in allr), key=votes)
+            if votes(r0) >= 2: c = np.mean([r for b, r in allr if abs(r / r0 - 1) < tol])
+        if c is None and c_prev is not None and t - c_prev[1] <= 0.005 and allr: c = c_prev[0]
+        for b in np.flatnonzero(pm):
+            best = None
+            if c is not None:
+                for r, T in cand.get(b, []):
+                    e = abs(r / c - 1)
+                    if e < tol and (best is None or e < best[0]): best = (e, T)
+            if best:
+                T = best[1]; T[0] = 0.8 * T[0] + 0.2 * Y3[:, b] / c; T[1] = t
+            else:
+                T = [Y3[:, b] / c if c is not None else Y3[:, b].copy(), t, nid]; nid += 1; TP.setdefault(b, []).append(T)
+            k[b] = ("pp", T[2])
+        if c is not None: c_prev = (c, t)
+        elif k: c_prev = (1.0 + 0j, t)   # every PRG new: the templates were set at scale 1
+        keys.append(k)
+    return keys
+# static TRS reference (REF_STATIC=1): oscillator model and the TRS mean over the chunk
+_TRt = np.array([x[0] for x in TRS]); _R0 = TRS[0][3]
+_PH = np.polyfit(_TRt, np.unwrap(np.array([np.angle(np.vdot(_R0, x[3])) for x in TRS])), 3)
+osc_model = lambda t: np.exp(1j * np.polyval(_PH, t))
+Rstatic = np.mean([x[3] / osc_model(x[0]) for x in TRS], 0)
+REF_ST = os.environ.get("REF_STATIC", "0") == "1"
+# DM-RS, beam anchoring (BA=1)
+if USE and os.environ.get("BA", "0") == "1":
+    Dd = [load(f) for f in files]; keys = set(Dd[0]).intersection(*[set(d) for d in Dd[1:]])
+    cnt_ = C.Counter(k[1] for k in keys if k[1] != 0); tab = cnt_.most_common(1)[0][0] if cnt_ else None
+    tabp = C.defaultdict(lambda: np.zeros(NG, bool))
+    for k in keys:
+        if k[1] == tab: tabp[k[0]] |= np.logical_and.reduce([d[k][0] for d in Dd])
+    # 1. oscillator phase from the TRS
+    TRt = np.array([x[0] for x in TRS]); R0 = TRS[0][3]
+    TRp = np.unwrap(np.array([np.angle(np.vdot(R0, x[3])) for x in TRS])); PH = np.polyfit(TRt, TRp, 3)
+    osc = lambda t: np.exp(1j * np.polyval(PH, t))
+    Rbar = np.mean([x[3] / osc(x[0]) for x in TRS], 0)                    # TRS static channel, 4 x L
+    s_trs = np.median([np.sum(np.abs(x[3] / osc(x[0]) - Rbar) ** 2) / np.sum(np.abs(Rbar) ** 2) for x in TRS])
+    E = []
+    for k in sorted(keys):
+        a, u, l = k
+        if u != 0 and not (MODE == "tab" and u == tab): continue
+        if u == 0 and os.environ.get("TAB_ONLY", "0") == "1": continue   # the tablet DM-RS only (diagnostic)
+        pm = np.logical_and.reduce([d[k][0] for d in Dd])
+        if u == 0 and MODE == "notab": pm = pm & ~tabp[a]
+        if pm.sum() < 1: continue
+        t = a * 0.5e-3 + l / 28e3; Y = inj(np.array([d[k][1] for d in Dd]).astype(complex), t, a, KK_D)
+        Y = dedrift(t, undo_wsh(Y, shifts(a), -1.0)) * ramp / osc(t)
+        E.append((t, a, l, pm, Y, u))
+    del Dd
+    E.sort(key=lambda e: e[0])
+    if os.environ.get("BA_PH", "prg") == "wide":
+        cth = float(os.environ.get("BA_COH", "0.97")); ttl = float(os.environ.get("BA_TTL", "0.5")); nmin = int(os.environ.get("BA_MIN", "10"))
+        TP = C.defaultdict(list); TPL = {}; own = {}; THETA = {}; nb = 0
+        for i, (t, a, l, pm, Y, u) in enumerate(E):
+            for s0_, e0_ in runs(pm):
+                cand = {}; z = 0
+                for b in range(s0_, e0_):
+                    y = Y[:, 12 * b:12 * b + 12].ravel(); ny = np.linalg.norm(y); TP[b] = [T for T in TP[b] if t - T[2] <= ttl]
+                    best = None; bc = cth
+                    for T in TP[b]:
+                        c_ = abs(np.vdot(T[0], y)) / (np.linalg.norm(T[0]) * ny + 1e-30)
+                        if c_ >= bc: bc = c_; best = T
+                    cand[b] = best
+                    if best is not None: z += np.vdot(best[0] / best[1], y)
+                th = np.angle(z) if z != 0 else 0.0
+                for b in range(s0_, e0_):
+                    y = Y[:, 12 * b:12 * b + 12].ravel() * np.exp(-1j * th); T = cand[b]
+                    if T is None: T = [np.zeros_like(y), 0, t, nb]; TPL[nb] = T; nb += 1; TP[b].append(T)
+                    T[0] = T[0] + y; T[1] += 1; T[2] = t; own[(i, b)] = T[3]; THETA[(i, b)] = th
+        Ssum = {k_: T[0].reshape(4, 12) for k_, T in TPL.items()}; Scnt = C.Counter({k_: T[1] for k_, T in TPL.items()})
+        G = {}; NZ = {}; nacc = C.Counter(); ncnt_ = C.Counter()
+        for (i, b), kk_ in own.items():
+            if Scnt[kk_] < nmin: continue
+            Sb = Ssum[kk_] / Scnt[kk_]
+            if kk_ not in G:
+                Rb = Rbar[:, 12 * b:12 * b + 12]; G[kk_] = np.vdot(Rb, Sb) / np.vdot(Rb, Rb).real
+                if os.environ.get("BA_G", "norm") == "norm":   # phase of the projection, size from the norms: never blows up
+                    G[kk_] = np.exp(1j * np.angle(G[kk_])) * np.linalg.norm(Sb) / (np.linalg.norm(Rb) + 1e-30)
+            y = E[i][4][:, 12 * b:12 * b + 12] * np.exp(-1j * THETA[(i, b)]); rr_ = np.sum(np.abs(y - Sb) ** 2) / (np.sum(np.abs(Sb) ** 2) + 1e-30)
+            if rr_ <= 10 ** (float(os.environ.get("BA_GATE", "-12")) / 10): nacc[kk_] += rr_; ncnt_[kk_] += 1   # noise of the kept ones
+        for kk_ in G: NZ[kk_] = nacc[kk_] / max(ncnt_[kk_], 1) if ncnt_[kk_] else 1.0
+        useW = os.environ.get("BA_W", "1") == "1"; out = {}; ngate = 0
+        for i, (t, a, l, pm, Y, u) in enumerate(E):
+            key = (a, l)
+            if key not in out: out[key] = [t, Rbar.copy(), np.zeros(NG, bool)]
+            for b in np.flatnonzero(pm):
+                kk_ = own[(i, b)]
+                if kk_ not in G or abs(G[kk_]) == 0: continue
+                sl = slice(12 * b, 12 * b + 12); Sb = Ssum[kk_] / Scnt[kk_]; y = Y[:, sl] * np.exp(-1j * THETA[(i, b)])
+                if np.sum(np.abs(y - Sb) ** 2) > 10 ** (float(os.environ.get("BA_GATE", "-12")) / 10) * np.sum(np.abs(Sb) ** 2): ngate += 1; continue   # heavy tail: a bad match
+                w = min(1.0, s_trs / NZ[kk_]) if useW else 1.0
+                out[key][1][:, sl] = Rbar[:, sl] + w * (y - Sb) / G[kk_]; out[key][2][b] = True
+        nd = 0; full = np.ones(NG, bool)
+        for (a, l), (t, X, meas) in out.items():
+            if meas.sum() == 0: continue
+            snaps.append((t, a, l, full, X * osc(t), "dmrs")); nd += 1
+        print("beam anchoring (wide): %d snapshots, %d beams (%d with >= %d), %d DM-RS symbols written; TRS noise %.1f dB, beam noise median %.1f dB"
+              % (len(E), nb, len(G), nmin, nd, 10 * np.log10(s_trs), 10 * np.log10(np.median(list(NZ.values()))) if NZ else 0))
+        print("beam anchoring (wide): %d PRG-snapshots gated out (residual above BA_GATE)" % ngate)
+        E = []   # the per-PRG path below then writes nothing
+    # 2. beams per PRG
+    cth = float(os.environ.get("BA_COH", "0.97")); ttl = float(os.environ.get("BA_TTL", "0.5")); nmin = int(os.environ.get("BA_MIN", "10"))
+    TP = C.defaultdict(list); own = {}; nb = 0; TPL = {}; PHI = {}
+    for i, (t, a, l, pm, Y, u) in enumerate(E):
+        for b in np.flatnonzero(pm):
+            y = Y[:, 12 * b:12 * b + 12].ravel(); ny = np.linalg.norm(y); TP[b] = [T for T in TP[b] if t - T[2] <= ttl]
+            best = None; bc = cth
+            for T in TP[b]:
+                mu = T[0] / T[1]; c_ = abs(np.vdot(mu, y)) / (np.linalg.norm(mu) * ny + 1e-30)
+                if c_ >= bc: bc = c_; best = T
+            if best is None: best = [np.zeros_like(y), 0, t, nb]; TPL[nb] = best; nb += 1; TP[b].append(best)
+            ph_ = np.angle(np.vdot(best[0], y)) if best[1] > 0 else 0.0   # this transmission's phase against its beam
+            best[0] = best[0] + y * np.exp(-1j * ph_); best[1] += 1; best[2] = t; own[(i, b)] = best[3]; PHI[(i, b)] = ph_
+    Ssum = {k_: T[0].reshape(4, 12) for k_, T in TPL.items()}; Scnt = C.Counter({k_: T[1] for k_, T in TPL.items()})
+    for (i, b), kk_ in own.items():   # phases against the FINAL beam mean (the running template drifted while it grew)
+        PHI[(i, b)] = np.angle(np.vdot(Ssum[kk_], E[i][4][:, 12 * b:12 * b + 12]))
+    ALPHA = {}
+    if os.environ.get("BA_PH", "prg") == "cplx":
+        for _ in range(2):
+            acc = C.defaultdict(lambda: 0)
+            for (i, b), kk_ in own.items():
+                Sb = Ssum[kk_] / Scnt[kk_]; y = E[i][4][:, 12 * b:12 * b + 12]; al = np.vdot(Sb, y) / (np.vdot(Sb, Sb).real + 1e-30)
+                ALPHA[(i, b)] = al; acc[kk_] = acc[kk_] + (y / al if al != 0 else 0)
+            Ssum = {k_: acc[k_] for k_ in acc}
+    # inside a snapshot: are the per-PRG phases one common phase, or independent?
+    sp = []; snapph = {}
+    for i, (t, a, l, pm, Y, u) in enumerate(E):
+        ps = np.array([PHI[(i, b)] for b in np.flatnonzero(pm) if Scnt[own[(i, b)]] >= nmin])
+        if len(ps) == 0: continue
+        c_ = np.angle(np.mean(np.exp(1j * ps))); snapph[i] = c_
+        if len(ps) >= 3: sp += list(np.angle(np.exp(1j * (ps - c_))))
+    print("beam anchoring: per-PRG transmission phase about its snapshot's mean: MAD %.2f rad (%d PRG-snapshots); snapshot phases: MAD %.2f rad"
+          % (1.4826 * np.median(np.abs(sp)) if sp else -1, len(sp), 1.4826 * np.median(np.abs(np.array(list(snapph.values())) - np.median(list(snapph.values()))))))
+    # the plain mean above is coherent only if the oscillator model holds; measure the residual phase per snapshot
+    SN = os.environ.get("BA_SNAPPH", "0") == "1"
+    resph = []
+    for i, (t, a, l, pm, Y, u) in enumerate(E):
+        z = 0
+        for b in np.flatnonzero(pm):
+            kk_ = own[(i, b)]
+            if Scnt[kk_] >= nmin: z += np.vdot(Ssum[kk_] / Scnt[kk_], Y[:, 12 * b:12 * b + 12])
+        resph.append(np.angle(z) if z != 0 else 0.0)
+    resph = np.array(resph)
+    print("beam anchoring: %d snapshots, %d beams (%d with >= %d snapshots); residual common phase after the TRS oscillator model: MAD %.2f rad"
+          % (len(E), nb, sum(1 for k_ in Scnt if Scnt[k_] >= nmin), nmin, 1.4826 * np.median(np.abs(resph - np.median(resph)))))
+    # diagnostic: per-PRG phase about the snapshot's common residual phase (a precoder phase per PRG, or one per snapshot?)
+    dp = []
+    for i in range(0, len(E), 7):
+        t, a, l, pm, Y, u = E[i]
+        for b in np.flatnonzero(pm):
+            kk_ = own[(i, b)]
+            if Scnt[kk_] >= nmin:
+                z_ = np.vdot(Ssum[kk_] / Scnt[kk_], Y[:, 12 * b:12 * b + 12]); dp.append(np.angle(z_ * np.exp(-1j * resph[i])))
+    dp = np.array(dp)
+    print("beam anchoring: per-PRG phase about the snapshot's common phase: MAD %.2f rad (%d PRG-snapshots)" % (1.4826 * np.median(np.abs(dp)), len(dp)))
+    if SN:   # re-take the beam means with each snapshot's residual phase out
+        Ssum = C.defaultdict(lambda: 0)
+        for (i, b), kk_ in own.items(): Ssum[kk_] = Ssum[kk_] + E[i][4][:, 12 * b:12 * b + 12] * np.exp(-1j * resph[i])
+    # 3./4. per-beam factor, noise, output
+    G = {}; NZ = {}
+    for kk_ in Scnt:
+        if Scnt[kk_] < nmin: continue
+        G[kk_] = None
+    for (i, b), kk_ in own.items():
+        if kk_ in G and G[kk_] is None:
+            Sb = Ssum[kk_] / Scnt[kk_]; Rb = Rbar[:, 12 * b:12 * b + 12]; G[kk_] = np.vdot(Rb, Sb) / np.vdot(Rb, Rb).real
+    nacc = C.Counter()
+    for (i, b), kk_ in own.items():
+        if kk_ in G:
+            Sb = Ssum[kk_] / Scnt[kk_]; mph = os.environ.get("BA_PH", "prg")
+            ph_ = PHI[(i, b)] if mph == "prg" else (snapph.get(i, 0.0) if mph == "snap" else 0.0)
+            y = E[i][4][:, 12 * b:12 * b + 12] / ALPHA[(i, b)] if mph == "cplx" else E[i][4][:, 12 * b:12 * b + 12] * np.exp(-1j * ph_)
+            nacc[kk_] += np.sum(np.abs(y - Sb) ** 2) / (np.sum(np.abs(Sb) ** 2) + 1e-30)
+    for kk_ in G: NZ[kk_] = nacc[kk_] / Scnt[kk_]
+    useW = os.environ.get("BA_W", "1") == "1"
+    out = {}
+    for i, (t, a, l, pm, Y, u) in enumerate(E):
+        key = (a, l)
+        if key not in out: out[key] = [t, Rbar.copy(), np.zeros(NG, bool)]
+        for b in np.flatnonzero(pm):
+            kk_ = own[(i, b)]
+            if kk_ not in G or abs(G[kk_]) == 0: continue
+            sl = slice(12 * b, 12 * b + 12); Sb = Ssum[kk_] / Scnt[kk_]
+            mph = os.environ.get("BA_PH", "prg"); ph_ = PHI[(i, b)] if mph == "prg" else (snapph.get(i, 0.0) if mph == "snap" else 0.0)
+            y = Y[:, sl] / ALPHA[(i, b)] if mph == "cplx" else Y[:, sl] * np.exp(-1j * ph_)
+            w = min(1.0, s_trs / NZ[kk_]) if useW else 1.0
+            out[key][1][:, sl] = Rbar[:, sl] + w * (y - Sb) / G[kk_]; out[key][2][b] = True
+    nd = 0; full = np.ones(NG, bool)
+    for (a, l), (t, X, meas) in out.items():
+        if meas.sum() == 0: continue
+        snaps.append((t, a, l, full, X * osc(t), "dmrs")); nd += 1
+    wl = [min(1.0, s_trs / NZ[k_]) for k_ in NZ]
+    print("beam anchoring: %d DM-RS symbols written (full band); TRS noise %.1f dB, beam noise median %.1f dB, weight median %.2f"
+          % (nd, 10 * np.log10(s_trs), 10 * np.log10(np.median(list(NZ.values()))), np.median(wl)))
+    USE_OLD = False
+else:
+    USE_OLD = True
 # DM-RS
-if USE:
+if USE and USE_OLD:
     Dd = [load(f) for f in files]; keys = set(Dd[0]).intersection(*[set(d) for d in Dd[1:]])
     cnt_ = C.Counter(k[1] for k in keys if k[1] != 0)
     tab = cnt_.most_common(1)[0][0] if cnt_ else None   # no UE decoded on all antennas: no tablet PRGs to remove
@@ -126,20 +352,29 @@ if USE:
     PEND = []   # decoded-UE snapshots waiting for the epoch-averaged reference (TAB_EP=epoch)
     for k in sorted(keys):
         a, u, l = k
-        if u != 0 and not (MODE == "tab" and u == tab): continue
+        FA = os.environ.get("FIG_ALL") == "1" and bool(os.environ.get("FIG_DUMP"))   # figure dump of every decoded UE
+        if u != 0 and not (MODE == "tab" and u == tab) and not FA: continue
+        if u == 0 and os.environ.get("TAB_ONLY", "0") == "1": continue   # the tablet DM-RS only (diagnostic)
         pm = np.logical_and.reduce([d[k][0] for d in Dd])
         if u == 0: pm = pm & ~tabp[a] if MODE == "notab" else pm & ~tabp[a]   # blind: the tablet's PRGs come from its own record
         if pm.sum() < 1: continue
         t = a * 0.5e-3 + l / 28e3; Y = inj(np.array([d[k][1] for d in Dd]).astype(complex), t, a, KK_D)
         Y = dedrift(t, undo_wsh(Y, shifts(a), -1.0)) * ramp
+        if os.environ.get("FIG_DUMP"): FIGD.append((t, a, l, int(u), pm.copy(), (Y if FA else Y[0]).astype(np.complex64)))
+        if u != 0 and not (MODE == "tab" and u == tab): continue   # FIG_ALL: dumped only
         j = int(np.argmin(np.abs(TT - t)))
         kind = "blind" if u == 0 else "dec"
         if abs(TT[j] - t) > 0.01: SIDE.append((a, l, kind, u, pm, "far")); continue
-        R = REFS[j][1]; m = np.repeat(pm, 12); ok = m[1:] & m[:-1] & inside
+        R = (Rstatic * osc_model(t)) if REF_ST else REFS[j][1]; m = np.repeat(pm, 12); ok = m[1:] & m[:-1] & inside
         if os.environ.get("ALIGN", "0") == "1":   # off by default: the window moves are undone, so TRS and DM-RS share
             Pp = Y * np.conj(R)                       # one timing per antenna; aligning would move each snapshot's
             z = np.sum((Pp[:, 1:] * np.conj(Pp[:, :-1]))[:, ok])   # origin to its own (beam-dependent) mean delay
             if z != 0: R = R * np.exp(1j * np.angle(z) * q)[None, :]
+        if os.environ.get("PREC_IGNORE", "0") == "1":   # precoding-unaware baseline: one number for the whole snapshot
+            dn = np.vdot(R[:, m], Y[:, m]); den = np.vdot(R[:, m], R[:, m]).real   # (the DM-RS assumed to share one
+            if den > 0 and dn != 0:                                               # wideband beam), no per-PRG reference
+                snaps.append((t, a, l, pm, Y / (dn / den), "dmrs")); nd += 1; SIDE.append((a, l, kind, u, pm, "ok"))
+            continue
         if kind == "dec" and os.environ.get("TAB_EP", "snap") in ("epoch", "hyb", "slot"): PEND.append((t, a, l, pm, Y, u)); continue
         if kind == "blind" and os.environ.get("BLIND_EP", "snap") in ("epoch", "hyb", "slot"): PEND.append((t, a, l, pm, Y, u)); continue
         X = np.zeros_like(Y)
@@ -153,10 +388,34 @@ if USE:
         md = lambda u: os.environ.get("BLIND_EP" if u == 0 else "TAB_EP", "snap")
         EP, _ = epochs([(t, a, pm, Y) for t, a, l, pm, Y, u in PEND])
         EP = [(u == 0, e) for e, (t, a, l, pm, Y, u) in zip(EP, PEND)]
+        if os.environ.get("BLIND_TRACK", "0") == "2":   # per-PRG precoder continuity, no user identity
+            ib = [k for k, x in enumerate(PEND) if x[5] == 0 and md(0) != "slot"]
+            for k, kk in zip(ib, prg_keys([(PEND[k][0], PEND[k][3], PEND[k][4]) for k in ib])): EP[k] = kk
         if os.environ.get("BLIND_TRACK", "0") == "1":   # blind record split into UE tracks: one epoch key per PRG
             ib = [k for k, x in enumerate(PEND) if x[5] == 0 and md(0) != "slot"]
             for k, kk in zip(ib, track_keys([(PEND[k][0], PEND[k][3], PEND[k][4]) for k in ib])): EP[k] = kk
         EP = [("slot", u == 0, a) if md(u) == "slot" else e for e, (t, a, l, pm, Y, u) in zip(EP, PEND)]
+        if os.environ.get("ASSOC_EVAL", "0") == "1":   # simulation only: blind association against the true precoders
+            Zo = np.load(BD + "owners.npz"); OWNE = dict(zip(Zo["slot"].tolist(), Zo["pid"])); pairs = []; pk = []
+            for e, (t, a, l, pm, Y, u) in zip(EP, PEND):
+                if u == 0 and isinstance(e, dict) and (a % 20480) in OWNE:
+                    sel_ = [b for b in np.flatnonzero(pm) if b in e and OWNE[a % 20480][b] >= 0]
+                    pairs += [(e[b], int(OWNE[a % 20480][b])) for b in sel_]; pk += [(e[b], int(b)) for b in sel_]
+            if pairs:
+                bt, bp = C.defaultdict(C.Counter), C.defaultdict(set)
+                for k_, p_ in pairs: bt[k_][p_] += 1; bp[p_].add(k_)
+                pur = sum(c.most_common(1)[0][1] for c in bt.values()) / len(pairs)
+                frag = np.mean([len(v) for v in bp.values()])
+                # the fit gives every member of a key the same reference: a key mixing precoders spoils all its members
+                bkb = C.defaultdict(C.Counter)
+                for (k_, b_), p_ in zip(pk, pairs): bkb[(k_, b_)][p_[1]] += 1
+                mixed = sum(sum(c.values()) for c in bkb.values() if c.most_common(1)[0][1] < 0.95 * sum(c.values())) / len(pairs)
+                print("association vs truth: %d PRG-snapshots, %d tracks, %d true precoders, purity %.3f, tracks per precoder %.1f, in mixed references %.3f"
+                      % (len(pairs), len(bt), len(bp), pur, frag, mixed))
+        if os.environ.get("ORACLE_OWN", "0") == "1":   # simulation only: the true precoder (owner x epoch) of every blind
+            Zo = np.load(BD + "owners.npz"); OWN = dict(zip(Zo["slot"].tolist(), Zo["pid"]))   # PRG as its reference key
+            EP = [({int(b): ("or", int(OWN[a % 20480][b])) for b in np.flatnonzero(pm)} if (u == 0 and (a % 20480) in OWN) else e)
+                  for e, (t, a, l, pm, Y, u) in zip(EP, PEND)]
         if os.environ.get("HYB_MAXEP"):   # also cut epochs every HYB_MAXEP s
             me = float(os.environ["HYB_MAXEP"])
             EP = [{b: (v, int(x[0] // me)) for b, v in e.items()} if isinstance(e, dict) else (e, int(x[0] // me)) for e, x in zip(EP, PEND)]
@@ -170,7 +429,64 @@ if USE:
             if ek: print("shared reference, %s: %d PRG-snapshots, %.2f per number" % (nm, len(ek), len(ek) / len(set(ek))))
     del Dd
     print("DM-RS snapshots (%s): %d" % (MODE, nd))
+if os.environ.get("PERBEAM", "0") == "1":
+    th = 10 ** (float(os.environ.get("PB_TH", "-14")) / 10); ttl = float(os.environ.get("PB_TTL", "1.0")); nmin = int(os.environ.get("PB_MIN", "20"))
+    # common phase of each TRS (the phase of that TRS relative to the first one), every snapshot de-rotated by its TRS's
+    TRl = [x for x in snaps if x[5] == "trs"]; TRt = np.array([x[0] for x in TRl]); R0 = TRl[0][4]
+    TRph = np.array([np.exp(1j * np.angle(np.vdot(R0, x[4]))) for x in TRl])
+    rot = [TRph[int(np.argmin(np.abs(TRt - x[0])))] for x in snaps]
+    snaps = [(t, a, l, pm, X / r_, kind) for (t, a, l, pm, X, kind), r_ in zip(snaps, rot)]
+    Mtrs = np.mean([x[4] for x in snaps if x[5] == "trs"], 0)              # the TRS's static channel (4 x L), this chunk
+    order = sorted(range(len(snaps)), key=lambda i: snaps[i][0])
+    TP = C.defaultdict(list)    # PRG -> templates [sum, count, last t, beam id]
+    owner = {}                  # (snapshot index, PRG) -> beam id
+    nb = 0
+    for i in order:
+        t, a, l, pm, X, kind = snaps[i]
+        if kind != "dmrs": continue
+        for b in np.flatnonzero(pm):
+            sl = slice(12 * b, 12 * b + 12); x = X[:, sl]; TP[b] = [T for T in TP[b] if t - T[2] <= ttl]
+            best = None; be = th
+            for T in TP[b]:
+                mu = T[0] / T[1]; e = np.sum(np.abs(x - mu) ** 2) / (np.sum(np.abs(mu) ** 2) + 1e-30)
+                if e < be: be = e; best = T
+            if best is None: best = [np.zeros_like(x), 0, t, nb]; nb += 1; TP[b].append(best)
+            best[0] = best[0] + x; best[1] += 1; best[2] = t; owner[(i, b)] = best[3]
+    Ssum = C.defaultdict(lambda: 0); Scnt = C.Counter()
+    for (i, b), k in owner.items(): Ssum[k] = Ssum[k] + snaps[i][4][:, 12 * b:12 * b + 12]; Scnt[k] += 1
+    # noise per beam and of the TRS: mean |X - mean|^2 per PRG-snapshot, relative to the TRS static power on that PRG
+    Pt = np.array([np.sum(np.abs(Mtrs[:, 12 * g:12 * g + 12]) ** 2) for g in range(NG)]) + 1e-30
+    Nsum = C.Counter()
+    for (i, b_), k in owner.items():
+        if Scnt[k] >= nmin: Nsum[k] += np.sum(np.abs(snaps[i][4][:, 12 * b_:12 * b_ + 12] - Ssum[k] / Scnt[k]) ** 2) / Pt[b_]
+    trs_ = [x[4] for x in snaps if x[5] == "trs"]
+    s_trs = np.mean([np.sum(np.abs(R[:, 12 * g:12 * g + 12] - Mtrs[:, 12 * g:12 * g + 12]) ** 2) / Pt[g] for R in trs_ for g in range(0, NG, 4)])
+    s_beam = {k: Nsum[k] / Scnt[k] for k in Nsum}
+    W = {k: (min(1.0, s_trs / s_beam[k]) if os.environ.get("PB_W", "1") == "1" else 1.0) for k in s_beam}
+    tabk = {owner[(i, b_)] for (i, b_) in owner if snaps[i][5] == "dmrs" and getattr(snaps[i], "u", None)}
+    sv = np.array([s_beam[k] for k in s_beam]); cv = np.array([Scnt[k] for k in s_beam])
+    print("noise about the static mean: TRS %.1f dB; DM-RS beams median %.1f dB (weighted by snapshots %.1f dB), weights median %.2f"
+          % (10 * np.log10(s_trs), 10 * np.log10(np.median(sv)), 10 * np.log10(np.sum(sv * cv) / np.sum(cv)), np.median(list(W.values()))))
+    new = []; nk = nd_ = 0
+    for i, (t, a, l, pm, X, kind) in enumerate(snaps):
+        if kind != "dmrs": new.append((t, a, l, pm, X * rot[i], kind)); continue
+        X = X.copy(); pm = pm.copy()
+        for b in np.flatnonzero(pm):
+            k = owner[(i, b)]; sl = slice(12 * b, 12 * b + 12)
+            if Scnt[k] < nmin: pm[b] = False; nd_ += 1; continue
+            X[:, sl] = Mtrs[:, sl] + W[k] * (X[:, sl] - Ssum[k] / Scnt[k]); nk += 1
+        if pm.sum() > 0: new.append((t, a, l, pm, X * rot[i], kind))
+    snaps = new
+    print("per-beam static removal: %d beams (%d with >= %d snapshots), %d PRG-snapshots re-referenced, %d dropped (beam seen too rarely)"
+          % (nb, sum(1 for k in Scnt if Scnt[k] >= nmin), nmin, nk, nd_))
 # write: one record per slot and chain, every symbol present
+if os.environ.get("FIG_DUMP"):
+    np.savez_compressed(os.environ["FIG_DUMP"], trs_t=np.array([x[0] for x in TRS]), trs_a=np.array([x[1] for x in TRS]),
+                        trs_l=np.array([x[2] for x in TRS]), trs_h=np.array([(x[3] if os.environ.get("FIG_ALL") == "1" else x[3][0]) for x in TRS]).astype(np.complex64),
+                        d_t=np.array([x[0] for x in FIGD]), d_a=np.array([x[1] for x in FIGD]), d_l=np.array([x[2] for x in FIGD]),
+                        d_u=np.array([x[3] for x in FIGD]), d_pm=np.array([x[4] for x in FIGD]), d_y=np.array([x[5] for x in FIGD]),
+                        tab=np.array(-1 if globals().get("tab") is None else int(globals()["tab"])))
+    print("figure dump: %d TRS, %d DM-RS symbols -> %s" % (len(TRS), len(FIGD), os.environ["FIG_DUMP"]))
 byslot = C.defaultdict(dict)
 if os.environ.get("GCAL", "0") == "1":   # per-4-PRB-group inter-antenna phase from the TRS within +-GCAL_HALF s
     from so_csi import gcal_prep, gcal_apply
@@ -179,10 +495,29 @@ if os.environ.get("GCAL", "0") == "1":   # per-4-PRB-group inter-antenna phase f
     print("inter-antenna phase calibrated per 4-PRB group on the TRS (+-%.0f ms)" % (1e3 * hw))
 if os.environ.get("DUMPA"):   # diagnostic: the final snapshots (t, slot, symbol, mask, X, kind)
     import pickle; pickle.dump(snaps, open(os.environ["DUMPA"], "wb"))
+if os.environ.get("INJOUT"):   # diagnostic: a physical echo added to every OUTPUT snapshot (own delay/angle/Doppler, same
+    r0_, v_, lv_, an_ = (float(x) for x in os.environ["INJOUT"].split(","))   # size in every stream: TRS static rms per chain)
+    T0_ = min(x[0] for x in snaps); rms_ = np.sqrt(np.mean(np.abs(Rstatic) ** 2, 1))
+    def _echo(t):
+        R_ = r0_ - 2 * v_ * (t - T0_)
+        return (10 ** (lv_ / 20) * rms_[:, None] * np.exp(1j * np.pi * np.sin(np.radians(an_)) * np.arange(4))[:, None]
+                * np.exp(-2j * np.pi * (KK_D - 1638) * 30e3 * R_ / 3e8)[None, :] * np.exp(-2j * np.pi * R_ / (3e8 / 3.75e9))) * osc_model(t)
+    snaps = [(t, a, l, pm, X + _echo(t), kind) for t, a, l, pm, X, kind in snaps]
+    print("INJOUT: physical echo added to %d output snapshots" % len(snaps))
 for t, a, l, pm, X, kind in snaps:
+    if kind == "trs" and os.environ.get("NO_TRS_OUT", "0") == "1": continue   # DM-RS-only maps (diagnostic)
     if l in byslot[a]:   # the tablet's record and the blind record of the other UEs share the symbol: disjoint PRGs, merge
         pm0, X0 = byslot[a][l]; m3 = np.repeat(pm & ~pm0, 12); X1 = X0.copy(); X1[:, m3] = X[:, m3]; byslot[a][l] = (pm0 | pm, X1)
     else: byslot[a][l] = (pm, X)
+if os.environ.get("PERBEAM", "0") == "1" and os.environ.get("PB_FILL", "1") == "1":
+    nf_ = 0
+    for a_ in byslot:
+        for l_ in list(byslot[a_]):
+            pm_, X_ = byslot[a_][l_]
+            if pm_.all(): continue
+            t_ = a_ * 0.5e-3 + l_ / 28e3; r_ = TRph[int(np.argmin(np.abs(TRt - t_)))]
+            X2 = Mtrs * r_; m12 = np.repeat(pm_, 12); X2[:, m12] = X_[:, m12]; byslot[a_][l_] = (np.ones(NG, bool), X2); nf_ += 1
+    print("full-band completion: %d DM-RS symbols filled with the static channel" % nf_)
 # MINPRB=<n> (or a list "0,24,48", one output <out>.m<n> each): leave out DM-RS symbols with fewer than n PRBs actually
 # measured (the symbol's union of grants; TRS and CSI-RS are full band and never affected)
 MINS = [int(x) for x in os.environ.get("MINPRB", "0").split(",")]
