@@ -38,6 +38,8 @@ def load_gsc(path):
             a = sfn * 20 + sl
             if base is None: base = a
             i = j + npb + ns * (1 + per)
+        elif tag == b"GSE1":           # per-PRB power (energy check), not used here
+            i += 10 + 4 * struct.unpack_from("<H", raw, i + 8)[0]
         elif tag == b"GSC1":
             sfn, sl, l, fc, npb = struct.unpack_from("<HBBHH", raw, i + 4); j = i + 12
             if j + 12 * npb * 8 > len(raw): break

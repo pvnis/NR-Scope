@@ -1619,13 +1619,6 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
         std::string bitmap, l0_extra, line_tail;
         for (uint32_t l = 1; l < 14; l++) {
           gs_dmrs_rb_map(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, np, sl, l, pci, c0, c1, oc, q0, q1);
-          { /* DM-RS type 2 (a UE switched to it): its PRBs count as DM-RS too */
-            static thread_local float t2c[SRSRAN_MAX_PRB_NR];
-            gs_dmrs_type2(ue_dl.sf_symbols[0] + l * nof_sc, first_crb, np, sl, l, pci, t2c, nullptr);
-            for (uint32_t c = 0; c < np; c++) {
-              if (t2c[c] > c0[c]) c0[c] = t2c[c];
-            }
-          }
           memcpy(sv_c0[l], c0, np * sizeof(float));
           if (l == dmrs_l0) { // what the DM-RS runs are read from, kept past the loop
             memcpy(sv_c1, c1, np * sizeof(float));
@@ -1897,6 +1890,32 @@ void GoldenSnifferDecoder::Submit(srsran_slot_cfg_t* slot, WorkState* state, Slo
               fwrite(t2v[ls[i]], sizeof(cf_t), 4 * np, gs_dump_bin);
             }
           }
+        }
+        /* dump (golden_sniffer.dump_blind): the power of each PRB, "GSE1" (sfn, slot, 13, nof_prb, then per PRB the median
+          over symbols 1-13 of its mean |y|^2 in dB): what carries energy, DM-RS or not -- the check that no UE escapes
+          the DM-RS hypotheses (a layout we do not know shows as energy without DM-RS) */
+        if (gs_dump_bin != nullptr && nrscope_gs_args.dump_blind) {
+          static thread_local float eprb[SRSRAN_MAX_PRB_NR];
+          for (uint32_t c = 0; c < np; c++) {
+            float pw[13];
+            for (uint32_t l = 1; l < 14; l++) {
+              const cf_t* y = ue_dl.sf_symbols[0] + l * nof_sc + c * 12;
+              float       e = 0;
+              for (uint32_t k = 0; k < 12; k++) e += __real__ y[k] * __real__ y[k] + __imag__ y[k] * __imag__ y[k];
+              pw[l - 1] = e / 12.0f;
+            }
+            std::nth_element(pw, pw + 6, pw + 13);
+            eprb[c] = 10.0f * log10f(pw[6] + 1e-20f);
+          }
+          const uint16_t sfn16 = (uint16_t)state->sfn, np16 = (uint16_t)np;
+          const uint8_t  sl8 = (uint8_t)sl, n13 = 13;
+          std::lock_guard<std::mutex> lk(gs_dump_mutex);
+          fwrite("GSE1", 1, 4, gs_dump_bin);
+          fwrite(&sfn16, 2, 1, gs_dump_bin);
+          fwrite(&sl8, 1, 1, gs_dump_bin);
+          fwrite(&n13, 1, 1, gs_dump_bin);
+          fwrite(&np16, 2, 1, gs_dump_bin);
+          fwrite(eprb, sizeof(float), np, gs_dump_bin);
         }
         /* dump (golden_sniffer.pdsch_dmrs_nids): the same blind record for each extra DM-RS scrambling ID the
           cell gives its UEs (found offline), rnti = 1 + k: those UEs' DM-RS are invisible under the PCI */
