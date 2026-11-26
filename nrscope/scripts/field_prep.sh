@@ -13,8 +13,11 @@
 #  - UHD's DPDK I/O thread on an isolated CPU (/root/.config/uhd.conf dpdk_lcore=2).
 #  - CPU governor, FFTW wisdom, disk space, the X410 links.
 X410_IP=192.168.1.190
-X410_LL=fe80::280:2fff:fe36:ecdb
 MGMT_IF=enp128s31f6
+# the X410 eth0 link-local address (each unit has its own): the host on MGMT_IF with
+# NI's MAC prefix 00:80:2f, found by pinging all IPv6 nodes on the link
+X410_LL=$(ping -6 -c2 -W1 ff02::1%$MGMT_IF 2>/dev/null | grep -oE "fe80::280:2fff:[0-9a-f:]+" | head -n1)
+[ -n "$X410_LL" ] || X410_LL=fe80::280:2fff:fe36:ecdb   # fallback: the sens8 X410
 # data link: the host port whose MAC is the dpdk_mac in /root/.config/uhd.conf
 DPDK_MAC=$(sudo -n sed -n "s/^\[dpdk_mac=\(.*\)\]/\1/p" /root/.config/uhd.conf 2>/dev/null | head -1)
 DATA_IF=$(for i in /sys/class/net/*; do [ "$(cat $i/address)" = "$DPDK_MAC" ] && basename $i; done | head -1)
