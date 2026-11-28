@@ -10,7 +10,7 @@ set -u
 S=$(dirname "$(readlink -f "$0")"); NR=$(cd "$S/../.." && pwd); G=$HOME/GIOVANNI; D=$HOME/isac_data
 ok() { echo "OK    $*"; }; fix() { echo "FIX   $*"; }; fail() { echo "FAIL  $*"; }
 PKGS="python3-numpy python3-scipy python3-matplotlib python3-sympy python3-munkres python3-gps python3-lz4 python3-lxml
-      python3-tornado python3-bs4 python3-yaml"
+      python3-tornado python3-bs4 python3-yaml adb"
 miss=$(for p in $PKGS; do dpkg-query -W -f='${Status}' $p 2>/dev/null | grep -q "ok installed" || echo $p; done | tr "\n" " ")
 if [ -n "$miss" ]; then sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y $miss >/dev/null 2>&1 && fix "installed $miss" || fail "apt install $miss"; else ok "python packages"; fi
 if [ -d $G ]; then
