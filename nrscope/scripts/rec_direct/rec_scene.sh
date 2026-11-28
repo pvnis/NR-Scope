@@ -23,9 +23,9 @@ export ANT=${ANT:-RX1} GAIN=${GAIN:-39} NODL=${NODL:-0}; export SECS=$CAP   # re
 RX2=${RX2-sens9}; ANT2=${ANT2:-$ANT}; GAIN2=${GAIN2:-$GAIN}; NOLIDAR=${NOLIDAR:-0}; REC_CONT=${REC_CONT:-$HERE/rec_cont.sh}
 G=$HOME/GIOVANNI; SESSION=${SESSION:-$(cd $G/real && ls -t */session.json | head -1 | cut -d/ -f1)}
 LD=$G/real/$SESSION/lidar_$NAME; LP=""; RP=""; R2PID=""; D2=""
-SSH2="ssh -o BatchMode=yes -o ConnectTimeout=5 $RX2"
+SSH2="ssh -n -o BatchMode=yes -o ConnectTimeout=5 $RX2"   # -n: never read this terminal (the prompts)
 DL_HOST=${DL_HOST:-}; [ "$DL_HOST" = "$(hostname)" ] && DL_HOST=""; DLPID=""; DLLOG=""; DLSTOP=""
-dlx() { if [ -n "$DL_HOST" ]; then timeout 30 ssh -o BatchMode=yes -o ConnectTimeout=5 $DL_HOST "$@" 2>/dev/null; else bash -c "$*"; fi; }
+dlx() { if [ -n "$DL_HOST" ]; then timeout 30 ssh -n -o BatchMode=yes -o ConnectTimeout=5 $DL_HOST "$@" 2>/dev/null; else bash -c "$*"; fi; }
 stop_dl() { [ -n "$DLPID" ] && dlx "touch $DLSTOP; sleep 2; kill $DLPID 2>/dev/null"; DLPID=""; }
 say() { echo; echo "==================== $* ===================="; echo; }
 rx2() { timeout 15 $SSH2 "$@" 2>/dev/null; }
