@@ -11,8 +11,8 @@ record_estimates file for NR-Scope's sensing_offline.
   TRS-beam sample (CSI_DT 6 ms, kept when the fit residual < CSI_MAXRES 0.3); CSI_REF=1 also uses them as references
   for the DM-RS (nearest of TRS or CSI-RS-derived sample).
 - INJ='range,speed,dB,angle;...': targets injected into every raw signal first (truth to <out>.truth.csv).
-usage: so_light.py <burst dir> <out.bin>   env MODE (notab | tab), PREC_IGNORE (0), ORACLE_OWN (0, sim: true precoder keys), ASSOC_EVAL (0, sim: association purity), FIG_DUMP (npz of antenna 0's H and HW), USE_DMRS (1), USE_CSI (0), CSI_REF (0), INJ, DIR"""
-import sys, os, struct, numpy as np, collections as C
+usage: so_light.py <burst dir> <out.bin>   env MODE (notab | tab), PREC_IGNORE (0), ORACLE_OWN (0, sim: true precoder keys), ASSOC_EVAL (0, sim: association purity), FIG_DUMP (npz of antenna 0's H and HW), USE_DMRS (1), USE_CSI (0), CSI_SLOTS (2,10), CSI_REF (0), INJ, DIR"""
+import re, sys, os, struct, numpy as np, collections as C
 BD, OUTP = sys.argv[1].rstrip("/") + "/", sys.argv[2]; saved = list(sys.argv); os.environ["CH"] = "0,1,2,3"
 src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "gs_all.py")).read().split("Rz=C.defaultdict(list)")[0]
 sys.argv = ["gs_all.py", "/dev/null", "/dev/null"]; exec(src); sys.argv = saved
@@ -22,13 +22,27 @@ import gs_trs_lib
 print("PCI %d (TRS / CSI-RS sequences)" % gs_trs_lib.set_pci(BD))
 from so_csi import load_wsh, undo_wsh, slope_of, PH_PER_SAMPLE as PH
 MODE = os.environ.get("MODE", "notab"); USE = os.environ.get("USE_DMRS", "1") == "1"; DIR = os.environ.get("DIR", "replay_blind_ch")
-NSC = 3276; NFq = 4096; files = [BD + DIR + "%d/ue_dmrs.bin" % c for c in range(4)]
+NSC = 3276; NFq = 4096; CH_ORDER = [int(x) for x in os.environ.get("CH_ORDER", "0,1,2,3").split(",")]   # array element m <- channel CH_ORDER[m] (27 Nov: antennas of chains 0 and 2 swapped -> 2,1,0,3?)
+files = [BD + DIR + "%d/ue_dmrs.bin" % c for c in CH_ORDER]
 WS = [load_wsh(f) for f in files]
 # targets injected into every RAW signal before any processing (env INJ='range,speed,dB,angle;...'), each at its own
 # subcarriers, same echo model as sensing_offline; truth (one row per slot and target) to <out>.truth.csv
 TG = [tuple(float(v) for v in x.split(",")) for x in os.environ["INJ"].split(";")] if os.environ.get("INJ", "") else []
 T0 = [None]; TRUTH = {}
+# env INJTRK=<table with {k}> INJLV=<dB>: one target following a per-slot trajectory (e.g. a lidar walker): table keys
+# amod (slot mod 20480), e (bistatic excess, m), s (sin of the angle offset from the direct path on the array axis)
+_it = os.environ.get("INJTRK", "")
+if _it:
+    _k = int(re.match(r"b(\d+)", os.path.basename(BD.rstrip("/"))).group(1)); _z = np.load(_it.format(k=_k))
+    ITRK = {int(a_): (float(e_), float(s_)) for a_, e_, s_ in zip(_z["amod"], _z["e"], _z["s"])}; ILV = float(os.environ.get("INJLV", "-30"))
+else: ITRK = None
 def inj(Y, t, a, kk):
+    if ITRK is not None:
+        q = ITRK.get(int(a) % 20480)
+        if q is None: return Y
+        R, s_ = q; TRUTH[(a, 0)] = (R, 0.0)
+        g = 10 ** (ILV / 20) * np.exp(-2j * np.pi * R / (3e8 / 3.75e9)) * np.exp(-2j * np.pi * (kk - 1638) * 30e3 * R / 3e8)
+        return Y * (1.0 + g[None, :] * np.exp(2j * np.pi * 0.5 * np.arange(Y.shape[0]) * s_)[:, None])
     if not TG: return Y
     if T0[0] is None: T0[0] = t
     m = 1.0 + 0j
@@ -48,6 +62,10 @@ TRS = [(a * 0.5e-3 + l / 28e3, a, l, undo_wsh(inj(np.array([trs_despread(*G[c][(
                                                a * 0.5e-3 + l / 28e3, a, KK_T), shifts(a), -1.0))
        for a, l in gk if l in (4, 8)]
 del G
+_ne = int(os.environ.get("TRS_EVERY", "1"))   # emulate a sparser TRS: keep every n-th occasion (n=2: 40 ms, n=4: 80 ms)
+if _ne > 1:
+    TRS = [x for x in TRS if (x[1] // 40) % _ne == 0]
+    print("TRS thinned to every %d-th occasion (%d ms): %d symbols kept" % (_ne, 20 * _ne, len(TRS)))
 # drift: straight line through the TRS slope (full band, fixed beam: the cleanest), per antenna
 t_ = np.array([x[0] for x in TRS]); q = np.arange(L); full = np.ones(NG, bool)
 qd = q - float(os.environ.get("WSH_Q0", "409.25"))   # phase ramps (delay, drift) are linear in frequency about DC
@@ -75,10 +93,11 @@ SIDE = [(a, l, "trs", -1, full, "ok") for t, a, l, R in TRS]   # every candidate
 # ports; the CSI-RS times then carry TRS-like snapshots (more samples in time: less Doppler folding).
 if os.environ.get("USE_CSI", "0") == "1":
     from gs_trs_lib import csi8_despread
+    CSI_SLOTS = [int(x) for x in os.environ.get("CSI_SLOTS", "2,10").split(",")]   # slots (mod 20) carrying the 8-port CSI-RS: 18 Nov 2,10; 27 Nov 0,2,10
     G = [load_gsc(f) for f in files]; gk = sorted(set(G[0]).intersection(*[set(g) for g in G[1:]]))
     TT0 = np.array([x[0] for x in TRS]); qc = 3 * np.arange(N) + 1; qd0 = float(os.environ.get("WSH_Q0", "409.25")); nc = 0; resid = []; CSD = []   # CSD: env CSI_DUMP=<npz>, every fitted occasion
     for a, l in gk:
-        if l != 13 or a % 20 not in (2, 10): continue
+        if l != 13 or a % 20 not in CSI_SLOTS: continue
         t = a * 0.5e-3 + 13 / 28e3; j = int(np.argmin(np.abs(TT0 - t)))
         if abs(TT0[j] - t) > float(os.environ.get("CSI_DT", "0.006")): SIDE.append((a, 13, "csi", -1, full, "far")); continue
         Pm = np.array([csi8_despread(*G[c][(a, l)], a % 20)[:N] for c in range(4)])            # 4 x N x 8
@@ -172,8 +191,8 @@ if USE and os.environ.get("BA", "0") == "1":
         if k[1] == tab: tabp[k[0]] |= np.logical_and.reduce([d[k][0] for d in Dd])
     # 1. oscillator phase from the TRS
     TRt = np.array([x[0] for x in TRS]); R0 = TRS[0][3]
-    TRp = np.unwrap(np.array([np.angle(np.vdot(R0, x[3])) for x in TRS])); PH = np.polyfit(TRt, TRp, 3)
-    osc = lambda t: np.exp(1j * np.polyval(PH, t))
+    TRp = np.unwrap(np.array([np.angle(np.vdot(R0, x[3])) for x in TRS])); PHO = np.polyfit(TRt, TRp, 3)
+    osc = lambda t: np.exp(1j * np.polyval(PHO, t))
     Rbar = np.mean([x[3] / osc(x[0]) for x in TRS], 0)                    # TRS static channel, 4 x L
     s_trs = np.median([np.sum(np.abs(x[3] / osc(x[0]) - Rbar) ** 2) / np.sum(np.abs(Rbar) ** 2) for x in TRS])
     E = []
@@ -191,10 +210,11 @@ if USE and os.environ.get("BA", "0") == "1":
     E.sort(key=lambda e: e[0])
     if os.environ.get("BA_PH", "prg") == "wide":
         cth = float(os.environ.get("BA_COH", "0.97")); ttl = float(os.environ.get("BA_TTL", "0.5")); nmin = int(os.environ.get("BA_MIN", "10"))
-        TP = C.defaultdict(list); TPL = {}; own = {}; THETA = {}; nb = 0
+        TP = C.defaultdict(list); TPL = {}; own = {}; THETA = {}; nb = 0; AMPS = []
+        G1 = os.environ.get("BA_G1", "0") == "1"   # 27 Nov: removes the per-slot precoder fluctuation (residual 9-12 dB over thermal -> ~noise); absorbs 5-24 % of an echo by angle
         for i, (t, a, l, pm, Y, u) in enumerate(E):
             for s0_, e0_ in runs(pm):
-                cand = {}; z = 0
+                cand = {}; z = 0; ee = 0.0
                 for b in range(s0_, e0_):
                     y = Y[:, 12 * b:12 * b + 12].ravel(); ny = np.linalg.norm(y); TP[b] = [T for T in TP[b] if t - T[2] <= ttl]
                     best = None; bc = cth
@@ -202,14 +222,29 @@ if USE and os.environ.get("BA", "0") == "1":
                         c_ = abs(np.vdot(T[0], y)) / (np.linalg.norm(T[0]) * ny + 1e-30)
                         if c_ >= bc: bc = c_; best = T
                     cand[b] = best
-                    if best is not None: z += np.vdot(best[0] / best[1], y)
+                    if best is not None: z += np.vdot(best[0] / best[1], y); ee += np.vdot(best[0] / best[1], best[0] / best[1]).real
                 th = np.angle(z) if z != 0 else 0.0
+                if os.environ.get("BA_AMP", "0") == "1" and ee > 0 and z != 0:   # the run's amplitude against its templates
+                    amp = abs(z) / ee; AMPS.append(amp)
+                    for b in range(s0_, e0_): Y[:, 12 * b:12 * b + 12] /= amp
                 for b in range(s0_, e0_):
                     y = Y[:, 12 * b:12 * b + 12].ravel() * np.exp(-1j * th); T = cand[b]
                     if T is None: T = [np.zeros_like(y), 0, t, nb]; TPL[nb] = T; nb += 1; TP[b].append(T)
                     T[0] = T[0] + y; T[1] += 1; T[2] = t; own[(i, b)] = T[3]; THETA[(i, b)] = th
         Ssum = {k_: T[0].reshape(4, 12) for k_, T in TPL.items()}; Scnt = C.Counter({k_: T[1] for k_, T in TPL.items()})
         G = {}; NZ = {}; nacc = C.Counter(); ncnt_ = C.Counter()
+        HPs = float(os.environ.get("BA_HP", "0.25")); SLOC = {}
+        if HPs > 0:   # local static: moving mean over +-HPs of the same beam and PRG (de-phased values)
+            ser = C.defaultdict(list)
+            for (i, b), kk_ in own.items(): ser[(kk_, b)].append(i)
+            for (kk_, b), ii in ser.items():
+                ii.sort(key=lambda q: E[q][0]); Tq = np.array([E[q][0] for q in ii])
+                V = np.array([E[q][4][:, 12 * b:12 * b + 12] * np.exp(-1j * THETA[(q, b)]) for q in ii]); Cs = np.concatenate([np.zeros((1, 4, 12), complex), np.cumsum(V, 0)])
+                lo = np.searchsorted(Tq, Tq - HPs, "left"); hi = np.searchsorted(Tq, Tq + HPs, "right")
+                M = (Cs[hi] - Cs[lo]) / (hi - lo)[:, None, None]
+                for j, q in enumerate(ii):
+                    if hi[j] - lo[j] >= 3: SLOC[(q, b)] = M[j]
+        Sof = lambda i, b, kk_: SLOC.get((i, b)) if HPs > 0 else Ssum[kk_] / Scnt[kk_]
         for (i, b), kk_ in own.items():
             if Scnt[kk_] < nmin: continue
             Sb = Ssum[kk_] / Scnt[kk_]
@@ -217,7 +252,13 @@ if USE and os.environ.get("BA", "0") == "1":
                 Rb = Rbar[:, 12 * b:12 * b + 12]; G[kk_] = np.vdot(Rb, Sb) / np.vdot(Rb, Rb).real
                 if os.environ.get("BA_G", "norm") == "norm":   # phase of the projection, size from the norms: never blows up
                     G[kk_] = np.exp(1j * np.angle(G[kk_])) * np.linalg.norm(Sb) / (np.linalg.norm(Rb) + 1e-30)
-            y = E[i][4][:, 12 * b:12 * b + 12] * np.exp(-1j * THETA[(i, b)]); rr_ = np.sum(np.abs(y - Sb) ** 2) / (np.sum(np.abs(Sb) ** 2) + 1e-30)
+                if os.environ.get("BA_G", "norm") == "flat":   # no per-PRG factor: the echo keeps its own phase across frequency
+                    G[kk_] = np.linalg.norm(Sb) / (np.linalg.norm(Rb) + 1e-30)
+            Sl = Sof(i, b, kk_)
+            if Sl is None: continue
+            y = E[i][4][:, 12 * b:12 * b + 12] * np.exp(-1j * THETA[(i, b)])
+            if G1: Sl = (np.vdot(Sl, y) / (np.vdot(Sl, Sl).real + 1e-30)) * Sl   # BA_G1: one complex gain per PRG-symbol on the template
+            rr_ = np.sum(np.abs(y - Sl) ** 2) / (np.sum(np.abs(Sb) ** 2) + 1e-30)
             if rr_ <= 10 ** (float(os.environ.get("BA_GATE", "-12")) / 10): nacc[kk_] += rr_; ncnt_[kk_] += 1   # noise of the kept ones
         for kk_ in G: NZ[kk_] = nacc[kk_] / max(ncnt_[kk_], 1) if ncnt_[kk_] else 1.0
         useW = os.environ.get("BA_W", "1") == "1"; out = {}; ngate = 0
@@ -227,10 +268,12 @@ if USE and os.environ.get("BA", "0") == "1":
             for b in np.flatnonzero(pm):
                 kk_ = own[(i, b)]
                 if kk_ not in G or abs(G[kk_]) == 0: continue
-                sl = slice(12 * b, 12 * b + 12); Sb = Ssum[kk_] / Scnt[kk_]; y = Y[:, sl] * np.exp(-1j * THETA[(i, b)])
-                if np.sum(np.abs(y - Sb) ** 2) > 10 ** (float(os.environ.get("BA_GATE", "-12")) / 10) * np.sum(np.abs(Sb) ** 2): ngate += 1; continue   # heavy tail: a bad match
+                sl = slice(12 * b, 12 * b + 12); Sb = Ssum[kk_] / Scnt[kk_]; y = Y[:, sl] * np.exp(-1j * THETA[(i, b)]); Sl = Sof(i, b, kk_)
+                if Sl is None: continue
+                if G1: Sl = (np.vdot(Sl, y) / (np.vdot(Sl, Sl).real + 1e-30)) * Sl
+                if np.sum(np.abs(y - Sl) ** 2) > 10 ** (float(os.environ.get("BA_GATE", "-12")) / 10) * np.sum(np.abs(Sb) ** 2): ngate += 1; continue   # heavy tail: a bad match
                 w = min(1.0, s_trs / NZ[kk_]) if useW else 1.0
-                out[key][1][:, sl] = Rbar[:, sl] + w * (y - Sb) / G[kk_]; out[key][2][b] = True
+                out[key][1][:, sl] = Rbar[:, sl] + w * (y - Sl) / G[kk_]; out[key][2][b] = True
         nd = 0; full = np.ones(NG, bool)
         for (a, l), (t, X, meas) in out.items():
             if meas.sum() == 0: continue
@@ -238,6 +281,7 @@ if USE and os.environ.get("BA", "0") == "1":
         print("beam anchoring (wide): %d snapshots, %d beams (%d with >= %d), %d DM-RS symbols written; TRS noise %.1f dB, beam noise median %.1f dB"
               % (len(E), nb, len(G), nmin, nd, 10 * np.log10(s_trs), 10 * np.log10(np.median(list(NZ.values()))) if NZ else 0))
         print("beam anchoring (wide): %d PRG-snapshots gated out (residual above BA_GATE)" % ngate)
+        if AMPS: print("beam anchoring (wide): per-run amplitude vs templates: MAD %.2f dB, p5..p95 %.2f..%.2f dB" % (1.4826 * np.median(np.abs(20 * np.log10(AMPS) - np.median(20 * np.log10(AMPS)))), *np.percentile(20 * np.log10(AMPS), [5, 95])))
         E = []   # the per-PRG path below then writes nothing
     # 2. beams per PRG
     cth = float(os.environ.get("BA_COH", "0.97")); ttl = float(os.environ.get("BA_TTL", "0.5")); nmin = int(os.environ.get("BA_MIN", "10"))
