@@ -2,7 +2,7 @@ import sys, json, glob, numpy as np, collections as C
 for mix in ("0", "0.2"):
     for sc in ("notab", "tab"):
         R = C.defaultdict(list)
-        for f in glob.glob("/home/sens/field/sim/%s_m%s_[0-9].json" % (sc, mix)):
+        for f in glob.glob("/home/sens/isac_data/sim/%s_m%s_[0-9].json" % (sc, mix)):
             for k, v in json.load(open(f)).items(): R[k] += v
         if not R: continue
         print("== %s, precoder beam mix %s ==" % ("without the tablet" if sc == "notab" else "with the tablet", mix))

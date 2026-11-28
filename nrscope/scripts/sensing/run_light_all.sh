@@ -1,7 +1,7 @@
 #!/bin/bash
 # Light-network streams on every burst (TRS + CSI-RS, TRS + CSI-RS + DM-RS without the tablet) through sensing_offline.
-R=/home/sens/field/20261105_135044_sunrise_632_4ch_bursts_tabletdl_iq; SO=/home/sens/GIOVANNI/NR-Scope/build/nrscope/src/tests/sensing_offline
-O=/home/sens/field/so/light; mkdir -p $O; cd /home/sens/field
+R=/home/sens/isac_data/20261105_135044_sunrise_632_4ch_bursts_tabletdl_iq; SO=/home/sens/GIOVANNI/NR-Scope/build/nrscope/src/tests/sensing_offline
+O=/home/sens/isac_data/so/light; mkdir -p $O; cd /home/sens/GIOVANNI/NR-Scope/nrscope/scripts/sensing
 one() {
   b=$1; B=$R/b$b
   USE_DMRS=0 USE_CSI=1 nice python3 so_light.py $B $O/b${b}_trscsi.bin > $O/b${b}_trscsi.log 2>&1

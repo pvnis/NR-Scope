@@ -1,8 +1,8 @@
 #!/bin/bash
 # Narrow DM-RS symbols: leave out DM-RS symbols with fewer than 24 / 48 PRBs measured; light stream with and without
 # the tablet, 3-target raw injection, random_drop off, all bursts.
-R=/home/sens/field/20261105_135044_sunrise_632_4ch_bursts_tabletdl_iq; SO=/home/sens/GIOVANNI/NR-Scope/build/nrscope/src/tests/sensing_offline
-O=/mnt/mydrive/field/minprb; mkdir -p $O; cd /home/sens/field; T="25,2.5,-20,15;60,-5,-22,-25;100,8,-25,30"
+R=/home/sens/isac_data/20261105_135044_sunrise_632_4ch_bursts_tabletdl_iq; SO=/home/sens/GIOVANNI/NR-Scope/build/nrscope/src/tests/sensing_offline
+O=/mnt/mydrive/field/minprb; mkdir -p $O; cd /home/sens/GIOVANNI/NR-Scope/nrscope/scripts/sensing; T="25,2.5,-20,15;60,-5,-22,-25;100,8,-25,30"
 one() {
   b=$1
   for m in tab notab; do

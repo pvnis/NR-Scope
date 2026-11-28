@@ -1,7 +1,7 @@
 """Three raw-injected targets: per variant and target, share of maps where it is detected (range +-1 bin, speed
 +-1.5 res, strongest match) and, of those, angle within 6 deg; median angle and median |error|. usage: aoa_v3.py <glob>"""
 import sys, glob, os, csv, numpy as np, collections as C
-G = sys.argv[1]; sys.argv = ["x", "/nonexistent"]; sys.path.insert(0, "/home/sens/field"); from track_real import read_maps
+G = sys.argv[1]; sys.argv = ["x", "/nonexistent"]; sys.path.insert(0, "/home/sens/GIOVANNI/NR-Scope/nrscope/scripts/sensing"); from track_real import read_maps
 S = C.defaultdict(lambda: [0, []]); TA = {}
 for d in sorted(glob.glob(G)):
     p = d + "/map2d.csv"

@@ -5,9 +5,9 @@ beam. 1 = the precoder only changes by a complex number (what stitching assumes)
 usage: csi_beamdiv.py <burst dir>"""
 import sys, os, numpy as np, collections as C
 BD = sys.argv[1].rstrip("/") + "/"; saved = list(sys.argv); os.environ["CH"] = "0,1,2,3"
-src = open("/home/sens/field/gs_all.py").read().split("Rz=C.defaultdict(list)")[0]
+src = open("/home/sens/GIOVANNI/NR-Scope/nrscope/scripts/sensing/gs_all.py").read().split("Rz=C.defaultdict(list)")[0]
 sys.argv = ["gs_all.py", "/dev/null", "/dev/null"]; exec(src); sys.argv = saved
-sys.path.insert(0, "/home/sens/field"); from gs_trs_lib import load_gsc, csi8_despread
+sys.path.insert(0, "/home/sens/GIOVANNI/NR-Scope/nrscope/scripts/sensing"); from gs_trs_lib import load_gsc, csi8_despread
 Dd = [load(BD + "replay_ch%d/ue_dmrs.bin" % c) for c in range(4)]; keys = set(Dd[0]).intersection(*[set(d) for d in Dd[1:]])
 U = C.Counter(k[1] for k in keys if k[1] != 0).most_common(1)[0][0]
 A = sorted((k[0] * 0.5e-3 + k[2] / 28e3, k[0], np.logical_and.reduce([d[k][0] for d in Dd]), np.array([d[k][1] for d in Dd]).astype(complex)) for k in keys if k[1] == U)

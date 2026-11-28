@@ -1,7 +1,7 @@
 #!/bin/bash
 # Robustness: targets injected into the RAW signals (3 targets, mixed range/speed/level), every burst, every method.
-R=/home/sens/field/20261105_135044_sunrise_632_4ch_bursts_tabletdl_iq; SO=/home/sens/GIOVANNI/NR-Scope/build/nrscope/src/tests/sensing_offline
-O=/home/sens/field/so/robust; mkdir -p $O; cd /home/sens/field
+R=/home/sens/isac_data/20261105_135044_sunrise_632_4ch_bursts_tabletdl_iq; SO=/home/sens/GIOVANNI/NR-Scope/build/nrscope/src/tests/sensing_offline
+O=/home/sens/isac_data/so/robust; mkdir -p $O; cd /home/sens/GIOVANNI/NR-Scope/nrscope/scripts/sensing
 T="25,2.5,-20,15;60,-5,-22,-25;100,8,-25,30"
 one() {
   b=$1; B=$R/b$b

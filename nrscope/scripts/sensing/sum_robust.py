@@ -1,7 +1,7 @@
 import sys, os, csv, glob, numpy as np, collections as C
-sys.argv = ["x"]; exec(open("/home/sens/field/so_score.py").read().split("import os")[0])
-O = sys.argv[1] if len(sys.argv) > 1 else "/home/sens/field/so/robust"
-O = "/home/sens/field/so/robust"
+sys.argv = ["x"]; exec(open("/home/sens/GIOVANNI/NR-Scope/nrscope/scripts/sensing/so_score.py").read().split("import os")[0])
+O = sys.argv[1] if len(sys.argv) > 1 else "/home/sens/isac_data/so/robust"
+O = "/home/sens/isac_data/so/robust"
 lab = {"raw": "tablet, raw", "trs": "tablet, TRS-referenced", "ltab": "tablet + TRS + CSI-RS + DM-RS", "lnotab": "NO tablet: TRS + CSI-RS + DM-RS"}
 tgt = {0: "25 m, +2.5 m/s, -20 dB", 1: "60 m, -5 m/s, -22 dB", 2: "100 m, +8 m/s, -25 dB"}
 R = C.defaultdict(lambda: [0, 0, []]); maps_n = C.Counter(); oth = C.defaultdict(list); nb = C.Counter()

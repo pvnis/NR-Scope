@@ -1,6 +1,6 @@
 """Residual phase slope between TRS occasions 20 ms apart vs the logged window move between them (after the undo)."""
 import sys, os, numpy as np
-here = "/home/sens/field/"; BD = sys.argv[1]
+here = "/home/sens/isac_data/"; BD = sys.argv[1]
 src = open(here + "so_light.py").read().split("# CSI-RS as extra TRS-beam samples")[0]
 sys.argv = ["so_light.py", BD, "/dev/null"]; os.environ.pop("INJ", None); __file__ = here + "so_light.py"; exec(src)
 T = {(a, l): R for t, a, l, R in TRS}; rows = []

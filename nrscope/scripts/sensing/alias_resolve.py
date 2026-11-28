@@ -5,7 +5,7 @@ range-rate speed. Scored against the injected truth (right speed and within 10 m
 usage: alias_resolve.py <map2d.csv> [...]"""
 import sys, csv, os, numpy as np
 ALIAS = 2.0; GATE = 4.0; RESMAX = float(os.environ.get("RESMAX", "1.5"))
-sys_argv = list(sys.argv); sys.argv = ["x"]; exec(open("/home/sens/field/so_score.py").read().split("import os")[0]); sys.argv = sys_argv
+sys_argv = list(sys.argv); sys.argv = ["x"]; exec(open("/home/sens/GIOVANNI/NR-Scope/nrscope/scripts/sensing/so_score.py").read().split("import os")[0]); sys.argv = sys_argv
 def score(M, T, fix):
     f = nt = 0
     for i, m in enumerate(M):

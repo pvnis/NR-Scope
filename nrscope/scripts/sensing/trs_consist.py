@@ -6,7 +6,7 @@ Per 4-PRB group b of a pair (X1, X2): z_b = <X1_b, X2_b> over 4 antennas x 12 pi
  - coherence |sum z_b| / sum |z_b|: 1 when every group changed by the same phase (only the channel moved)
 usage: trs_consist.py <burst dir> <out.json>"""
 import sys, os, json, numpy as np, collections as C
-here = "/home/sens/field/"; BD, OUTJ = sys.argv[1], sys.argv[2]
+here = "/home/sens/isac_data/"; BD, OUTJ = sys.argv[1], sys.argv[2]
 src = open(here + "so_light.py").read().split("# CSI-RS as extra TRS-beam samples")[0]
 sys.argv = ["so_light.py", BD, "/dev/null"]; os.environ.pop("INJ", None); __file__ = here + "so_light.py"; exec(src)
 def metr(X1, X2, pm):

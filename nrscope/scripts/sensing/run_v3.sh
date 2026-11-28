@@ -3,8 +3,8 @@
 # from the TRS (GCAL=1), tablet TRS reference per snapshot AND per precoder epoch.
 # A) main table rows that the fixes can change (NR-Scope --inject after processing)
 # B) three targets injected into the raw data, for the angles
-R=/home/sens/field/20261105_135044_sunrise_632_4ch_bursts_tabletdl_iq; SO=/home/sens/GIOVANNI/NR-Scope/build/nrscope/src/tests/sensing_offline
-O=/mnt/mydrive/field/main_v3; A=/mnt/mydrive/field/aoa_v3; mkdir -p $O $A; cd /home/sens/field; T="25,2.5,-20,15;60,-5,-22,-25;100,8,-25,30"
+R=/home/sens/isac_data/20261105_135044_sunrise_632_4ch_bursts_tabletdl_iq; SO=/home/sens/GIOVANNI/NR-Scope/build/nrscope/src/tests/sensing_offline
+O=/mnt/mydrive/field/main_v3; A=/mnt/mydrive/field/aoa_v3; mkdir -p $O $A; cd /home/sens/GIOVANNI/NR-Scope/nrscope/scripts/sensing; T="25,2.5,-20,15;60,-5,-22,-25;100,8,-25,30"
 conv() {   # conv <variant> <burst dir> <out.bin> [INJ]
   v=$1; B=$2; out=$3; inj=$4
   case $v in

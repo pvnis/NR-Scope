@@ -1,6 +1,6 @@
 import sys, os, numpy as np, collections as C
 REC=sys.argv[1]; saved=list(sys.argv)
-src=open(os.path.expanduser("~/field/gs_all.py")).read().split("Rz=C.defaultdict(list)")[0]
+src=open(os.path.expanduser("/home/sens/GIOVANNI/NR-Scope/nrscope/scripts/sensing/gs_all.py")).read().split("Rz=C.defaultdict(list)")[0]
 sys.argv=["gs_all.py",REC,"/dev/null"]; exec(src); sys.argv=saved
 bd=REC+"/b0/"; Dd=[load(bd+"replay_ch%d/ue_dmrs.bin"%c) for c in CH]; keys=set(Dd[0]).intersection(*[set(d) for d in Dd[1:]])
 S=C.defaultdict(list)

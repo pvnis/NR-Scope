@@ -1,8 +1,8 @@
 #!/bin/bash
 # After run_gsw_all.sh: every burst through NR-Scope sensing_offline with injected targets, for each method.
-R=/home/sens/field/20261105_135044_sunrise_632_4ch_bursts_tabletdl_iq; SO=/home/sens/GIOVANNI/NR-Scope/build/nrscope/src/tests/sensing_offline
-O=/home/sens/field/so/all; mkdir -p $O; cd /home/sens/field
-until grep -q ALLDONE ana/gsw_replay.log; do sleep 30; done
+R=/home/sens/isac_data/20261105_135044_sunrise_632_4ch_bursts_tabletdl_iq; SO=/home/sens/GIOVANNI/NR-Scope/build/nrscope/src/tests/sensing_offline
+O=/home/sens/isac_data/so/all; mkdir -p $O; cd /home/sens/GIOVANNI/NR-Scope/nrscope/scripts/sensing
+until grep -q ALLDONE /home/sens/isac_data/ana/gsw_replay.log; do sleep 30; done
 one() {   # burst
   b=$1; B=$R/b$b
   for v in raw proc trs; do WSH=1 RUN=all VAR=$v DIR=replay_blind_ch CH=0,1,2,3 nice python3 gs_to_nrsr.py $B $O/b${b}_$v.bin > $O/b${b}_$v.log 2>&1; done

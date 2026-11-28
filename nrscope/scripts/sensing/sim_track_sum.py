@@ -1,7 +1,7 @@
 import json, glob, numpy as np, collections as C
 for sc in ("notab", "tab"):
     R = C.defaultdict(list)
-    for f in glob.glob("/home/sens/field/sim/trk_%s_[0-9].json" % sc):
+    for f in glob.glob("/home/sens/isac_data/sim/trk_%s_[0-9].json" % sc):
         for k, v in json.load(open(f)).items(): R[k] += v
     if not R: continue
     nb = len(R.get("%s|ideal|gospa" % sc, []))

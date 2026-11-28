@@ -1,7 +1,7 @@
 """Aggregate run_eval_all.sh: per method, target speed class and level, targets found over all bursts."""
 import sys, os, csv, glob, numpy as np, collections as C
-sys.argv = ["x"]; exec(open("/home/sens/field/so_score.py").read().split("import os")[0])
-O = "/home/sens/field/so/all"; R = C.defaultdict(lambda: [0, 0, 0, 0, [], 0, []])   # maps, found, within2bins, n, err, alias, other
+sys.argv = ["x"]; exec(open("/home/sens/GIOVANNI/NR-Scope/nrscope/scripts/sensing/so_score.py").read().split("import os")[0])
+O = "/home/sens/isac_data/so/all"; R = C.defaultdict(lambda: [0, 0, 0, 0, [], 0, []])   # maps, found, within2bins, n, err, alias, other
 for d in glob.glob(O + "/m_b*"):
     _, b, v, tg, lv = os.path.basename(d).split("_"); p = d + "/map2d.csv"; k = (v, tg, lv); r = R[k]
     if not os.path.exists(p): continue

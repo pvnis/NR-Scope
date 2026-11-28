@@ -1,5 +1,5 @@
 #!/bin/bash
-cd /home/sens/field; export OUT=/mnt/mydrive/field/light5all
+cd /home/sens/GIOVANNI/NR-Scope/nrscope/scripts/sensing; export OUT=/mnt/mydrive/field/light5all
 jobsq() { while [ $(jobs -r | wc -l) -ge 3 ] || [ $(awk "/MemAvailable/{print int(\$2/1e6)}" /proc/meminfo) -lt 4 ]; do sleep 5; done; }
 for b in $(seq 0 25); do
   jobsq; ./run_light4.sh $b ltabhyb MODE=tab USE_CSI=1 TAB_EP=hyb HYB_MAXEP=0.01 & sleep 2

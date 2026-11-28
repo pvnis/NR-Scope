@@ -1,7 +1,7 @@
 """Main table: per variant / speed class / level, share of injected targets found (speed within 2 res, range within
 10 m) and, of those, share within one range bin (2.44 m). usage: sum_v3.py <dir> [variants...]"""
 import sys, os, csv, glob, numpy as np, collections as C
-sys.argv, ARGS = ["x"], sys.argv[1:]; exec(open("/home/sens/field/so_score.py").read().split("import os")[0])
+sys.argv, ARGS = ["x"], sys.argv[1:]; exec(open("/home/sens/GIOVANNI/NR-Scope/nrscope/scripts/sensing/so_score.py").read().split("import os")[0])
 O = ARGS[0]; VS = ARGS[1:]; R = C.defaultdict(lambda: [0, 0, 0])
 for d in glob.glob(O + "/m_b*"):
     parts = os.path.basename(d).split("_")

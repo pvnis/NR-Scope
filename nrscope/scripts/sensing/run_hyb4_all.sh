@@ -1,5 +1,5 @@
 #!/bin/bash
-cd /home/sens/field; B=${BURSTS:-20}
+cd /home/sens/GIOVANNI/NR-Scope/nrscope/scripts/sensing; B=${BURSTS:-20}
 jobsq() { while [ $(jobs -r | wc -l) -ge 3 ] || [ $(awk "/MemAvailable/{print int(\$2/1e6)}" /proc/meminfo) -lt 4 ]; do sleep 5; done; }
 for b in $B; do
   jobsq; ./run_hyb4.sh $b snap REF_EP=snap & sleep 2
