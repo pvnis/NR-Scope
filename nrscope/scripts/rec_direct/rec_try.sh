@@ -1,11 +1,11 @@
 #!/bin/bash
 # on sens8: rec_cont.sh with retries, and a guard for rec_direct hanging at exit (after its final "done:" line,
-# i.e. with every sample written): 20 s grace, then SIGINT, then SIGKILL by PID. usage: rec_try.sh <SECS> <NODL> <tries> <label>
+# i.e. with every sample written): 20 s grace, then SIGINT, then SIGKILL by PID. usage: rec_try.sh <SECS> <NODL> <tries> <label>   (env REC_CONT: another capture script, for tests)
 SECS=$1; NODL=$2; N=$3; LAB=$4; LOG=$HOME/isac_data/rec_try_$LAB.log; : > $LOG
 for i in $(seq $N); do
   old=$(cat $HOME/isac_data/.rec4_new 2>/dev/null)
   echo "$(date -u +%T) try $i: SECS=$SECS NODL=$NODL" >> $LOG
-  SECS=$SECS NODL=$NODL "$(dirname "$(readlink -f "$0")")"/rec_cont.sh >> $LOG 2>&1 & rc_pid=$!
+  SECS=$SECS NODL=$NODL ${REC_CONT:-"$(dirname "$(readlink -f "$0")")"/rec_cont.sh} >> $LOG 2>&1 & rc_pid=$!
   sleep 5; d=$(cat $HOME/isac_data/.rec4_new 2>/dev/null)
   end=$(( $(date +%s) + SECS + 120 ))
   while kill -0 $rc_pid 2>/dev/null; do
