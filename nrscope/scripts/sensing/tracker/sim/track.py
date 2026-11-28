@@ -249,7 +249,14 @@ EKF_DEFAULTS = dict(
     # in IPDA): a detection raises r by its likelihood against clutter, a miss lowers it by
     # the receiver's P_D at the track (pd_map: low behind a building, so a miss there costs little).
     p_d=0.7,               # detection probability where the receiver sees the target (line of sight, in its field of view)
-    p_d_hidden=0.1,        # elsewhere (a reflection can still reach it)
+    p_d_hidden=0.1,
+    p_d_rx2=0.0,           # extension (real-data streams): P_D of the second receiver/stream where it sees (0 = p_d, the paper default)
+    clutter_rx2=0.0,
+    pd_learn=1.0,          # real-data default (2026-11-26): 1 = P_D of the second stream learned online per cell around the receiver from its confirmed tracks (0 = off)
+    pd_learn_tau=30.0,     # extension: memory of the learned P_D (s): hits and trials fade with exp(-dt / tau)
+    pd_learn_prior=5.0,    # extension: weight (in trials) of the prior p_d_rx2 in each cell
+    pd_learn_deg=10.0,     # extension: cell size in angle seen from the receiver (deg)
+    pd_learn_m=10.0,       # extension: cell size in distance from the receiver (m)       # extension: false detections per map of the second receiver/stream (0 = clutter, the paper default)        # elsewhere (a reflection can still reach it)
     view_gate="soft",      # several receivers, a track out of a receiver's view: off; "hard": none of its detections
                            # update it; "soft": only one with a position within view_gate_m of it
     view_gate_m=5.0,
@@ -257,6 +264,7 @@ EKF_DEFAULTS = dict(
     clutter=2.0,           # false detections per map per receiver, spread over CLUTTER_VOL
     r_birth=0.1,           # existence of a track started on an unexplained detection (times P_D / p_d there)
     r_confirm=0.95,        # shown from this existence on
+    birth_rx=0,            # real data, 27 Nov: only this receiver (1, 2, ...) starts tracks, the others only update them (0 = all)
     confirm_s=0.0,         # and only once the track is this old (s): a slower start hides short-lived false tracks (0 = off)
     dup_birth_m=4.0,       # no new track on a detection within this distance (m) of a confirmed track: a second track on the
                            # same object (another receiver's offset view, a limb, a split peak) is not started (0 = off;
@@ -549,14 +557,19 @@ def run_ekf_tracker(frames, geo, cfg=None, walls=None, pd=None, buildings=()):
     from scenario import inside
     cfg = ekf_cfg(cfg)
     gate2 = {k: float(chi2.ppf(cfg["gate_p"], k)) for k in (2, 3)}
-    kappa = {k: cfg["clutter"] / np.prod(CLUTTER_VOL[:k]) for k in (2, 3)}
+    kappa1 = {k: cfg["clutter"] / np.prod(CLUTTER_VOL[:k]) for k in (2, 3)}
+    kappa2 = {k: (cfg["clutter_rx2"] or cfg["clutter"]) / np.prod(CLUTTER_VOL[:k]) for k in (2, 3)}
     tracks, out, next_id = [], [], 1
+    PDL = {}   # extension pd_learn: cell -> [hits, trials, time of the last update]
     multi = len({fr[5] for fr in frames if len(fr) > 5}) > 1   # detection-level fusion of several receivers
     for fr in frames:
         t, meas, rb, sc = fr[:4]
         geo_f = fr[4] if len(fr) > 4 else geo
         T, R, L, bore = geo_f
         grid = pd[fr[5] - 1] if pd and len(fr) > 5 else None
+        rxn = fr[5] if len(fr) > 5 else 1
+        pd_s = cfg["p_d_rx2"] if (rxn == 2 and cfg["p_d_rx2"] > 0) else cfg["p_d"]   # this frame's stream P_D (extension; = p_d by default)
+        kappa = kappa2 if rxn == 2 else kappa1
 
         def p_d(x):
             if grid is not None:
@@ -564,7 +577,20 @@ def run_ekf_tracker(frames, geo, cfg=None, walls=None, pd=None, buildings=()):
             else:
                 a = np.arctan2(x[1] - R[1], x[0] - R[0]) - bore
                 seen = abs((a + np.pi) % (2 * np.pi) - np.pi) <= np.deg2rad(FOV_DEG)
-            return cfg["p_d"] if seen else cfg["p_d_hidden"]
+            if seen and rxn == 2 and cfg["pd_learn"] > 0:   # extension: the learned P_D of this stream where the track is
+                return pdl_get(x)
+            return pd_s if seen else min(cfg["p_d_hidden"], pd_s)
+
+        def pdl_cell(x):
+            return (int(np.floor(np.degrees(np.arctan2(x[1] - R[1], x[0] - R[0])) / cfg["pd_learn_deg"])),
+                    int(np.floor(np.hypot(x[0] - R[0], x[1] - R[1]) / cfg["pd_learn_m"])))
+
+        def pdl_get(x):
+            c = PDL.get(pdl_cell(x)); w = cfg["pd_learn_prior"]
+            if c is None:
+                return pd_s
+            f = np.exp(-(t - c[2]) / cfg["pd_learn_tau"])
+            return float(np.clip((c[0] * f + w * pd_s) / (c[1] * f + w), 0.02, 0.95))
         Rz = np.diag([(cfg["r_range_bins"] * rb) ** 2, (cfg["r_speed_cells"] * sc) ** 2,
                       np.deg2rad(cfg["sigma_theta_deg"]) ** 2])
         for tr in tracks:
@@ -586,7 +612,7 @@ def run_ekf_tracker(frames, geo, cfg=None, walls=None, pd=None, buildings=()):
         if tracks and meas:
             cost = np.full((len(tracks), len(meas)), 1e6)
             for i, tr in enumerate(tracks):
-                hidden = multi and cfg["view_gate"] in ("hard", "soft") and p_d(tr.x) < cfg["p_d"]
+                hidden = multi and cfg["view_gate"] in ("hard", "soft") and p_d(tr.x) < pd_s
                 if hidden and cfg["view_gate"] == "hard":
                     continue   # out of this receiver's view: its detections (other targets, clutter) would drag the track
                 for j, z in enumerate(zs):
@@ -671,6 +697,13 @@ def run_ekf_tracker(frames, geo, cfg=None, walls=None, pd=None, buildings=()):
                     tr.exist(p_d(tr.x), lik[i][0], kappa[lik[i][1]])
                 elif id(tr) not in crossing:
                     tr.exist(p_d(tr.x))
+            if cfg["pd_learn"] > 0 and rxn == 2:   # extension: learn where this stream detects the confirmed tracks
+                for i, tr in enumerate(tracks):
+                    a = np.arctan2(tr.x[1] - R[1], tr.x[0] - R[0]) - bore
+                    if not tr.confirmed or abs((a + np.pi) % (2 * np.pi) - np.pi) > np.deg2rad(FOV_DEG):
+                        continue
+                    c = PDL.setdefault(pdl_cell(tr.x), [0.0, 0.0, t]); f = np.exp(-(t - c[2]) / cfg["pd_learn_tau"])
+                    c[0], c[1], c[2] = c[0] * f + (1.0 if i in lik else 0.0), c[1] * f + 1.0, t
         tracks = [tr for tr in tracks if tr.r >= cfg["r_delete"]]
         gated = set(used) if bp else {j for _, j in cache} | used  # explained by a track, so no new track
         if cfg["merge_m"] > 0:
@@ -700,6 +733,8 @@ def run_ekf_tracker(frames, geo, cfg=None, walls=None, pd=None, buildings=()):
             if m["xy"] is not None and any(id(tr) in crossing and np.hypot(*(tr.x[:2] - m["xy"])) <= cfg["cross_m"] for tr in tracks):
                 gated.add(j)
         for j, m in enumerate(meas):
+            if cfg["birth_rx"] and rxn != int(cfg["birth_rx"]):
+                break   # this receiver only updates tracks (birth_rx)
             if cfg.get("dup_birth_m", 0.0) > 0 and m["xy"] is not None and any(
                     tr.confirmed and np.hypot(*(tr.x[:2] - m["xy"])) <= cfg["dup_birth_m"] for tr in tracks):
                 continue
@@ -712,7 +747,7 @@ def run_ekf_tracker(frames, geo, cfg=None, walls=None, pd=None, buildings=()):
                 vel = -2 * m["v"] * s / max(s @ s, 1e-6)
                 tracks.append(EKFTrack(next_id, m["xy"], vel, t, cfg))
                 tracks[-1].p_db = m["p_db"]
-                tracks[-1].r *= p_d(m["xy"]) / cfg["p_d"] * q0[j]   # births where this receiver sees directly: a ghost lands behind walls
+                tracks[-1].r *= p_d(m["xy"]) / pd_s * q0[j]   # births where this receiver sees directly: a ghost lands behind walls
                 next_id += 1
         out.append([(tr.id, *map(float, tr.x[:4]), *(tr.axes() if tr.extended() else (0.0, 0.0, 0.0)))
                     for tr in tracks if tr.confirmed and t - tr.t_birth >= cfg.get("confirm_s", 0.0)])
