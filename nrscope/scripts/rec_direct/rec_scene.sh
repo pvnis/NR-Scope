@@ -22,7 +22,8 @@ LD=$G/real/$SESSION/lidar_$NAME; LP=""; RP=""; R2PID=""; D2=""
 SSH2="ssh -o BatchMode=yes -o ConnectTimeout=5 $RX2"
 say() { echo; echo "==================== $* ===================="; echo; }
 rx2() { timeout 15 $SSH2 "$@" 2>/dev/null; }
-stop_rx2() { [ -n "$RX2" ] && [ -n "$R2PID" ] && rx2 "kill $R2PID 2>/dev/null; for p in \$(pgrep -x rec_direct); do sudo -n kill -INT \$p; done"; }
+stop_rx2() { [ -n "$RX2" ] && [ -n "$R2PID" ] &&   # rec_direct first (it closes its files), then the process group of rec_try (setsid)
+  rx2 "for p in \$(pgrep -x rec_direct); do sudo -n kill -INT \$p; done; sleep 2; kill -- -$R2PID 2>/dev/null"; }
 stop_all() { [ -n "$RP" ] && kill $RP 2>/dev/null; [ -n "$LP" ] && kill $LP 2>/dev/null
   for p in $(pgrep -x "rec_direct.*"); do sudo -n kill -INT $p; done; stop_rx2; say "STOPPED (Ctrl-C)"; exit 1; }
 trap stop_all INT TERM
