@@ -7,6 +7,7 @@
 # usage: rec_scene.sh <name> [walk seconds, default 90]
 #   env as rec_cont.sh: NODL=1 (no tablet download), ANT (default RX1), GAIN (default 39)
 #   RX2        second receiver's host (default sens9; RX2= records with sens8 alone); ANT2 / GAIN2 (default ANT / GAIN)
+#              if RX2 is set and does not stream, the whole run stops with an error (no single-receiver fallback)
 #   MARGIN     extra capture seconds on each receiver (default 30; walk + margin <= ~150 s: the NVMe slows past ~310 GB)
 #   NOLIDAR=1  no lidar (radio-only test)
 #   EXPECT_PCI (default 630: the cell the tablet must be on, checked over adb)
@@ -79,7 +80,8 @@ else mkdir -p $LD; echo "lidar: off (NOLIDAR=1)"; fi
 if [ -n "$RX2" ]; then
   prev2=$(rx2 "cat ~/isac_data/.rec4_new")
   R2PID=$(rx2 "GAIN=$GAIN2 ANT=$ANT2 ${REC_CONT2:+REC_CONT=$REC_CONT2} setsid nohup $HERE/rec_try.sh $CAP 1 3 $NAME > /dev/null 2>&1 < /dev/null & echo \$!")
-  [ -n "$R2PID" ] && echo "radio 2: starting on $RX2 (rec_try pid $R2PID, log ~/isac_data/rec_try_$NAME.log there)" || echo "radio 2: COULD NOT START on $RX2"
+  [ -n "$R2PID" ] && echo "radio 2: starting on $RX2 (rec_try pid $R2PID, log ~/isac_data/rec_try_$NAME.log there)" ||
+    { kill $LP 2>/dev/null; say "ERROR: could not start receiver 2 on $RX2: nothing recorded"; exit 1; }
 fi
 ok=0
 for try in 1 2 3; do
@@ -98,8 +100,8 @@ for try in 1 2 3; do
 done
 [ $ok = 1 ] || { kill $LP 2>/dev/null; stop_rx2; say "STOP: radio 1 did not start in 3 tries, nothing recorded"; exit 1; }
 t1=$(date +%s); echo "radio 1: streaming ($D)"
-# wait for receiver 2 to stream (its file growing); give up when waiting longer would cut the walk by more than 30 s,
-# and go on with receiver 1 alone
+# wait for receiver 2 to stream (its file growing); give up when waiting longer would cut the walk by more than 30 s:
+# then everything stops with an error
 t2=""
 if [ -n "$RX2" ] && [ -n "$R2PID" ]; then
   s0=0; while [ $(date +%s) -lt $((t1 + MARGIN + 30)) ]; do
@@ -109,7 +111,8 @@ if [ -n "$RX2" ] && [ -n "$R2PID" ]; then
     [ "$s" -gt 0 ] && [ "$s0" -gt 0 ] && [ "$s" -gt "$s0" ] && { t2=$(date +%s); echo "radio 2: streaming on $RX2 ($D2)"; break; }
     s0=$s; sleep 2
   done
-  [ -z "$t2" ] && { say "WARNING: receiver 2 ($RX2) is NOT recording: this run has receiver 1 only (Ctrl-C to abort)"; D2=""; }
+  if [ -z "$t2" ]; then kill $RP $LP 2>/dev/null; for p in $(pgrep -x "rec_direct.*"); do sudo -n kill -INT $p; done; stop_rx2
+    say "ERROR: receiver 2 ($RX2) is not streaming (see ~/isac_data/rec_try_$NAME.log there): everything stopped, run again"; exit 1; fi
 fi
 # the walk must end before the first capture does: captures end CAP s after their start
 tend=$((t1 + CAP)); [ -n "$t2" ] && [ $((t2 + CAP)) -lt $tend ] && tend=$((t2 + CAP))
