@@ -11,7 +11,7 @@ S=$(dirname "$(readlink -f "$0")"); NR=$(cd "$S/../.." && pwd); G=$HOME/GIOVANNI
 ok() { echo "OK    $*"; }; fix() { echo "FIX   $*"; }; fail() { echo "FAIL  $*"; }
 PKGS="python3-numpy python3-scipy python3-matplotlib python3-sympy python3-munkres python3-gps python3-lz4 python3-lxml
       python3-tornado python3-bs4 python3-yaml"
-miss=$(for p in $PKGS; do dpkg-query -W -f='${Status}' $p 2>/dev/null | grep -q "ok installed" || echo $p; done)
+miss=$(for p in $PKGS; do dpkg-query -W -f='${Status}' $p 2>/dev/null | grep -q "ok installed" || echo $p; done | tr "\n" " ")
 if [ -n "$miss" ]; then sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y $miss >/dev/null 2>&1 && fix "installed $miss" || fail "apt install $miss"; else ok "python packages"; fi
 if [ -d $G ]; then
   [ -x $G/.venv/bin/python ] && ok "GIOVANNI venv" || { python3 -m venv --without-pip --system-site-packages $G/.venv && fix "created $G/.venv"; }
@@ -25,10 +25,10 @@ R=$S/rec_direct
 if [ ! -x $R/rec_direct ] || [ $R/rec_direct.cpp -nt $R/rec_direct ]; then
   g++ -O2 -std=c++17 -o $R/rec_direct $R/rec_direct.cpp -luhd -lpthread && fix "built rec_direct" || fail "rec_direct build"
 else ok "rec_direct built"; fi
-B=$NR/build/nrscope/src/nrscope
-if [ -x $B ]; then
-  newer=$(cd $NR && git ls-files -z lib nrscope/src nrscope/hdr 2>/dev/null | xargs -0 -r find 2>/dev/null -newer $B -type f | head -3)
-  [ -z "$newer" ] && ok "nrscope build up to date" || fail "nrscope build older than the sources ($newer...): cd $NR/build && make -j\$(nproc) nrscope sensing_offline"
-else fail "nrscope not built ($B)"; fi
-[ -x $NR/build/nrscope/src/tests/sensing_offline ] && ok "sensing_offline built" || fail "sensing_offline not built: cd $NR/build && make -j\$(nproc) sensing_offline"
+# NR-Scope binaries: make -n lists what a build would redo (compiles or links) = the binary is older than its sources
+for t in nrscope sensing_offline; do
+  if [ ! -d $NR/build ]; then fail "NR-Scope not configured ($NR/build)"; break; fi
+  n=$(cd $NR/build && make -n $t 2>/dev/null | grep -cE "Building CXX|Linking CXX")
+  [ "$n" = 0 ] && ok "$t build up to date" || fail "$t older than its sources ($n steps): cd $NR/build && make -j\$(nproc) $t"
+done
 echo "host $(hostname): NR-Scope $(git -C $NR rev-parse --short HEAD) $(git -C $NR status -s | grep -q . && echo '(uncommitted changes)'), GIOVANNI $(git -C $G rev-parse --short HEAD 2>/dev/null)"
