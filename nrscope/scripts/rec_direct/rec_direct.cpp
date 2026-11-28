@@ -120,6 +120,9 @@ int main(int argc, char** argv)
     sa.channels = chans;
     auto rx = usrp->get_rx_stream(sa);
     usrp->set_time_now(uhd::time_spec_t(0.0));
+    // wall clock (system time, PTP/NTP-disciplined) at the moment the radio clock was zeroed: the stream start in wall time
+    // is wall_set + t0_radio (meta t0_wall_utc_s), so recordings can be aligned with the lidar without fitting an offset
+    const double wall_set = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     uhd::set_thread_priority_safe(1.0, true);
 
@@ -236,9 +239,9 @@ int main(int argc, char** argv)
     const char* su = getenv("SUDO_UID"); const char* sg = getenv("SUDO_GID");
     FILE* m = fopen((dir + "/meta.txt").c_str(), "w");
     fprintf(m, "center_hz %.0f\nrate_sps %.0f\ngain_db %.1f\nantenna %s\nchannels %s\nformat sc16 interleaved I/Q, one file per channel iq_ch<c>.sc16, one streamer (sample-aligned)\n"
-               "samples_per_channel %llu\nrequested %llu\nt0_radio_s %.9f\noverflows %llu\nseq_errors %llu\ngaps %llu\ngap_samples_zero_filled %llu\n"
+               "samples_per_channel %llu\nrequested %llu\nt0_radio_s %.9f\nt0_wall_utc_s %.6f\noverflows %llu\nseq_errors %llu\ngaps %llu\ngap_samples_zero_filled %llu\n"
                "ring_full_samples_dropped %llu\nwrite_error %d\n",
-        freq, rate, gain, ant.c_str(), chs.c_str(), (unsigned long long)idx, (unsigned long long)total, t0.get_real_secs(),
+        freq, rate, gain, ant.c_str(), chs.c_str(), (unsigned long long)idx, (unsigned long long)total, t0.get_real_secs(), wall_set + t0.get_real_secs(),
         (unsigned long long)n_ovf, (unsigned long long)n_seq, (unsigned long long)n_gap, (unsigned long long)gap_samps,
         (unsigned long long)ring_full_samps, write_err.load());
     fclose(m);
