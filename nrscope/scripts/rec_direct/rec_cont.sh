@@ -23,17 +23,8 @@ need=$(python3 -c "print(int($SECS*4*122.88e6*4/1e9*1.05)+20)")
 free=$(df -BG --output=avail $HOME/isac_data | tail -1 | tr -dc 0-9)
 [ $free -ge $need ] || die "need ${need} GB free on $(df --output=target $HOME/isac_data | tail -1), have ${free} GB"
 
-IF=${TETHER_IF:-}
-if [ -z "$IF" ]; then
-  for d in /sys/class/net/*; do
-    drv=$(basename "$(readlink -f $d/device/driver 2>/dev/null)" 2>/dev/null)
-    case "$drv" in rndis_host|cdc_ncm|cdc_ether) IF=$(basename $d);; esac
-  done
-fi
-if [ $NODL = 0 ]; then
-  [ -n "$IF" ] || die "no tablet tether interface found (plug the tablet, enable USB tethering, or set TETHER_IF / NODL=1)"
-  ip -4 addr show dev $IF | grep -q inet || die "tether $IF has no IPv4 address yet"
-fi
+IF=""
+if [ $NODL = 0 ]; then IF=$($HERE/tablet_dl.sh check) || die "$IF"; fi   # the tablet's USB tether (tablet_dl.sh)
 
 out=$HOME/isac_data/$(date -u +%Y%m%d_%H%M%S)_sunrise_632_4ch_cont_tabletdl_iq; mkdir -p $out
 echo $out > $HOME/isac_data/.rec4_new
@@ -41,13 +32,7 @@ L=$out/dl_rate.log; : > $L
 pids=()
 if [ $NODL = 0 ]; then
   T=$((${SECS%.*}+60))
-  for u in https://speedtest.init7.net/10GB.dd https://speedtest.init7.net/10GB.dd https://speedtest.init7.net/10GB.dd \
-           https://nbg1-speed.hetzner.com/10GB.bin https://nbg1-speed.hetzner.com/10GB.bin https://ash-speed.hetzner.com/10GB.bin; do
-    timeout $T curl -s --interface $IF -o /dev/null "$u" & pids+=($!)
-  done
-  ( p=$(cat /sys/class/net/$IF/statistics/rx_bytes)
-    for i in $(seq $T); do sleep 1; n=$(cat /sys/class/net/$IF/statistics/rx_bytes)
-      echo "$(date +%T.%3N) $(( (n-p)*8/1000000 )) Mbps" >> $L; p=$n; [ -e $out/STOP ] && break; done; echo DONE >> $L ) & pids+=($!)
+  TETHER_IF=$IF $HERE/tablet_dl.sh run $T $L $out/STOP & pids+=($!)
   sleep 6
 fi
 

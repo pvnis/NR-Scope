@@ -8,6 +8,9 @@
 #   env as rec_cont.sh: NODL=1 (no tablet download), ANT (default RX1), GAIN (default 39)
 #   RX2        second receiver's host (default sens9; RX2= records with sens8 alone); ANT2 / GAIN2 (default ANT / GAIN)
 #              if RX2 is set and does not stream, the whole run stops with an error (no single-receiver fallback)
+#   DL_HOST    the host whose USB tether is the tablet (default: this host). Another host (e.g. sens9): the tablet checks
+#              and the download run there over ssh, this host records without downloading; the download starts once
+#              every receiver streams, and its rate log is copied into this host's IQ folder (dl_rate.log)
 #   MARGIN     extra capture seconds on each receiver (default 30; walk + margin <= ~150 s: the NVMe slows past ~310 GB)
 #   NOLIDAR=1  no lidar (radio-only test)
 #   EXPECT_PCI (default 630: the cell the tablet must be on, checked over adb)
@@ -21,12 +24,15 @@ RX2=${RX2-sens9}; ANT2=${ANT2:-$ANT}; GAIN2=${GAIN2:-$GAIN}; NOLIDAR=${NOLIDAR:-
 G=$HOME/GIOVANNI; SESSION=${SESSION:-$(cd $G/real && ls -t */session.json | head -1 | cut -d/ -f1)}
 LD=$G/real/$SESSION/lidar_$NAME; LP=""; RP=""; R2PID=""; D2=""
 SSH2="ssh -o BatchMode=yes -o ConnectTimeout=5 $RX2"
+DL_HOST=${DL_HOST:-}; [ "$DL_HOST" = "$(hostname)" ] && DL_HOST=""; DLPID=""; DLLOG=""; DLSTOP=""
+dlx() { if [ -n "$DL_HOST" ]; then timeout 30 ssh -o BatchMode=yes -o ConnectTimeout=5 $DL_HOST "$@" 2>/dev/null; else bash -c "$*"; fi; }
+stop_dl() { [ -n "$DLPID" ] && dlx "touch $DLSTOP; sleep 2; kill $DLPID 2>/dev/null"; DLPID=""; }
 say() { echo; echo "==================== $* ===================="; echo; }
 rx2() { timeout 15 $SSH2 "$@" 2>/dev/null; }
 stop_rx2() { [ -n "$RX2" ] && [ -n "$R2PID" ] &&   # rec_direct first (it closes its files), then the process group of rec_try (setsid)
   rx2 "for p in \$(pgrep -x rec_direct); do sudo -n kill -INT \$p; done; sleep 2; kill -- -$R2PID 2>/dev/null"; }
 stop_all() { [ -n "$RP" ] && kill $RP 2>/dev/null; [ -n "$LP" ] && kill $LP 2>/dev/null
-  for p in $(pgrep -x "rec_direct.*"); do sudo -n kill -INT $p; done; stop_rx2; say "STOPPED (Ctrl-C)"; exit 1; }
+  for p in $(pgrep -x "rec_direct.*"); do sudo -n kill -INT $p; done; stop_rx2; stop_dl; say "STOPPED (Ctrl-C)"; exit 1; }
 trap stop_all INT TERM
 trap "rm -f $HOME/isac_data/.pause_decode" EXIT   # the decode resumes when this recording ends
 [ -e "$LD" ] && { echo "$LD exists: choose another name"; exit 1; }
@@ -51,13 +57,15 @@ if pgrep -f "[r]ec_pipe.sh decode" >/dev/null; then
 fi
 pgrep -x "rec_direct.*" >/dev/null && { echo "rec_direct already running"; exit 1; }
 pgrep -x nrscope >/dev/null && { echo "nrscope is running"; exit 1; }
-tablet_cell() {   # the tablet's serving cell (adb, read-only): "NR PCI 630" / "LTE PCI 64" / "unknown"
-  adb shell dumpsys telephony.registry 2>/dev/null | grep -o "CellInfo\(Nr\|Lte\):{ *mRegistered=YES[^}]*mPci *= *[0-9]*" | head -1 |
+tablet_cell() {   # the tablet's serving cell (adb on DL_HOST, read-only): "NR PCI 630" / "LTE PCI 64" / "unknown"
+  dlx "adb shell dumpsys telephony.registry" 2>/dev/null | grep -o "CellInfo\(Nr\|Lte\):{ *mRegistered=YES[^}]*mPci *= *[0-9]*" | head -1 |
     sed -E 's/CellInfo(Nr|Lte).*mPci *= *([0-9]+)/\1 PCI \2/; s/^Nr/NR/; s/^Lte/LTE/' | grep . || echo "unknown"
 }
 if [ $NODL = 0 ]; then
+  m=$(dlx "$HERE/tablet_dl.sh check") || { echo "${m:-tablet tether check failed on ${DL_HOST:-this host}}"; exit 1; }
+  echo "tablet: USB tether $m on ${DL_HOST:-$(hostname)}"
   TAB=$(tablet_cell); echo "tablet serving cell: $TAB"
-  MODE=$(adb shell cmd phone get-allowed-network-types-for-users 2>/dev/null | tr -d "\r" | head -1); echo "tablet allowed network types: ${MODE:-unknown}"
+  MODE=$(dlx "adb shell cmd phone get-allowed-network-types-for-users" 2>/dev/null | tr -d "\r" | head -1); echo "tablet allowed network types: ${MODE:-unknown}"
   if [ "$MODE" != "NR" ]; then
     read -r -p "the tablet is not in NR-only mode (${MODE:-unknown}): it may fall back to LTE; record anyway? [y/N] " ans; [ "$ans" = y ] || { echo "not recording"; exit 1; }
   fi
@@ -87,7 +95,7 @@ ok=0
 for try in 1 2 3; do
   prev=$(cat $HOME/isac_data/.rec4_new 2>/dev/null)
   echo "radio 1: starting the IQ capture (try $try)"
-  (exec $REC_CONT > /tmp/rec_scene_iq.log 2>&1) & RP=$!
+  (NODL=$([ -n "$DL_HOST" ] && echo 1 || echo $NODL) exec $REC_CONT > /tmp/rec_scene_iq.log 2>&1) & RP=$!   # tablet elsewhere: no download here
   D=""; for i in $(seq 30); do sleep 1; n=$(cat $HOME/isac_data/.rec4_new 2>/dev/null); [ "$n" != "$prev" ] && { D=$n; break; }; done
   s0=0; for i in $(seq 45); do sleep 1
     kill -0 $RP 2>/dev/null || break
@@ -114,12 +122,21 @@ if [ -n "$RX2" ] && [ -n "$R2PID" ]; then
   if [ -z "$t2" ]; then kill $RP $LP 2>/dev/null; for p in $(pgrep -x "rec_direct.*"); do sudo -n kill -INT $p; done; stop_rx2
     say "ERROR: receiver 2 ($RX2) is not streaming (see ~/isac_data/rec_try_$NAME.log there): everything stopped, run again"; exit 1; fi
 fi
+# the tablet on another host: start its download now (every receiver streams), check it flows
+if [ -n "$DL_HOST" ] && [ $NODL = 0 ]; then
+  DLLOG="~/isac_data/dl_$NAME.log"; DLSTOP="~/isac_data/dl_$NAME.stop"
+  DLPID=$(dlx "rm -f $DLSTOP; setsid nohup $HERE/tablet_dl.sh run $((CAP + 30)) $DLLOG $DLSTOP > /dev/null 2>&1 < /dev/null & echo \$!")
+  sleep 5; r=$(dlx "tail -1 $DLLOG" | awk '{print $2}')
+  echo "tablet download on $DL_HOST: ${r:-?} Mbps"
+  [ "${r:-0}" -gt 1 ] 2>/dev/null || say "WARNING: the tablet download on $DL_HOST is not flowing (${r:-?} Mbps): Ctrl-C to abort"
+fi
 # the walk must end before the first capture does: captures end CAP s after their start
 tend=$((t1 + CAP)); [ -n "$t2" ] && [ $((t2 + CAP)) -lt $tend ] && tend=$((t2 + CAP))
 now=$(date +%s); W=$WALK; [ $((now + W)) -gt $tend ] && W=$((tend - now))
 if [ $W -lt 20 ]; then kill $RP $LP 2>/dev/null; for p in $(pgrep -x "rec_direct.*"); do sudo -n kill -INT $p; done; stop_rx2
   say "STOP: only ${W} s of common recording left (the receivers started too far apart): run again"; exit 1; fi
-{ echo "rx1 $(hostname) $D"; [ -n "$D2" ] && echo "rx2 $RX2 $D2"; echo "walk_start_unix $now"; echo "walk_s $W"; } > $LD/receivers.txt
+{ echo "rx1 $(hostname) $D"; [ -n "$D2" ] && echo "rx2 $RX2 $D2"; echo "walk_start_unix $now"; echo "walk_s $W"
+  echo "tablet_download $([ $NODL = 0 ] && echo ${DL_HOST:-$(hostname)} || echo none)"; } > $LD/receivers.txt
 say "GO  --  start moving now  (${W} s)"
 t0=$(date +%s)
 while :; do sleep 1; e=$(( $(date +%s) - t0 )); [ $e -ge $W ] && break
@@ -127,6 +144,10 @@ while :; do sleep 1; e=$(( $(date +%s) - t0 )); [ $e -ge $W ] && break
 done
 say "STOP  --  stop moving"
 echo "captures finishing (their margin)..."; wait $RP 2>/dev/null
+if [ -n "$DL_HOST" ] && [ -n "$DLPID" ]; then stop_dl
+  dlx "cat $DLLOG" > $D/dl_rate.log; echo "tablet download on $DL_HOST: mean $(awk '/Mbps/{s+=$2;n++} END{if(n) printf "%.0f", s/n}' $D/dl_rate.log) Mbps (log: $D/dl_rate.log)"
+  dlx "rm -f $DLLOG $DLSTOP"
+fi
 grep -E "^gaps |^overflows " $D/meta.txt 2>/dev/null; ls $D | grep -E "^(DONE|WARN|FAILED)$"
 echo "IQ 1: $(hostname) $D"
 if [ -n "$D2" ]; then
