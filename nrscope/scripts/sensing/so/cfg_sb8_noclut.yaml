@@ -14,7 +14,7 @@ usrp_setting_0:
   rx_center_freq: 3750000000
   band_list: [78]
   pci: 632
-  rf_args: "rx_file=/home/sens/field/20261105_135044_sunrise_632_4ch_bursts_tabletdl_iq/b8/replay_ch0/iq.fifo,base_srate=122.88e6"
+  rf_args: "rx_file=/home/sens/isac_data/20261105_135044_sunrise_632_4ch_bursts_tabletdl_iq/b8/replay_ch0/iq.fifo,base_srate=122.88e6"
   
   # Fixed so the amplitude stays constant from slot to slot, as sensing needs.
   # Chosen with agc: true under a full 600 Mb/s downlink, where the AGC settled
@@ -107,11 +107,10 @@ sensing:
                            # sets it: 0.145 s at 0.30 m/s, about 640 symbols here).
                            # At most NR_SENSING_HISTORY_DEPTH.
   allow_gaps: true
-  min_snapshots: 16
-  align_search_bins: 0
+  align_search_bins: 8
   max_speed: 10
-  clutter_removal: true
-  clutter_kernel: true
+  clutter_removal: false
+  clutter_kernel: false
   antenna_avg: true 
   layer_avg: false
   random_drop: false
@@ -140,7 +139,7 @@ sensing:
   avg_vcomp: false
   # A jump of more than this between a stream's snapshots means samples were lost upstream:
   # the filling window is dropped and the next starts after the gap (0 = off).
-  map_max_gap_ms: 30
+  map_max_gap_ms: 20
 
   # Bistatic geometry, for localising the AoA cells and their velocity (nr_ue_localize.h).
   # Positions in metres in any planar frame (x east, y north suggested), as [x, y].
@@ -202,9 +201,9 @@ calibration:
 
 golden_sniffer:
   dump_rnti: "all"
-  dump_file: "/home/sens/field/20261105_135044_sunrise_632_4ch_bursts_tabletdl_iq/b8/replay_ch0/ue_dmrs.bin"
+  dump_file: "/home/sens/isac_data/20261105_135044_sunrise_632_4ch_bursts_tabletdl_iq/b8/replay_ch0/ue_dmrs.bin"
   survey_pci: 783
-  survey_csv: "/home/sens/field/20261105_135044_sunrise_632_4ch_bursts_tabletdl_iq/b8/replay_ch0/survey.csv"
+  survey_csv: "/home/sens/isac_data/20261105_135044_sunrise_632_4ch_bursts_tabletdl_iq/b8/replay_ch0/survey.csv"
   enable: true
   max_duration: 3          # commercial CORESETs can be 3 symbols
   css_sizes: auto
@@ -221,4 +220,4 @@ golden_sniffer:
   discover_in_track: true
   searcher_idle: true
   soft: true
-  csv: "/home/sens/field/20261105_135044_sunrise_632_4ch_bursts_tabletdl_iq/b8/replay_ch0/golden_sniffer.csv"
+  csv: "/home/sens/isac_data/20261105_135044_sunrise_632_4ch_bursts_tabletdl_iq/b8/replay_ch0/golden_sniffer.csv"

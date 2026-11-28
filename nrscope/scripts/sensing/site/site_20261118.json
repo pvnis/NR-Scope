@@ -1,0 +1,6 @@
+{"date": "2026-11-18",
+ "cart": {"lat": 46.518433, "lon": 6.562134, "height_m": 40, "where": "BC 4th floor", "source": "by hand (gpsd had no fix)"},
+ "gnb": {"lat": 46.52124, "lon": 6.57254, "height_m": 25, "where": "Cubotron roof"},
+ "array_heading_deg_true": 100.0, "heading_source": "compass, by hand",
+ "gnb_from_cart": {"horizontal_m": 855, "bearing_deg_true": 68.6, "relative_to_boresight_deg": -31.4, "elevation_deg": -1.0},
+ "targets": "none (recording test)", "uplink": "tablet USB tether"}

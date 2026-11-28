@@ -1,0 +1,12 @@
+{
+ "recording": {
+  "chunks": "/mnt/mydrive/field/20261127_125927_sunrise_632_4ch_cont_tabletdl_iq_chunks",
+  "lidar": "/home/sens/GIOVANNI/real/cubotron_27_11/lidar_carry2",
+  "session": "/home/sens/GIOVANNI/real/cubotron_27_11/session.json",
+  "cart": "/home/sens/GIOVANNI/real/cart.json",
+  "t_rec": "2026-11-27 12:59:47.233",
+  "iq_offset_s": 0.0,
+  "truth": "",
+  "site": "cubotron_epfl"
+ }
+}

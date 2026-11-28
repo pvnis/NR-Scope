@@ -1,0 +1,13 @@
+{
+ "recording": {
+  "chunks": "/mnt/mydrive/field/20261124_140050_sunrise_632_4ch_cont_tabletdl_iq_chunks",
+  "lidar": "/home/sens/GIOVANNI/real/cubotron_24_11/lidar_24_11_one_target_back_and_forth",
+  "session": "/home/sens/GIOVANNI/real/cubotron_24_11/session.json",
+  "t_rec": "2026-11-24 14:00:56.515",
+  "iq_offset_s": 20.2
+ },
+ "streams": {
+  "trs": {"est": "/mnt/mydrive/field/est_walk1/real_trs20"},
+  "dmrs": {"est": "/mnt/mydrive/field/est_walk1/real_dmrs"}
+ }
+}
