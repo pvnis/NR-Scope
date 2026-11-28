@@ -1,14 +1,15 @@
 #!/bin/bash
 # rec_pipe.sh <store|decode|grid> <IQ capture dir> <lidar recording dir>: the processing of one recording (Real page buttons).
 #   store   move the IQ to /mnt/mydrive/field (move_rec.sh: copy, verify, link) and copy the lidar folder next to it
-#   decode  (env PCI, default 630) replay the IQ (already on the drive) through NR-Scope + GoldenSniffer: 2.45 s chunks every 2.5 s x 4 channels
+#   decode  (env PCI, default 630) replay the IQ (on the drive or still on the NVMe) through NR-Scope + GoldenSniffer: 2.45 s chunks every 2.5 s x 4 channels
 #           (replay_chunk.sh, as the 18 Nov usage map), at most 4 at once; waits while ~/isac_data/.pause_decode exists
-#           (rec_scene.sh sets it during a recording). Out: /mnt/mydrive/field/<IQ name>_chunks/b<k>/replay_blind_ch<c>
+#           (rec_scene.sh sets it during a recording). Out: <CHUNKS_ROOT>/<IQ name>_chunks/b<k>/replay_blind_ch<c>,
+#           CHUNKS_ROOT default /mnt/mydrive/field where that drive exists (sens8), else ~/isac_data (sens9)
 #   grid    the slot x PRB occupancy from the decoded records (gui/rec_grid.py) -> <lidar dir>/grid/
 # Status: <lidar dir>/pipe_<step>.log (lines "PROGRESS done total", last line DONE or FAILED <why>); runs detached.
 set -u
 HERE=$(dirname "$(readlink -f "$0")")   # this script's folder: NR-Scope/nrscope/scripts/rec_direct
-K=$1; IQ=$2; LD=$3; ST=$LD/pipe_$K.log; F=$HOME/isac_data
+K=$1; IQ=$2; LD=$3; mkdir -p "$LD"; ST=$LD/pipe_$K.log; F=$HOME/isac_data
 say() { echo "$(date +%T) $*" >> $ST; }
 fail() { say "FAILED $*"; exit 1; }
 : > $ST; say "start $K $IQ"
@@ -26,10 +27,11 @@ store)
   ionice -c3 nice rsync -a --exclude 'pipe_*.log' "$LD/" "$D/" || fail "lidar copy to $D"
   say "lidar copied to $D"; say DONE ;;
 decode)
-  R=$(readlink -f "$IQ"); case $R in /mnt/mydrive/*) ;; *) fail "store the IQ on the drive first";; esac
+  R=$(readlink -f "$IQ"); [ -e "$R/meta.txt" ] || fail "no IQ capture at $IQ"
+  CR=${CHUNKS_ROOT:-$([ -d /mnt/mydrive/field ] && echo /mnt/mydrive/field || echo $HOME/isac_data)}
   dur=$(python3 -c "
 import re; m=open('$R/meta.txt').read(); n=int(re.search(r'samples_per_channel (\d+)',m).group(1)); r=float(re.search(r'rate_sps (\d+)',m).group(1)); print(n/r)")
-  CH=/mnt/mydrive/field/$(basename "$R")_chunks; mkdir -p $CH
+  CH=$CR/$(basename "$R")_chunks; mkdir -p $CH
   export PCI=${PCI:-630} NIDS=${NIDS:-}; say "PCI $PCI, extra DM-RS IDs [${NIDS}]"
   jobs_=(); for k in $(python3 -c "import math; print(' '.join(str(k) for k in range(int(math.floor(($dur - 0.5) / 2.5)) + 1)))"); do
     t0=$(python3 -c "print($k * 2.5)"); d=$(python3 -c "print(round(min(2.45, $dur - $k * 2.5 - 0.02), 3))")
