@@ -1,0 +1,160 @@
+{
+ "name": "epfl_bc_wide",
+ "lat": 46.518973,
+ "lon": 6.561933,
+ "radius": 300.0,
+ "level_m": 3.5,
+ "heights": {},
+ "materials": {},
+ "facades": {
+  "BC": {
+   "window_w": 2.0,
+   "window_h": 2.3,
+   "sill_m": 0.9,
+   "spacing_m": 2.2,
+   "level_m": 3.5,
+   "glass": "glass"
+  },
+  "INN": {
+   "window_w": 2.0,
+   "window_h": 2.3,
+   "sill_m": 0.9,
+   "spacing_m": 2.2,
+   "level_m": 3.5,
+   "glass": "glass"
+  },
+  "MXH": {
+   "window_w": 2.0,
+   "window_h": 2.3,
+   "sill_m": 0.9,
+   "spacing_m": 2.2,
+   "level_m": 3.5,
+   "glass": "glass"
+  }
+ },
+ "defaults": {
+  "tree_height_m": 8.0,
+  "tree_crown_m": 5.0,
+  "tree_row_spacing_m": 8.0,
+  "artwork_height_m": 3.0,
+  "artwork_width_m": 1.5,
+  "wall_height_m": 1.5,
+  "lamp_height_m": 5.0
+ },
+ "foliage": {
+  "relative_permittivity": 2.0,
+  "conductivity": 0.001,
+  "thickness": 2.0,
+  "scattering_coefficient": 0.4
+ },
+ "features": [
+  {
+   "tags": {
+    "man_made": "planter"
+   },
+   "height": 0.8,
+   "width": 1.5,
+   "material": "concrete"
+  },
+  {
+   "tags": {
+    "amenity": "bench"
+   },
+   "height": 0.5,
+   "width": 0.6,
+   "material": "wood"
+  }
+ ],
+ "custom": [
+  {
+   "name": "BC roof overhang",
+   "footprint": [
+    [
+     -20.6,
+     -16.4
+    ],
+    [
+     19.6,
+     -16.0
+    ],
+    [
+     19.6,
+     -10.0
+    ],
+    [
+     -20.6,
+     -10.0
+    ]
+   ],
+   "bottom_m": 16.5,
+   "top_m": 17.5,
+   "material": "concrete"
+  },
+  {
+   "name": "roof w1567595005",
+   "footprint": [
+    [
+     11.51,
+     -0.38
+    ],
+    [
+     11.54,
+     -4.49
+    ],
+    [
+     13.9,
+     -4.45
+    ],
+    [
+     60.75,
+     -3.93
+    ],
+    [
+     61.53,
+     -3.96
+    ],
+    [
+     61.48,
+     0.23
+    ],
+    [
+     25.99,
+     -0.19
+    ],
+    [
+     23.64,
+     -0.23
+    ],
+    [
+     21.16,
+     -0.24
+    ],
+    [
+     18.87,
+     -0.3
+    ],
+    [
+     16.35,
+     -0.33
+    ],
+    [
+     14.0,
+     -0.35
+    ]
+   ],
+   "bottom_m": 2.5,
+   "top_m": 2.8,
+   "material": "concrete"
+  }
+ ],
+ "remove": [
+  "w1567595005"
+ ],
+ "ground_altitude_m": 395.8,
+ "aerial_bounds": [
+  -342.2818719115812,
+  -344.50937818069957,
+  341.48452315209323,
+  339.2573126879675
+ ]
+}

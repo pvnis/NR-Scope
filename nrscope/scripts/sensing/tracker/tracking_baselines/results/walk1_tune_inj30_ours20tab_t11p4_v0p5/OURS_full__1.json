@@ -1,0 +1,89 @@
+{
+ "run": "walk1_tune_inj30_ours20tab_t11p4_v0p5",
+ "tracker": "OURS_full",
+ "setup": "1",
+ "params": {},
+ "classes": [
+  "person",
+  "person",
+  "person",
+  "person",
+  "person"
+ ],
+ "per_class": [
+  {
+   "cls": "person",
+   "targets": 3,
+   "maps": 218,
+   "coverage": 0.3532110091743119,
+   "switches": 2,
+   "fair_coverage": 0.3532110091743119,
+   "fair_switches": 2,
+   "alone_share": 1.0,
+   "track_median_m": 0.4633729818308383,
+   "pos_median_m": 5.786702841816959
+  }
+ ],
+ "position": {
+  "cars": [
+   {
+    "car": 1,
+    "maps_in_view": 144,
+    "n_pos": 39,
+    "pos_rmse_m": 6.796287223606125,
+    "pos_median_m": 5.4997112723100665,
+    "coverage": 0.4791666666666667,
+    "group_coverage": 0.5208333333333334,
+    "switches": 2,
+    "alone_share": 1.0,
+    "fair_coverage": 0.4791666666666667,
+    "fair_switches": 2,
+    "track_rmse_m": 0.5588676159033827,
+    "track_median_m": 0.24330478246405887
+   },
+   {
+    "car": 2,
+    "maps_in_view": 9,
+    "n_pos": 0,
+    "pos_rmse_m": null,
+    "pos_median_m": null,
+    "coverage": 0.0,
+    "group_coverage": 0.0,
+    "switches": 0,
+    "alone_share": 1.0,
+    "fair_coverage": 0.0,
+    "fair_switches": 0,
+    "track_rmse_m": null,
+    "track_median_m": null
+   },
+   {
+    "car": 3,
+    "maps_in_view": 65,
+    "n_pos": 29,
+    "pos_rmse_m": 6.942061977761929,
+    "pos_median_m": 6.422499549647612,
+    "coverage": 0.12307692307692308,
+    "group_coverage": 0.13846153846153847,
+    "switches": 0,
+    "alone_share": 1.0,
+    "fair_coverage": 0.12307692307692308,
+    "fair_switches": 0,
+    "track_rmse_m": 1.1315815254048405,
+    "track_median_m": 0.9509086850433957
+   }
+  ],
+  "n_tracks": 94,
+  "false_tracks": 94,
+  "duplicates": 6,
+  "gospa_m": 9.82552205048038,
+  "gospa_loc_m": 0.06074674450866596,
+  "missed_per_map": 0.14655172413793102,
+  "false_per_map": 7.700431034482759,
+  "params": {
+   "gate_m": 6.0,
+   "hit_m": 3.0,
+   "gospa_c_m": 5.0
+  }
+ },
+ "seconds": 11.4
+}

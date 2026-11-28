@@ -1,0 +1,89 @@
+{
+ "run": "walk1_tune_real_ours20tab_t14_v0p3",
+ "tracker": "OURS_full",
+ "setup": "1",
+ "params": {},
+ "classes": [
+  "person",
+  "person",
+  "person",
+  "person",
+  "person"
+ ],
+ "per_class": [
+  {
+   "cls": "person",
+   "targets": 3,
+   "maps": 511,
+   "coverage": 0.0,
+   "switches": 0,
+   "fair_coverage": 0.0,
+   "fair_switches": 0,
+   "alone_share": 0.9921722113502935,
+   "track_median_m": null,
+   "pos_median_m": 4.614166242990627
+  }
+ ],
+ "position": {
+  "cars": [
+   {
+    "car": 1,
+    "maps_in_view": 279,
+    "n_pos": 2,
+    "pos_rmse_m": 5.768800906905396,
+    "pos_median_m": 4.614166242990627,
+    "coverage": 0.0,
+    "group_coverage": 0.0,
+    "switches": 0,
+    "alone_share": 0.992831541218638,
+    "fair_coverage": 0.0,
+    "fair_switches": 0,
+    "track_rmse_m": null,
+    "track_median_m": null
+   },
+   {
+    "car": 2,
+    "maps_in_view": 24,
+    "n_pos": 0,
+    "pos_rmse_m": null,
+    "pos_median_m": null,
+    "coverage": 0.0,
+    "group_coverage": 0.0,
+    "switches": 0,
+    "alone_share": 1.0,
+    "fair_coverage": 0.0,
+    "fair_switches": 0,
+    "track_rmse_m": null,
+    "track_median_m": null
+   },
+   {
+    "car": 3,
+    "maps_in_view": 208,
+    "n_pos": 0,
+    "pos_rmse_m": null,
+    "pos_median_m": null,
+    "coverage": 0.0,
+    "group_coverage": 0.0,
+    "switches": 0,
+    "alone_share": 0.9903846153846154,
+    "fair_coverage": 0.0,
+    "fair_switches": 0,
+    "track_rmse_m": null,
+    "track_median_m": null
+   }
+  ],
+  "n_tracks": 19,
+  "false_tracks": 19,
+  "duplicates": 0,
+  "gospa_m": 4.912310465612422,
+  "gospa_loc_m": 0.0,
+  "missed_per_map": 0.9376146788990826,
+  "false_per_map": 1.4403669724770642,
+  "params": {
+   "gate_m": 6.0,
+   "hit_m": 3.0,
+   "gospa_c_m": 5.0
+  }
+ },
+ "seconds": 2.1
+}

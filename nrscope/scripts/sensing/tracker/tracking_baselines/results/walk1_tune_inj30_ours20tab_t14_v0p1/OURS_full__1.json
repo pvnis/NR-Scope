@@ -1,0 +1,89 @@
+{
+ "run": "walk1_tune_inj30_ours20tab_t14_v0p1",
+ "tracker": "OURS_full",
+ "setup": "1",
+ "params": {},
+ "classes": [
+  "person",
+  "person",
+  "person",
+  "person",
+  "person"
+ ],
+ "per_class": [
+  {
+   "cls": "person",
+   "targets": 3,
+   "maps": 251,
+   "coverage": 0.450199203187251,
+   "switches": 7,
+   "fair_coverage": 0.50199203187251,
+   "fair_switches": 6,
+   "alone_share": 0.896414342629482,
+   "track_median_m": 1.3612183583476458,
+   "pos_median_m": 3.395191833900297
+  }
+ ],
+ "position": {
+  "cars": [
+   {
+    "car": 1,
+    "maps_in_view": 141,
+    "n_pos": 106,
+    "pos_rmse_m": 2.6676668964420385,
+    "pos_median_m": 0.7042498365145186,
+    "coverage": 0.7730496453900709,
+    "group_coverage": 0.7943262411347518,
+    "switches": 7,
+    "alone_share": 0.9078014184397163,
+    "fair_coverage": 0.7872340425531915,
+    "fair_switches": 6,
+    "track_rmse_m": 1.2387357226667284,
+    "track_median_m": 0.7470352485567185
+   },
+   {
+    "car": 2,
+    "maps_in_view": 9,
+    "n_pos": 0,
+    "pos_rmse_m": null,
+    "pos_median_m": null,
+    "coverage": 0.0,
+    "group_coverage": 0.0,
+    "switches": 0,
+    "alone_share": 1.0,
+    "fair_coverage": 0.0,
+    "fair_switches": 0,
+    "track_rmse_m": null,
+    "track_median_m": null
+   },
+   {
+    "car": 3,
+    "maps_in_view": 101,
+    "n_pos": 26,
+    "pos_rmse_m": 7.293471878742992,
+    "pos_median_m": 7.1518534342111355,
+    "coverage": 0.039603960396039604,
+    "group_coverage": 0.04950495049504951,
+    "switches": 0,
+    "alone_share": 0.8712871287128713,
+    "fair_coverage": 0.1485148514851485,
+    "fair_switches": 0,
+    "track_rmse_m": 2.2227789842448007,
+    "track_median_m": 2.2186423036993363
+   }
+  ],
+  "n_tracks": 13,
+  "false_tracks": 12,
+  "duplicates": 1,
+  "gospa_m": 7.006970317889176,
+  "gospa_loc_m": 0.8888162979005259,
+  "missed_per_map": 0.7724550898203593,
+  "false_per_map": 3.095808383233533,
+  "params": {
+   "gate_m": 6.0,
+   "hit_m": 3.0,
+   "gospa_c_m": 5.0
+  }
+ },
+ "seconds": 2.1
+}

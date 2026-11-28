@@ -1,0 +1,89 @@
+{
+ "run": "walk1_rec_inj30_ours20",
+ "tracker": "OURS_full",
+ "setup": "1",
+ "params": {},
+ "classes": [
+  "person",
+  "person",
+  "person",
+  "person",
+  "person"
+ ],
+ "per_class": [
+  {
+   "cls": "person",
+   "targets": 3,
+   "maps": 502,
+   "coverage": 0.32270916334661354,
+   "switches": 5,
+   "fair_coverage": 0.32270916334661354,
+   "fair_switches": 5,
+   "alone_share": 0.9960159362549801,
+   "track_median_m": 1.6203085960178456,
+   "pos_median_m": 2.9557368207638186
+  }
+ ],
+ "position": {
+  "cars": [
+   {
+    "car": 1,
+    "maps_in_view": 273,
+    "n_pos": 179,
+    "pos_rmse_m": 4.233358932412405,
+    "pos_median_m": 1.170227099184345,
+    "coverage": 0.5860805860805861,
+    "group_coverage": 0.5934065934065934,
+    "switches": 4,
+    "alone_share": 0.9963369963369964,
+    "fair_coverage": 0.5860805860805861,
+    "fair_switches": 4,
+    "track_rmse_m": 1.239243798178165,
+    "track_median_m": 0.8038739442077513
+   },
+   {
+    "car": 2,
+    "maps_in_view": 24,
+    "n_pos": 0,
+    "pos_rmse_m": null,
+    "pos_median_m": null,
+    "coverage": 0.0,
+    "group_coverage": 0.0,
+    "switches": 0,
+    "alone_share": 1.0,
+    "fair_coverage": 0.0,
+    "fair_switches": 0,
+    "track_rmse_m": null,
+    "track_median_m": null
+   },
+   {
+    "car": 3,
+    "maps_in_view": 205,
+    "n_pos": 39,
+    "pos_rmse_m": 6.2188896797374245,
+    "pos_median_m": 5.333513181696484,
+    "coverage": 0.00975609756097561,
+    "group_coverage": 0.03902439024390244,
+    "switches": 1,
+    "alone_share": 0.9951219512195122,
+    "fair_coverage": 0.00975609756097561,
+    "fair_switches": 1,
+    "track_rmse_m": 2.7098390779332044,
+    "track_median_m": 2.707560595745435
+   }
+  ],
+  "n_tracks": 43,
+  "false_tracks": 43,
+  "duplicates": 3,
+  "gospa_m": 8.542305616010625,
+  "gospa_loc_m": 0.43414586640727315,
+  "missed_per_map": 0.5948434622467772,
+  "false_per_map": 5.27255985267035,
+  "params": {
+   "gate_m": 6.0,
+   "hit_m": 3.0,
+   "gospa_c_m": 5.0
+  }
+ },
+ "seconds": 6.8
+}

@@ -1,0 +1,105 @@
+{
+ "run": "walk1_tune_s45_ours20tab_t14_v0p3",
+ "tracker": "OURS_full",
+ "setup": "1",
+ "params": {},
+ "classes": [
+  "person",
+  "person",
+  "person",
+  "person",
+  "person",
+  "person"
+ ],
+ "per_class": [
+  {
+   "cls": "person",
+   "targets": 4,
+   "maps": 725,
+   "coverage": 0.12137931034482759,
+   "switches": 4,
+   "fair_coverage": 0.12137931034482759,
+   "fair_switches": 4,
+   "alone_share": 0.9558620689655173,
+   "track_median_m": 1.2638872278016122,
+   "pos_median_m": 4.794577337750326
+  }
+ ],
+ "position": {
+  "cars": [
+   {
+    "car": 1,
+    "maps_in_view": 212,
+    "n_pos": 99,
+    "pos_rmse_m": 4.897157611869341,
+    "pos_median_m": 3.1750483351514154,
+    "coverage": 0.3915094339622642,
+    "group_coverage": 0.4056603773584906,
+    "switches": 4,
+    "alone_share": 0.9339622641509434,
+    "fair_coverage": 0.3915094339622642,
+    "fair_switches": 4,
+    "track_rmse_m": 1.8347353867896652,
+    "track_median_m": 1.645470166081403
+   },
+   {
+    "car": 2,
+    "maps_in_view": 280,
+    "n_pos": 4,
+    "pos_rmse_m": 5.02964158938553,
+    "pos_median_m": 4.1604998635834125,
+    "coverage": 0.0,
+    "group_coverage": 0.0,
+    "switches": 0,
+    "alone_share": 0.9892857142857143,
+    "fair_coverage": 0.0,
+    "fair_switches": 0,
+    "track_rmse_m": null,
+    "track_median_m": null
+   },
+   {
+    "car": 3,
+    "maps_in_view": 24,
+    "n_pos": 0,
+    "pos_rmse_m": null,
+    "pos_median_m": null,
+    "coverage": 0.0,
+    "group_coverage": 0.0,
+    "switches": 0,
+    "alone_share": 1.0,
+    "fair_coverage": 0.0,
+    "fair_switches": 0,
+    "track_rmse_m": null,
+    "track_median_m": null
+   },
+   {
+    "car": 4,
+    "maps_in_view": 209,
+    "n_pos": 32,
+    "pos_rmse_m": 7.6609052584013835,
+    "pos_median_m": 7.2868349517106346,
+    "coverage": 0.023923444976076555,
+    "group_coverage": 0.0430622009569378,
+    "switches": 0,
+    "alone_share": 0.9282296650717703,
+    "fair_coverage": 0.023923444976076555,
+    "fair_switches": 0,
+    "track_rmse_m": 1.5682120681274723,
+    "track_median_m": 0.8768270224651736
+   }
+  ],
+  "n_tracks": 21,
+  "false_tracks": 21,
+  "duplicates": 2,
+  "gospa_m": 6.242980836330927,
+  "gospa_loc_m": 0.4654010793717789,
+  "missed_per_map": 1.1192660550458715,
+  "false_per_map": 2.1321100917431193,
+  "params": {
+   "gate_m": 6.0,
+   "hit_m": 3.0,
+   "gospa_c_m": 5.0
+  }
+ },
+ "seconds": 2.4
+}

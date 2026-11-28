@@ -1,0 +1,89 @@
+{
+ "run": "walk1_tune_inj30_ours20tab_t8_v0p1",
+ "tracker": "OURS_full",
+ "setup": "1",
+ "params": {},
+ "classes": [
+  "person",
+  "person",
+  "person",
+  "person",
+  "person"
+ ],
+ "per_class": [
+  {
+   "cls": "person",
+   "targets": 3,
+   "maps": 251,
+   "coverage": 0.35856573705179284,
+   "switches": 1,
+   "fair_coverage": 0.40239043824701193,
+   "fair_switches": 1,
+   "alone_share": 0.896414342629482,
+   "track_median_m": 1.4210847940801103,
+   "pos_median_m": 3.395191833900297
+  }
+ ],
+ "position": {
+  "cars": [
+   {
+    "car": 1,
+    "maps_in_view": 141,
+    "n_pos": 106,
+    "pos_rmse_m": 2.6676668964420385,
+    "pos_median_m": 0.7042498365145186,
+    "coverage": 0.6099290780141844,
+    "group_coverage": 0.6312056737588653,
+    "switches": 1,
+    "alone_share": 0.9078014184397163,
+    "fair_coverage": 0.624113475177305,
+    "fair_switches": 1,
+    "track_rmse_m": 1.3189168386162735,
+    "track_median_m": 0.8560122884508736
+   },
+   {
+    "car": 2,
+    "maps_in_view": 9,
+    "n_pos": 0,
+    "pos_rmse_m": null,
+    "pos_median_m": null,
+    "coverage": 0.0,
+    "group_coverage": 0.0,
+    "switches": 0,
+    "alone_share": 1.0,
+    "fair_coverage": 0.0,
+    "fair_switches": 0,
+    "track_rmse_m": null,
+    "track_median_m": null
+   },
+   {
+    "car": 3,
+    "maps_in_view": 101,
+    "n_pos": 26,
+    "pos_rmse_m": 7.293471878742992,
+    "pos_median_m": 7.1518534342111355,
+    "coverage": 0.039603960396039604,
+    "group_coverage": 0.04950495049504951,
+    "switches": 0,
+    "alone_share": 0.8712871287128713,
+    "fair_coverage": 0.12871287128712872,
+    "fair_switches": 0,
+    "track_rmse_m": 2.2184836483685944,
+    "track_median_m": 2.2099483910476585
+   }
+  ],
+  "n_tracks": 10,
+  "false_tracks": 9,
+  "duplicates": 1,
+  "gospa_m": 7.116078769483743,
+  "gospa_loc_m": 0.7317748384889922,
+  "missed_per_map": 0.9281437125748503,
+  "false_per_map": 3.1077844311377247,
+  "params": {
+   "gate_m": 6.0,
+   "hit_m": 3.0,
+   "gospa_c_m": 5.0
+  }
+ },
+ "seconds": 2.2
+}

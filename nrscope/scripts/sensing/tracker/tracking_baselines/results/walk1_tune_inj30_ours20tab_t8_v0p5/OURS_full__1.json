@@ -1,0 +1,89 @@
+{
+ "run": "walk1_tune_inj30_ours20tab_t8_v0p5",
+ "tracker": "OURS_full",
+ "setup": "1",
+ "params": {},
+ "classes": [
+  "person",
+  "person",
+  "person",
+  "person",
+  "person"
+ ],
+ "per_class": [
+  {
+   "cls": "person",
+   "targets": 3,
+   "maps": 218,
+   "coverage": 0.15137614678899083,
+   "switches": 6,
+   "fair_coverage": 0.15137614678899083,
+   "fair_switches": 6,
+   "alone_share": 1.0,
+   "track_median_m": 1.5093054252896116,
+   "pos_median_m": 6.083166625114171
+  }
+ ],
+ "position": {
+  "cars": [
+   {
+    "car": 1,
+    "maps_in_view": 144,
+    "n_pos": 39,
+    "pos_rmse_m": 6.796287223606125,
+    "pos_median_m": 5.4997112723100665,
+    "coverage": 0.1736111111111111,
+    "group_coverage": 0.1736111111111111,
+    "switches": 5,
+    "alone_share": 1.0,
+    "fair_coverage": 0.1736111111111111,
+    "fair_switches": 5,
+    "track_rmse_m": 1.6881205953677387,
+    "track_median_m": 1.5616074298740155
+   },
+   {
+    "car": 2,
+    "maps_in_view": 9,
+    "n_pos": 0,
+    "pos_rmse_m": null,
+    "pos_median_m": null,
+    "coverage": 0.0,
+    "group_coverage": 0.0,
+    "switches": 0,
+    "alone_share": 1.0,
+    "fair_coverage": 0.0,
+    "fair_switches": 0,
+    "track_rmse_m": null,
+    "track_median_m": null
+   },
+   {
+    "car": 3,
+    "maps_in_view": 65,
+    "n_pos": 31,
+    "pos_rmse_m": 7.189361590600438,
+    "pos_median_m": 7.375744637480186,
+    "coverage": 0.12307692307692308,
+    "group_coverage": 0.13846153846153847,
+    "switches": 1,
+    "alone_share": 1.0,
+    "fair_coverage": 0.12307692307692308,
+    "fair_switches": 1,
+    "track_rmse_m": 1.4857002742611718,
+    "track_median_m": 1.393436368979548
+   }
+  ],
+  "n_tracks": 121,
+  "false_tracks": 120,
+  "duplicates": 5,
+  "gospa_m": 11.282244789456362,
+  "gospa_loc_m": 0.07338111759205973,
+  "missed_per_map": 0.1939655172413793,
+  "false_per_map": 10.145474137931034,
+  "params": {
+   "gate_m": 6.0,
+   "hit_m": 3.0,
+   "gospa_c_m": 5.0
+  }
+ },
+ "seconds": 17.5
+}

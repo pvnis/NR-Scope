@@ -1,0 +1,105 @@
+{
+ "name": "cubotron_epfl",
+ "lat": 46.520522,
+ "lon": 6.573365,
+ "radius": 200.0,
+ "level_m": 3.5,
+ "heights": {},
+ "materials": {},
+ "facades": {},
+ "defaults": {
+  "tree_height_m": 8.0,
+  "tree_crown_m": 5.0,
+  "tree_row_spacing_m": 8.0,
+  "artwork_height_m": 3.0,
+  "artwork_width_m": 1.5,
+  "wall_height_m": 1.5,
+  "lamp_height_m": 5.0
+ },
+ "foliage": {
+  "relative_permittivity": 2.0,
+  "conductivity": 0.001,
+  "thickness": 2.0,
+  "scattering_coefficient": 0.4
+ },
+ "features": [
+  {
+   "tags": {
+    "man_made": "planter"
+   },
+   "height": 0.8,
+   "width": 1.5,
+   "material": "concrete"
+  },
+  {
+   "tags": {
+    "amenity": "bench"
+   },
+   "height": 0.5,
+   "width": 0.6,
+   "material": "wood"
+  }
+ ],
+ "custom": [],
+ "remove": [],
+ "ground_altitude_m": 401.1,
+ "aerial_bounds": [
+  -271.21801489396256,
+  -253.9469331062931,
+  254.74114048952305,
+  272.0114363503612
+ ],
+ "extra_trees": [
+  {
+   "name": "tree group under the rx2-gNB line (from the aerial photo)",
+   "at": [
+    [
+     -7.5,
+     -9.5
+    ],
+    [
+     -7.5,
+     -4.5
+    ],
+    [
+     -2.5,
+     -19.5
+    ],
+    [
+     -2.5,
+     -9.5
+    ],
+    [
+     2.5,
+     -29.5
+    ],
+    [
+     2.5,
+     -24.5
+    ],
+    [
+     2.5,
+     -19.5
+    ],
+    [
+     7.5,
+     -34.5
+    ],
+    [
+     7.5,
+     -24.5
+    ],
+    [
+     17.5,
+     -49.5
+    ],
+    [
+     17.5,
+     -44.5
+    ]
+   ],
+   "height_m": 12,
+   "crown_m": 6
+  }
+ ]
+}

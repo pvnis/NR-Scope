@@ -1,0 +1,40 @@
+<scene version="2.1.0">
+	<bsdf type="itu-radio-material" id="concrete">
+		<string name="type" value="concrete"/>
+		<float name="thickness" value="0.3"/>
+	</bsdf>
+	<bsdf type="radio-material" id="foliage">
+		<float name="relative_permittivity" value="2.0"/>
+		<float name="conductivity" value="0.001"/>
+		<float name="thickness" value="2.0"/>
+		<float name="scattering_coefficient" value="0.4"/>
+	</bsdf>
+	<bsdf type="itu-radio-material" id="medium_dry_ground">
+		<string name="type" value="medium_dry_ground"/>
+		<float name="thickness" value="1.0"/>
+	</bsdf>
+	<bsdf type="itu-radio-material" id="wood">
+		<string name="type" value="wood"/>
+		<float name="thickness" value="0.05"/>
+	</bsdf>
+	<shape type="ply" id="mesh-ground">
+		<string name="filename" value="meshes/ground.ply"/>
+		<boolean name="face_normals" value="true"/>
+		<ref id="medium_dry_ground" name="bsdf"/>
+	</shape>
+	<shape type="ply" id="mesh-m_concrete">
+		<string name="filename" value="meshes/m_concrete.ply"/>
+		<boolean name="face_normals" value="true"/>
+		<ref id="concrete" name="bsdf"/>
+	</shape>
+	<shape type="ply" id="mesh-m_wood">
+		<string name="filename" value="meshes/m_wood.ply"/>
+		<boolean name="face_normals" value="true"/>
+		<ref id="wood" name="bsdf"/>
+	</shape>
+	<shape type="ply" id="mesh-m_foliage">
+		<string name="filename" value="meshes/m_foliage.ply"/>
+		<boolean name="face_normals" value="true"/>
+		<ref id="foliage" name="bsdf"/>
+	</shape>
+</scene>
