@@ -8,7 +8,8 @@
 #   env as rec_cont.sh: NODL=1 (no tablet download), ANT (default RX1), GAIN (default 39)
 #   RX2        second receiver's host (default sens9; RX2= records with sens8 alone); ANT2 / GAIN2 (default ANT / GAIN)
 #              if RX2 is set and does not stream, the whole run stops with an error (no single-receiver fallback)
-#   DL_HOST    the host whose USB tether is the tablet (default: this host). Another host (e.g. sens9): the tablet checks
+#   DL_HOST    the host whose USB tether is the tablet (default: found over adb, the host where TABLET_MODEL is plugged:
+#              this one or RX2; no tablet found -> no recording; the download never goes through another phone). Another host (e.g. sens9): the tablet checks
 #              and the download run there over ssh, this host records without downloading; the download starts once
 #              every receiver streams, and its rate log is copied into this host's IQ folder (dl_rate.log)
 #   MARGIN     extra capture seconds on each receiver (default 30; walk + margin <= ~150 s: the NVMe slows past ~310 GB)
@@ -24,6 +25,15 @@ RX2=${RX2-sens9}; ANT2=${ANT2:-$ANT}; GAIN2=${GAIN2:-$GAIN}; NOLIDAR=${NOLIDAR:-
 G=$HOME/GIOVANNI; SESSION=${SESSION:-$(cd $G/real && ls -t */session.json | head -1 | cut -d/ -f1)}
 LD=$G/real/$SESSION/lidar_$NAME; LP=""; RP=""; R2PID=""; D2=""
 SSH2="ssh -n -o BatchMode=yes -o ConnectTimeout=5 $RX2"   # -n: never read this terminal (the prompts)
+TABLET_MODEL=${TABLET_MODEL:-SM_X216B}   # the tablet (Galaxy Tab A9+), as adb lists it
+if [ "${NODL:-0}" = 0 ]; then   # where is the tablet: the given DL_HOST must have it, else look here, then on RX2
+  has_tab() { if [ -z "$1" ] || [ "$1" = "$(hostname)" ]; then adb devices -l 2>/dev/null; else timeout 20 ssh -n -o BatchMode=yes -o ConnectTimeout=5 $1 "adb devices -l" 2>/dev/null; fi | grep -q "device .*model:$TABLET_MODEL"; }
+  if [ -n "${DL_HOST:-}" ]; then has_tab "$DL_HOST" || { echo "the tablet ($TABLET_MODEL) is not on $DL_HOST over adb (USB debugging allowed?): not recording"; exit 1; }
+  elif has_tab ""; then DL_HOST=$(hostname)
+  elif [ -n "$RX2" ] && has_tab "$RX2"; then DL_HOST=$RX2
+  else echo "the tablet ($TABLET_MODEL) is on neither $(hostname)${RX2:+ nor $RX2} over adb (plugged in, USB debugging allowed?): not recording (NODL=1 to record without it)"; exit 1; fi
+  echo "tablet $TABLET_MODEL found on $DL_HOST: the download goes through it"
+fi
 DL_HOST=${DL_HOST:-}; [ "$DL_HOST" = "$(hostname)" ] && DL_HOST=""; DLPID=""; DLLOG=""; DLSTOP=""
 dlx() { if [ -n "$DL_HOST" ]; then timeout 30 ssh -n -o BatchMode=yes -o ConnectTimeout=5 $DL_HOST "$@" 2>/dev/null; else bash -c "$*"; fi; }
 stop_dl() { [ -n "$DLPID" ] && dlx "touch $DLSTOP; sleep 2; kill $DLPID 2>/dev/null"; DLPID=""; }
